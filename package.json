@@ -22,11 +22,27 @@
     "test:e2e": "vitest run --config ./vitest.config.e2e.ts"
   },
   "dependencies": {
+    "@apollo/server": "^5.5.1",
+    "@as-integrations/express5": "^1.1.2",
+    "@escape.tech/graphql-armor": "^3.2.0",
+    "@nestjs/apollo": "^14.0.0",
     "@nestjs/common": "^12.0.1",
+    "@nestjs/config": "^12.0.0",
     "@nestjs/core": "^12.0.1",
+    "@nestjs/graphql": "^14.0.0",
     "@nestjs/platform-express": "^12.0.1",
+    "@nestjs/throttler": "^6.5.0",
+    "@nestjs/typeorm": "^12.0.1",
+    "class-transformer": "^0.5.1",
+    "class-validator": "^0.15.1",
+    "dayjs": "^1.11.23",
+    "decimal.js": "^10.6.0",
+    "graphql": "^16.14.2",
+    "helmet": "^8.3.0",
+    "pg": "^8.23.0",
     "reflect-metadata": "^0.2.2",
-    "rxjs": "^7.8.1"
+    "rxjs": "^7.8.1",
+    "typeorm": "^1.1.1"
   },
   "overrides": {
     "multer": "2.3.0"

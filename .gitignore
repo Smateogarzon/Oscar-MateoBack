@@ -18,6 +18,9 @@ npm-debug.log*
 # testing / coverage
 /coverage
 
+# auto-generated graphql schema (code-first)
+/src/schema.gql
+
 # IDE
 .vscode/*
 !.vscode/settings.json
