@@ -1,0 +1,34 @@
+# compiled output
+/dist
+/build
+
+# dependencies
+/node_modules
+
+# env files
+.env
+.env.*
+!.env.example
+
+# logs
+logs
+*.log
+npm-debug.log*
+
+# testing / coverage
+/coverage
+
+# IDE
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+.idea
+
+# OS
+.DS_Store
+Thumbs.db
+
+# npm cache/lock artifacts
+.npm
