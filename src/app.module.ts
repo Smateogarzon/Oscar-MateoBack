@@ -1,3 +1,5 @@
+import './config/decimal.config.js';
+import { envValidationSchema } from './config/env.validation.js';
 import { join } from 'node:path';
 import { Module } from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
@@ -17,7 +19,10 @@ const { validationRules, plugins } = new ApolloArmor().protect();
 
 @Module({
   imports: [
-    ConfigModule.forRoot({ isGlobal: true }),
+    ConfigModule.forRoot({
+      isGlobal: true,
+      validationSchema: envValidationSchema,
+    }),
     ThrottlerModule.forRoot([
       {
         ttl: seconds(60),
