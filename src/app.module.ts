@@ -1,8 +1,10 @@
 import './config/decimal.config.js';
 import { envValidationSchema } from './config/env.validation.js';
+import { DecimalScalar } from './common/scalars/decimal.scalar.js';
 import { join } from 'node:path';
+import { LoggerModule } from 'nestjs-pino';
 import { Module } from '@nestjs/common';
-import { APP_GUARD } from '@nestjs/core';
+import { APP_FILTER, APP_GUARD } from '@nestjs/core';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { ApolloDriver, type ApolloDriverConfig } from '@nestjs/apollo';
 import { GraphQLModule } from '@nestjs/graphql';
@@ -14,6 +16,7 @@ import { AppController } from './app.controller.js';
 import { AppService } from './app.service.js';
 import { AppResolver } from './app.resolver.js';
 import { GqlThrottlerGuard } from './common/guards/gql-throttler.guard.js';
+import { GqlAllExceptionsFilter } from './common/filters/gql-all-exceptions.filter.js';
 
 const { validationRules, plugins } = new ApolloArmor().protect();
 
@@ -22,6 +25,19 @@ const { validationRules, plugins } = new ApolloArmor().protect();
     ConfigModule.forRoot({
       isGlobal: true,
       validationSchema: envValidationSchema,
+    }),
+    LoggerModule.forRootAsync({
+      inject: [ConfigService],
+      useFactory: (config: ConfigService) => ({
+        pinoHttp: {
+          level: config.get('NODE_ENV') === 'production' ? 'info' : 'debug',
+          transport:
+            config.get('NODE_ENV') === 'production'
+              ? undefined
+              : { target: 'pino-pretty', options: { colorize: true } },
+          redact: ['req.headers.authorization', 'req.headers.cookie'],
+        },
+      }),
     }),
     ThrottlerModule.forRoot([
       {
@@ -59,7 +75,9 @@ const { validationRules, plugins } = new ApolloArmor().protect();
   providers: [
     AppService,
     AppResolver,
+    DecimalScalar,
     { provide: APP_GUARD, useClass: GqlThrottlerGuard },
+    { provide: APP_FILTER, useClass: GqlAllExceptionsFilter },
   ],
 })
 export class AppModule {}
