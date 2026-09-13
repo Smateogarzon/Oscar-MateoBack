@@ -1,114 +1,123 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# ferreYepes — Backend
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+API GraphQL para ferreYepes, construida con NestJS.
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+## Stack
 
-## Description
+- **Runtime:** Node.js 22, TypeScript, módulos ESM
+- **API:** GraphQL code-first (`@nestjs/graphql` + Apollo Server 5)
+- **Base de datos:** PostgreSQL vía TypeORM
+- **Librerías de dominio:** `decimal.js` (cálculos con precisión exacta, ej. precios), `dayjs` (fechas)
+- **Testing:** Vitest
+- **Lint/format:** oxlint + Prettier
+- **Logging:** pino (estructurado, vía `nestjs-pino`)
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+## Requisitos
 
-## Project setup
+- Node.js 22+
+- Docker (para levantar Postgres localmente)
+
+## Puesta en marcha
+
+1. Instala dependencias:
+
+   ```bash
+   npm install --legacy-peer-deps
+   ```
+
+   > **Nota:** `--legacy-peer-deps` es necesario porque `@nestjs/throttler` todavía no actualiza su rango de `peerDependencies` para NestJS 12 (lanzado el 2026-08-27, muy reciente). Es un desfase de metadata, no una incompatibilidad real.
+
+2. Copia el archivo de variables de entorno y ajusta lo que necesites:
+
+   ```bash
+   cp .env.example .env
+   ```
+
+3. Levanta Postgres:
+
+   ```bash
+   docker compose up -d
+   ```
+
+4. Arranca el servidor en modo desarrollo:
+
+   ```bash
+   npm run start:dev
+   ```
+
+   El playground de GraphQL queda disponible en `http://localhost:3000/graphql` (solo en `development`; en `production` la introspección está desactivada).
+
+## Variables de entorno
+
+Todas se validan al arrancar con Joi (`src/config/env.validation.ts`) — si falta alguna requerida, la app no arranca.
+
+| Variable | Descripción | Default |
+|---|---|---|
+| `NODE_ENV` | `development` \| `production` \| `test` | `development` |
+| `PORT` | Puerto HTTP del servidor | `3000` |
+| `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME` | Conexión a Postgres | — (requeridas) |
+| `DB_POOL_MAX` | Máximo de conexiones simultáneas en el pool | `10` |
+| `DB_POOL_IDLE_TIMEOUT_MS` | Tiempo de inactividad antes de cerrar una conexión del pool | `10000` |
+| `DB_POOL_CONNECTION_TIMEOUT_MS` | Tiempo máximo de espera por una conexión libre antes de fallar | `5000` |
+| `CORS_ORIGIN` | Orígenes permitidos (separados por coma) | — (requerida) |
+
+## Scripts disponibles
+
+| Comando | Qué hace |
+|---|---|
+| `npm run start:dev` | Servidor en modo watch |
+| `npm run build` | Compila a `dist/` |
+| `npm run start:prod` | Corre el build compilado |
+| `npm run lint` | oxlint sobre `src/` y `test/` |
+| `npm test` | Corre los tests con Vitest |
+| `npm run test:watch` | Tests en modo watch |
+| `npm run test:cov` | Tests con reporte de cobertura |
+| `npm run migration:generate -- accion_entidad` | Genera una migración de TypeORM (ver convención abajo) |
+| `npm run migration:run` | Aplica las migraciones pendientes |
+| `npm run migration:revert` | Revierte la última migración aplicada |
+
+## Migraciones
+
+Convención de nombres: `V{version}_{accion}_{entidad}.ts` (ej. `V0.1_add_orders.ts`), versionado incremental decimal (0.1 → 0.9 → 1.0 → 1.1...). El script `scripts/generate-migration.mjs` genera la migración con TypeORM (que internamente sigue usando su propio timestamp para el orden de ejecución) y renombra el archivo a esta convención.
+
+Toda entidad se declara como `algo.entity.ts` bajo `src/`, ya que `src/data-source.ts` las descubre con ese patrón.
 
 ```bash
-$ npm install
+npm run migration:generate -- add_products
+npm run migration:run
 ```
 
-## Compile and run the project
+## Estructura del proyecto
 
-```bash
-# development
-$ npm run start
-
-# watch mode
-$ npm run start:dev
-
-# production mode
-$ npm run start:prod
+```
+src/
+  config/           # setup transversal que se ejecuta una vez (no son providers inyectables)
+    decimal.config.ts   # precisión/redondeo global de decimal.js
+    env.validation.ts   # schema de Joi para las variables de entorno
+  common/           # piezas reutilizables e inyectables
+    entities/base.entity.ts        # columnas base de TypeORM (id uuid, createdAt, updatedAt)
+    dto/base.object-type.ts        # equivalente en GraphQL de BaseEntity
+    scalars/decimal.scalar.ts      # scalar GraphQL para Decimal
+    guards/gql-throttler.guard.ts  # rate limiting adaptado a contexto GraphQL
+    filters/gql-all-exceptions.filter.ts  # errores consistentes, sin filtrar detalles internos en prod
+  data-source.ts    # DataSource para el CLI de TypeORM (separado del runtime de Nest)
+  migrations/       # migraciones generadas
 ```
 
-## Run tests
+**Convención importante:** una `@Entity()` de TypeORM nunca se expone directo como tipo de GraphQL. Cada entidad de dominio debe tener su contraparte `@ObjectType()` extendiendo `BaseObjectType`, para no acoplar el schema público al modelo de base de datos.
 
-```bash
-# unit tests
-$ npm run test
+## Seguridad
 
-# e2e tests
-$ npm run test:e2e
+- **Helmet** (headers HTTP), **CORS** restringido por whitelist de orígenes
+- **Rate limiting** (`@nestjs/throttler`, 100 req/min por IP)
+- **GraphQL Armor**: límites de profundidad, complejidad, alias y directivas de las queries
+- **Introspección** desactivada en producción
+- **`ValidationPipe`** global (`whitelist`, `forbidNonWhitelisted`, `transform`)
+- **`synchronize`** de TypeORM desactivado fuera de desarrollo (el schema se gestiona con migraciones)
+- Errores no controlados enmascarados en producción (ver `GqlAllExceptionsFilter`)
 
-# test coverage
-$ npm run test:cov
-```
+## Pendiente (a implementar durante el desarrollo de features)
 
-## Deployment
-
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
-
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
-
-```bash
-$ npm install -g @nestjs/mau
-$ mau deploy
-```
-
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
-
-## Observability
-
-In production applications, observability is essential for understanding how your system behaves, detecting issues early, and maintaining reliable performance.
-
-[NestJS Observe](https://observe.nestjs.com) automatically instruments your NestJS application, giving you deep visibility into your system with minimal setup:
-
-- **Distributed tracing:** Follow requests across services and understand how they flow through your system.
-- **Waterfall analysis:** Visualize request execution and identify slow operations, bottlenecks, and unexpected delays.
-- **Performance analysis:** Analyze application performance in real time and quickly pinpoint areas that need optimization.
-- **Metrics:** Track key application and infrastructure metrics to understand system health and performance trends.
-- **Logging:** Centralize and correlate logs with traces and other telemetry to make debugging easier.
-- **Error tracking:** Detect errors quickly and investigate their root causes with the surrounding context.
-- **SLA monitoring:** Track service-level objectives and identify when your application is approaching or exceeding defined thresholds.
-- **Alarms and alerts:** Set up alerts for critical errors, performance degradation, SLA violations, and other anomalies so your team can react quickly.
-
-## Resources
-
-Check out a few resources that may come in handy when working with NestJS:
-
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Auto-instrument your application with [NestJS Observer](https://observer.nestjs.com). Distributed tracing, metrics, and logging made easy. Error tracking and performance monitoring for your NestJS applications.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
-
-## Support
-
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
-
-## Stay in touch
-
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
-
-## License
-
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+- Health checks (`@nestjs/terminus`)
+- Dockerfile de la propia app (hoy Docker solo corre Postgres)
+- Autenticación/autorización (JWT + guards)

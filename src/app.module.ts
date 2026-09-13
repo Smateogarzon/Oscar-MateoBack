@@ -56,6 +56,13 @@ const { validationRules, plugins } = new ApolloArmor().protect();
         database: config.getOrThrow<string>('DB_NAME'),
         autoLoadEntities: true,
         synchronize: config.get('NODE_ENV') !== 'production',
+        extra: {
+          max: config.get<number>('DB_POOL_MAX'),
+          idleTimeoutMillis: config.get<number>('DB_POOL_IDLE_TIMEOUT_MS'),
+          connectionTimeoutMillis: config.get<number>(
+            'DB_POOL_CONNECTION_TIMEOUT_MS',
+          ),
+        },
       }),
     }),
     GraphQLModule.forRoot<ApolloDriverConfig>({
