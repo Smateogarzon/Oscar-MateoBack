@@ -55,7 +55,7 @@ const { validationRules, plugins } = new ApolloArmor().protect();
         password: config.getOrThrow<string>('DB_PASSWORD'),
         database: config.getOrThrow<string>('DB_NAME'),
         autoLoadEntities: true,
-        synchronize: config.get('NODE_ENV') !== 'production',
+        synchronize: false,
         extra: {
           max: config.get<number>('DB_POOL_MAX'),
           idleTimeoutMillis: config.get<number>('DB_POOL_IDLE_TIMEOUT_MS'),

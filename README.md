@@ -72,18 +72,21 @@ Todas se validan al arrancar con Joi (`src/config/env.validation.ts`) — si fal
 | `npm test` | Corre los tests con Vitest |
 | `npm run test:watch` | Tests en modo watch |
 | `npm run test:cov` | Tests con reporte de cobertura |
-| `npm run migration:generate -- accion_entidad` | Genera una migración de TypeORM (ver convención abajo) |
+| `npm run migration:generate` | Genera una migración de TypeORM, detectando solo el nombre (ver convención abajo) |
 | `npm run migration:run` | Aplica las migraciones pendientes |
 | `npm run migration:revert` | Revierte la última migración aplicada |
 
 ## Migraciones
 
-Convención de nombres: `V{version}_{accion}_{entidad}.ts` (ej. `V0.1_add_orders.ts`), versionado incremental decimal (0.1 → 0.9 → 1.0 → 1.1...). El script `scripts/generate-migration.mjs` genera la migración con TypeORM (que internamente sigue usando su propio timestamp para el orden de ejecución) y renombra el archivo a esta convención.
+Convención de nombres: `V{version}_{accion}_{entidad}.ts` (ej. `V0.1_add_company.ts`), versionado incremental decimal (0.1 → 0.9 → 1.0 → 1.1...). No hace falta pasar ningún argumento — el script `src/scripts/generate-migration.mjs`:
 
-Toda entidad se declara como `algo.entity.ts` bajo `src/`, ya que `src/data-source.ts` las descubre con ese patrón.
+1. Le pide a TypeORM que genere la migración (con un nombre interno temporal).
+2. Lee el SQL generado para detectar la acción (`add` si hay `CREATE TABLE`, `remove` si hay `DROP TABLE`, si no `update`) y qué tabla(s) tocó.
+3. Cruza esa tabla contra el `@Entity('...')` de tus archivos `*.entity.ts` para encontrar la carpeta del feature (ej. `src/graphql/company/entities/company.entity.ts` → `company`).
+4. Renombra el archivo a `V{version}_{accion}_{feature}.ts`.
 
 ```bash
-npm run migration:generate -- add_products
+npm run migration:generate
 npm run migration:run
 ```
 
