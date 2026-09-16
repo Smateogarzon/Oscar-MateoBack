@@ -1,4 +1,8 @@
-
+#!/usr/bin/env bash
+# Levanta la base de datos Postgres en Docker y aplica todas las migraciones.
+# Uso:
+#   ./scripts/db-setup.sh          -> levanta el contenedor (si ya existe, lo reutiliza) y corre migraciones pendientes
+#   ./scripts/db-setup.sh --reset  -> borra el volumen de datos, levanta un Postgres limpio y corre TODAS las migraciones desde cero
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
