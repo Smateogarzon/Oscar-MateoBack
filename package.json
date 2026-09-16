@@ -17,6 +17,7 @@
     "migration:generate": "node src/scripts/generate-migration.mjs",
     "migration:run": "typeorm-ts-node-esm migration:run -d ./src/data-source.ts",
     "migration:revert": "typeorm-ts-node-esm migration:revert -d ./src/data-source.ts",
+    "create:admin": "node --no-warnings=ExperimentalWarning --loader ts-node/esm src/scripts/create-admin.ts",
     "lint": "oxlint src/ test/",
     "test": "vitest run",
     "test:watch": "vitest",

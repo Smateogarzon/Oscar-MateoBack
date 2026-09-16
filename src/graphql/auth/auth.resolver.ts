@@ -1,5 +1,6 @@
-import { Mutation, Resolver, Args } from '@nestjs/graphql';
 import { UseGuards } from '@nestjs/common';
+import { Args, Mutation, Resolver } from '@nestjs/graphql';
+import { SkipMustChangePassword } from '../../common/decorators/skip-must-change-password.decorator.js';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard.js';
 import { AuthService } from './auth.service.js';
 import { AuthPayload } from './dto/auth-payload.object-type.js';
@@ -16,6 +17,7 @@ export class AuthResolver {
 
   @Mutation(() => Boolean)
   @UseGuards(JwtAuthGuard)
+  @SkipMustChangePassword()
   logout() {
     return this.authService.logout();
   }

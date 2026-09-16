@@ -1,4 +1,10 @@
-import { ConflictException, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  NotFoundException,
+  UnauthorizedException,
+} from '@nestjs/common';
+import bcrypt from 'bcryptjs';
 import { RecordStatus } from '../../common/enums/record-status.enum.js';
 import { UserService } from './user.service.js';
 
@@ -87,6 +93,64 @@ describe('UserService', () => {
       repo.findOneBy.mockResolvedValue(null);
 
       await expect(service.deactivate('missing')).rejects.toThrow(NotFoundException);
+    });
+  });
+
+  describe('changePassword', () => {
+    const currentPassword = 'clave-actual';
+    const documentNumber = '123456789';
+
+    async function storedUser() {
+      return {
+        id: '1',
+        documentNumber,
+        mustChangePassword: true,
+        passwordHash: await bcrypt.hash(currentPassword, 4),
+      };
+    }
+
+    it('rehashes the password and clears mustChangePassword', async () => {
+      const { service, repo } = createService();
+      const user = await storedUser();
+      repo.findOneBy.mockResolvedValue(user);
+
+      const result = await service.changePassword('1', {
+        currentPassword,
+        newPassword: 'una-clave-nueva',
+      });
+
+      expect(result.mustChangePassword).toBe(false);
+      expect(await bcrypt.compare('una-clave-nueva', result.passwordHash)).toBe(true);
+    });
+
+    it('rejects a wrong current password', async () => {
+      const { service, repo } = createService();
+      repo.findOneBy.mockResolvedValue(await storedUser());
+
+      await expect(
+        service.changePassword('1', {
+          currentPassword: 'equivocada',
+          newPassword: 'una-clave-nueva',
+        }),
+      ).rejects.toThrow(UnauthorizedException);
+    });
+
+    it('rejects reusing the document number as the new password', async () => {
+      const { service, repo } = createService();
+      repo.findOneBy.mockResolvedValue(await storedUser());
+
+      await expect(
+        service.changePassword('1', { currentPassword, newPassword: documentNumber }),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('rejects reusing the current password', async () => {
+      const { service, repo } = createService();
+      repo.findOneBy.mockResolvedValue(await storedUser());
+
+      await expect(
+        service.changePassword('1', { currentPassword, newPassword: currentPassword }),
+      ).rejects.toThrow(BadRequestException);
     });
   });
 });

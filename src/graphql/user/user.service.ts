@@ -1,8 +1,15 @@
-import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  Injectable,
+  NotFoundException,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import bcrypt from 'bcryptjs';
 import { DataSource, Repository } from 'typeorm';
 import { RecordStatus } from '../../common/enums/record-status.enum.js';
+import { ChangePasswordInput } from './dto/change-password.input.js';
 import { CreateUserInput } from './dto/create-user.input.js';
 import { UpdateUserInput } from './dto/update-user.input.js';
 import { User } from './entities/user.entity.js';
@@ -62,6 +69,32 @@ export class UserService {
   async deactivate(id: string): Promise<User> {
     const user = await this.findOne(id);
     user.status = RecordStatus.INACTIVE;
+    return this.dataSource.transaction((manager) => manager.getRepository(User).save(user));
+  }
+
+  // El usuario cambia su propia contraseña: el id viene del token, nunca de los argumentos.
+  async changePassword(id: string, input: ChangePasswordInput): Promise<User> {
+    const user = await this.findOne(id);
+
+    const currentMatches = await bcrypt.compare(input.currentPassword, user.passwordHash);
+    if (!currentMatches) {
+      throw new UnauthorizedException('La contraseña actual no es correcta');
+    }
+
+    if (input.newPassword === input.currentPassword) {
+      throw new BadRequestException('La nueva contraseña debe ser distinta a la actual');
+    }
+
+    // La contraseña inicial es la cédula: sin esto el usuario podría "cambiarla" por la misma.
+    if (user.documentNumber && input.newPassword === user.documentNumber) {
+      throw new BadRequestException(
+        'La nueva contraseña no puede ser tu número de documento',
+      );
+    }
+
+    user.passwordHash = await bcrypt.hash(input.newPassword, PASSWORD_SALT_ROUNDS);
+    user.mustChangePassword = false;
+
     return this.dataSource.transaction((manager) => manager.getRepository(User).save(user));
   }
 }
