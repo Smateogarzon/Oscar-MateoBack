@@ -27,6 +27,10 @@ export class UserService {
     return user;
   }
 
+  findByEmail(email: string): Promise<User | null> {
+    return this.userRepository.findOneBy({ email });
+  }
+
   // La contraseña inicial es la cédula (documentNumber); queda forzado el cambio en el primer login.
   async create(input: CreateUserInput): Promise<User> {
     return this.dataSource.transaction(async (manager) => {

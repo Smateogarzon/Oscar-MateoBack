@@ -17,8 +17,11 @@ import { AppService } from './app.service.js';
 import { AppResolver } from './app.resolver.js';
 import { GqlThrottlerGuard } from './common/guards/gql-throttler.guard.js';
 import { GqlAllExceptionsFilter } from './common/filters/gql-all-exceptions.filter.js';
+import { GraphqlLoggingPlugin } from './common/logging/graphql-logging.plugin.js';
+import { AuthModule } from './graphql/auth/auth.module.js';
 import { CompanyModule } from './graphql/company/company.module.js';
 import { LocationModule } from './graphql/location/location.module.js';
+import { PermissionModule } from './graphql/permission/permission.module.js';
 import { RoleModule } from './graphql/role/role.module.js';
 import { UserModule } from './graphql/user/user.module.js';
 
@@ -40,6 +43,7 @@ const { validationRules, plugins } = new ApolloArmor().protect();
               ? undefined
               : { target: 'pino-pretty', options: { colorize: true } },
           redact: ['req.headers.authorization', 'req.headers.cookie'],
+          autoLogging: false,
         },
       }),
     }),
@@ -81,8 +85,10 @@ const { validationRules, plugins } = new ApolloArmor().protect();
         res,
       }),
     }),
+    AuthModule,
     CompanyModule,
     LocationModule,
+    PermissionModule,
     RoleModule,
     UserModule,
   ],
@@ -91,6 +97,7 @@ const { validationRules, plugins } = new ApolloArmor().protect();
     AppService,
     AppResolver,
     DecimalScalar,
+    GraphqlLoggingPlugin,
     { provide: APP_GUARD, useClass: GqlThrottlerGuard },
     { provide: APP_FILTER, useClass: GqlAllExceptionsFilter },
   ],
