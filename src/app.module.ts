@@ -17,6 +17,10 @@ import { AppService } from './app.service.js';
 import { AppResolver } from './app.resolver.js';
 import { GqlThrottlerGuard } from './common/guards/gql-throttler.guard.js';
 import { GqlAllExceptionsFilter } from './common/filters/gql-all-exceptions.filter.js';
+import { CompanyModule } from './graphql/company/company.module.js';
+import { LocationModule } from './graphql/location/location.module.js';
+import { RoleModule } from './graphql/role/role.module.js';
+import { UserModule } from './graphql/user/user.module.js';
 
 const { validationRules, plugins } = new ApolloArmor().protect();
 
@@ -77,6 +81,10 @@ const { validationRules, plugins } = new ApolloArmor().protect();
         res,
       }),
     }),
+    CompanyModule,
+    LocationModule,
+    RoleModule,
+    UserModule,
   ],
   controllers: [AppController],
   providers: [

@@ -12,31 +12,31 @@ export class CompanyObjectType extends BaseObjectType {
   @Field()
   name: string;
 
-  @Field({ nullable: true })
+  @Field(() => String, { nullable: true })
   legalName: string | null;
 
   @Field()
   taxId: string;
 
-  @Field({ nullable: true })
+  @Field(() => String, { nullable: true })
   taxIdCheckDigit: string | null;
 
-  @Field({ nullable: true })
+  @Field(() => String, { nullable: true })
   address: string | null;
 
-  @Field({ nullable: true })
+  @Field(() => String, { nullable: true })
   city: string | null;
 
   @Field()
   countryCode: string;
 
-  @Field({ nullable: true })
+  @Field(() => String, { nullable: true })
   phone: string | null;
 
-  @Field({ nullable: true })
+  @Field(() => String, { nullable: true })
   email: string | null;
 
-  @Field({ nullable: true })
+  @Field(() => String, { nullable: true })
   logoUrl: string | null;
 
   @Field()

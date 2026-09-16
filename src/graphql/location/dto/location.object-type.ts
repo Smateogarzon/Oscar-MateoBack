@@ -21,16 +21,16 @@ export class LocationObjectType extends BaseObjectType {
   @Field(() => LocationType)
   type: LocationType;
 
-  @Field({ nullable: true })
+  @Field(() => String, { nullable: true })
   address: string | null;
 
-  @Field({ nullable: true })
+  @Field(() => String, { nullable: true })
   city: string | null;
 
-  @Field({ nullable: true })
+  @Field(() => String, { nullable: true })
   phone: string | null;
 
-  @Field({ nullable: true })
+  @Field(() => String, { nullable: true })
   email: string | null;
 
   @Field(() => RecordStatus)

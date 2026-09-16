@@ -20,7 +20,7 @@ export class PermissionObjectType extends BaseObjectType {
   @Field(() => PermissionModule)
   module: PermissionModule;
 
-  @Field({ nullable: true })
+  @Field(() => String, { nullable: true })
   description: string | null;
 
   @Field(() => RecordStatus)

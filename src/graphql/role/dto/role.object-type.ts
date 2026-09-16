@@ -17,7 +17,7 @@ export class RoleObjectType extends BaseObjectType {
   @Field()
   name: string;
 
-  @Field({ nullable: true })
+  @Field(() => String, { nullable: true })
   description: string | null;
 
   @Field(() => RoleScope)
