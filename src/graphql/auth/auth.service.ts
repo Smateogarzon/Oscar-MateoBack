@@ -2,7 +2,7 @@ import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { JwtService } from '@nestjs/jwt';
 import bcrypt from 'bcryptjs';
-import { In, Repository } from 'typeorm';
+import { DataSource, In, Repository } from 'typeorm';
 import { RecordStatus } from '../../common/enums/record-status.enum.js';
 import { Permission } from '../permission/entities/permission.entity.js';
 import { Role } from '../role/entities/role.entity.js';
@@ -35,6 +35,7 @@ export class AuthService {
     private readonly rolePermissionRepository: Repository<RolePermission>,
     @InjectRepository(UserCompanyRole)
     private readonly userCompanyRoleRepository: Repository<UserCompanyRole>,
+    private readonly dataSource: DataSource,
   ) {}
 
   private async validateCredentials(
@@ -104,6 +105,12 @@ export class AuthService {
     const accessToken = this.jwtService.sign(payload, {
       expiresIn: isAdmin ? ADMIN_TOKEN_TTL : DEFAULT_TOKEN_TTL,
     });
+
+    // update() no toca el objeto en memoria: se guarda el acceso de ahora pero `user`
+    // conserva el anterior, que es el que tiene sentido mostrar como "último acceso".
+    await this.dataSource.transaction((manager) =>
+      manager.getRepository(User).update(user.id, { lastLoginAt: new Date() }),
+    );
 
     return { accessToken, user, isAdmin };
   }

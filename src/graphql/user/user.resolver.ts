@@ -4,6 +4,7 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator.js';
 import { Roles } from '../../common/decorators/roles.decorator.js';
 import { SkipMustChangePassword } from '../../common/decorators/skip-must-change-password.decorator.js';
 import { RecordStatus } from '../../common/enums/record-status.enum.js';
+import { CsrfGuard } from '../../common/guards/csrf.guard.js';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard.js';
 import { RolesGuard } from '../../common/guards/roles.guard.js';
 import type { JwtPayload } from '../auth/interface/jwt-payload.interface.js';
@@ -14,7 +15,7 @@ import { UserObjectType } from './dto/user.object-type.js';
 import { UserService } from './user.service.js';
 
 @Resolver(() => UserObjectType)
-@UseGuards(JwtAuthGuard, RolesGuard)
+@UseGuards(JwtAuthGuard, RolesGuard, CsrfGuard)
 export class UserResolver {
   constructor(private readonly userService: UserService) {}
 

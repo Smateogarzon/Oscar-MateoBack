@@ -21,6 +21,9 @@ npm-debug.log*
 # auto-generated graphql schema (code-first)
 /src/schema.gql
 
+# archivos subidos (avatares, etc.) — almacenamiento local temporal hasta S3
+/uploads
+
 # IDE
 .vscode/*
 !.vscode/settings.json

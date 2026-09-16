@@ -24,6 +24,9 @@ import { LocationModule } from './graphql/location/location.module.js';
 import { PermissionModule } from './graphql/permission/permission.module.js';
 import { RoleModule } from './graphql/role/role.module.js';
 import { UserModule } from './graphql/user/user.module.js';
+import { UserCompanyRoleModule } from './graphql/user-company-role/user-company-role.module.js';
+import { StorageModule } from './common/storage/storage.module.js';
+import { UploadModule } from './uploads/upload.module.js';
 
 const { validationRules, plugins } = new ApolloArmor().protect();
 
@@ -92,6 +95,9 @@ const { validationRules, plugins } = new ApolloArmor().protect();
     PermissionModule,
     RoleModule,
     UserModule,
+    UserCompanyRoleModule,
+    StorageModule,
+    UploadModule,
   ],
   controllers: [AppController],
   providers: [

@@ -10,6 +10,12 @@ function createService() {
   const permissionRepository = { findBy: vi.fn().mockResolvedValue([]) };
   const rolePermissionRepository = { find: vi.fn().mockResolvedValue([]) };
   const userCompanyRoleRepository = { find: vi.fn().mockResolvedValue([]) };
+  const userRepository = { update: vi.fn().mockResolvedValue(undefined) };
+  const dataSource = {
+    transaction: vi.fn(async (fn: (manager: unknown) => unknown) =>
+      fn({ getRepository: () => userRepository }),
+    ),
+  };
 
   const service = new AuthService(
     userService as never,
@@ -18,6 +24,7 @@ function createService() {
     permissionRepository as never,
     rolePermissionRepository as never,
     userCompanyRoleRepository as never,
+    dataSource as never,
   );
 
   return {
@@ -28,6 +35,7 @@ function createService() {
     permissionRepository,
     rolePermissionRepository,
     userCompanyRoleRepository,
+    userRepository,
   };
 }
 
@@ -65,13 +73,29 @@ describe('AuthService', () => {
       ).rejects.toThrow(UnauthorizedException);
     });
 
-    it('rejects a wrong password', async () => {
-      const { service, userService } = createService();
+    it('rejects a wrong password without recording a login', async () => {
+      const { service, userService, userRepository } = createService();
       userService.findByEmail.mockResolvedValue(await activeUser());
 
       await expect(
         service.login({ email: 'ana@example.com', password: 'wrong' }),
       ).rejects.toThrow(UnauthorizedException);
+      expect(userRepository.update).not.toHaveBeenCalled();
+    });
+
+    it('records the new login time but returns the previous one', async () => {
+      const previousLoginAt = new Date('2026-09-15T15:40:00Z');
+      const { service, userService, userRepository } = createService();
+      userService.findByEmail.mockResolvedValue(
+        await activeUser({ lastLoginAt: previousLoginAt }),
+      );
+
+      const result = await service.login({ email: 'ana@example.com', password: rawPassword });
+
+      expect(userRepository.update).toHaveBeenCalledWith('user-1', {
+        lastLoginAt: expect.any(Date),
+      });
+      expect(result.user.lastLoginAt).toBe(previousLoginAt);
     });
 
     it('signs a 24h token for a user without the ADMIN role', async () => {

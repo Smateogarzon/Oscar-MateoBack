@@ -6,7 +6,6 @@ import {
   type ExecutionContext,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
-import { GqlExecutionContext } from '@nestjs/graphql';
 import { JwtService } from '@nestjs/jwt';
 import { DataSource } from 'typeorm';
 import { ACCESS_TOKEN_COOKIE } from '../../graphql/auth/auth-cookie.constants.js';
@@ -14,6 +13,7 @@ import type { JwtPayload } from '../../graphql/auth/interface/jwt-payload.interf
 import { User } from '../../graphql/user/entities/user.entity.js';
 import { SKIP_MUST_CHANGE_PASSWORD_KEY } from '../decorators/skip-must-change-password.decorator.js';
 import { RecordStatus } from '../enums/record-status.enum.js';
+import { getRequestFromContext } from '../utils/request-from-context.util.js';
 
 const BEARER_PREFIX = 'Bearer ';
 
@@ -26,7 +26,7 @@ export class JwtAuthGuard implements CanActivate {
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
-    const req = GqlExecutionContext.create(context).getContext().req;
+    const req = getRequestFromContext(context);
     const authHeader: string | undefined = req.headers.authorization;
     const token: string | undefined =
       req.cookies?.[ACCESS_TOKEN_COOKIE] ??

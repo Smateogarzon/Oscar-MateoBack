@@ -1,4 +1,6 @@
 export const ACCESS_TOKEN_COOKIE = 'access_token';
+export const CSRF_COOKIE = 'csrf_token';
+export const CSRF_HEADER = 'x-csrf-token';
 
 export const ADMIN_TOKEN_TTL = '1h';
 export const DEFAULT_TOKEN_TTL = '24h';
