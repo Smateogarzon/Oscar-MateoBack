@@ -33,6 +33,12 @@ export class UserResolver {
     return this.userService.findOne(id);
   }
 
+  @Query(() => UserObjectType)
+  @SkipMustChangePassword()
+  me(@CurrentUser() currentUser: JwtPayload) {
+    return this.userService.findOne(currentUser.sub);
+  }
+
   @Mutation(() => UserObjectType)
   @Roles('ADMIN')
   createUser(@Args('input') input: CreateUserInput) {

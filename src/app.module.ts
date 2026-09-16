@@ -3,7 +3,7 @@ import { envValidationSchema } from './config/env.validation.js';
 import { DecimalScalar } from './common/scalars/decimal.scalar.js';
 import { join } from 'node:path';
 import { LoggerModule } from 'nestjs-pino';
-import { Module } from '@nestjs/common';
+import { Module, RequestMethod } from '@nestjs/common';
 import { APP_FILTER, APP_GUARD } from '@nestjs/core';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { ApolloDriver, type ApolloDriverConfig } from '@nestjs/apollo';
@@ -36,6 +36,7 @@ const { validationRules, plugins } = new ApolloArmor().protect();
     LoggerModule.forRootAsync({
       inject: [ConfigService],
       useFactory: (config: ConfigService) => ({
+        exclude: [{ path: 'graphql', method: RequestMethod.ALL }],
         pinoHttp: {
           level: config.get('NODE_ENV') === 'production' ? 'info' : 'debug',
           transport:

@@ -9,6 +9,7 @@ import { Reflector } from '@nestjs/core';
 import { GqlExecutionContext } from '@nestjs/graphql';
 import { JwtService } from '@nestjs/jwt';
 import { DataSource } from 'typeorm';
+import { ACCESS_TOKEN_COOKIE } from '../../graphql/auth/auth-cookie.constants.js';
 import type { JwtPayload } from '../../graphql/auth/interface/jwt-payload.interface.js';
 import { User } from '../../graphql/user/entities/user.entity.js';
 import { SKIP_MUST_CHANGE_PASSWORD_KEY } from '../decorators/skip-must-change-password.decorator.js';
@@ -27,18 +28,19 @@ export class JwtAuthGuard implements CanActivate {
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const req = GqlExecutionContext.create(context).getContext().req;
     const authHeader: string | undefined = req.headers.authorization;
+    const token: string | undefined =
+      req.cookies?.[ACCESS_TOKEN_COOKIE] ??
+      (authHeader?.startsWith(BEARER_PREFIX)
+        ? authHeader.slice(BEARER_PREFIX.length)
+        : undefined);
 
-    if (!authHeader?.startsWith(BEARER_PREFIX)) {
-      throw new UnauthorizedException(
-        'Falta el header Authorization con el token',
-      );
+    if (!token) {
+      throw new UnauthorizedException('No hay sesión activa');
     }
 
     let payload: JwtPayload;
     try {
-      payload = this.jwtService.verify<JwtPayload>(
-        authHeader.slice(BEARER_PREFIX.length),
-      );
+      payload = this.jwtService.verify<JwtPayload>(token);
     } catch {
       throw new UnauthorizedException('Token inválido o expirado');
     }

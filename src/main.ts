@@ -1,4 +1,5 @@
 import './config/decimal.config.js';
+import cookieParser from 'cookie-parser';
 import helmet from 'helmet';
 import { Logger } from 'nestjs-pino';
 import { ValidationPipe } from '@nestjs/common';
@@ -12,6 +13,7 @@ async function bootstrap() {
   app.enableShutdownHooks();
 
   app.use(helmet({ contentSecurityPolicy: false }));
+  app.use(cookieParser());
 
   app.enableCors({
     origin: process.env.CORS_ORIGIN?.split(',') ?? [],
