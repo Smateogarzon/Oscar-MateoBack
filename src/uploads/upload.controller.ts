@@ -4,6 +4,7 @@ import type { Request } from 'express';
 import { CsrfGuard } from '../common/guards/csrf.guard.js';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard.js';
 import { STORAGE_SERVICE, type StorageService, type UploadedFileLike } from '../common/storage/storage.service.js';
+import { convertToWebp } from './convert-to-webp.js';
 import { isUploadFolder } from './upload-folder.constant.js';
 
 const MAX_IMAGE_SIZE_BYTES = 5 * 1024 * 1024;
@@ -32,8 +33,9 @@ export class UploadController {
       throw new BadRequestException('Carpeta de subida inválida');
     }
 
+    const webpFile = await convertToWebp(file);
     const baseUrl = `${req.protocol}://${req.get('host')}`;
-    const url = await this.storage.save(file, folder, baseUrl);
+    const url = await this.storage.save(webpFile, folder, baseUrl);
     return { url };
   }
 }

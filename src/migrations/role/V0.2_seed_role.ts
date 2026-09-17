@@ -10,24 +10,24 @@ export class SeedRole1789598255954 implements MigrationInterface {
     await queryRunner.query(`
       INSERT INTO "roles" ("id", "code", "name", "description", "scope", "status")
       VALUES
-        ('20000000-0000-0000-0000-000000000001', 'ADMIN', 'Administrador', 'Ve todo y autoriza bajas', 'COMPANY', 'ACTIVE'),
-        ('20000000-0000-0000-0000-000000000002', 'SELLER', 'Vendedor', 'Solicita y recibe en tienda', 'COMPANY', 'ACTIVE'),
-        ('20000000-0000-0000-0000-000000000003', 'WAREHOUSE', 'Bodeguero', 'Acepta, alista y despacha', 'COMPANY', 'ACTIVE'),
-        ('20000000-0000-0000-0000-000000000004', 'RUNNER', 'Corredor', 'Transporta entre ubicaciones', 'COMPANY', 'ACTIVE'),
-        ('20000000-0000-0000-0000-000000000005', 'CASHIER', 'Caja', 'Cobra y cierra la venta', 'COMPANY', 'ACTIVE'),
-        ('20000000-0000-0000-0000-000000000006', 'SUPPLIER', 'Proveedor', 'Solo órdenes de compra', 'SUPPLIER', 'ACTIVE')
+        ('20000000-0000-4000-8000-000000000001', 'ADMIN', 'Administrador', 'Ve todo y autoriza bajas', 'COMPANY', 'ACTIVE'),
+        ('20000000-0000-4000-8000-000000000002', 'SELLER', 'Vendedor', 'Solicita y recibe en tienda', 'COMPANY', 'ACTIVE'),
+        ('20000000-0000-4000-8000-000000000003', 'WAREHOUSE', 'Bodeguero', 'Acepta, alista y despacha', 'COMPANY', 'ACTIVE'),
+        ('20000000-0000-4000-8000-000000000004', 'RUNNER', 'Corredor', 'Transporta entre ubicaciones', 'COMPANY', 'ACTIVE'),
+        ('20000000-0000-4000-8000-000000000005', 'CASHIER', 'Caja', 'Cobra y cierra la venta', 'COMPANY', 'ACTIVE'),
+        ('20000000-0000-4000-8000-000000000006', 'SUPPLIER', 'Proveedor', 'Solo órdenes de compra', 'SUPPLIER', 'ACTIVE')
     `);
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
     await queryRunner.query(`
       DELETE FROM "roles" WHERE "id" IN (
-        '20000000-0000-0000-0000-000000000001',
-        '20000000-0000-0000-0000-000000000002',
-        '20000000-0000-0000-0000-000000000003',
-        '20000000-0000-0000-0000-000000000004',
-        '20000000-0000-0000-0000-000000000005',
-        '20000000-0000-0000-0000-000000000006'
+        '20000000-0000-4000-8000-000000000001',
+        '20000000-0000-4000-8000-000000000002',
+        '20000000-0000-4000-8000-000000000003',
+        '20000000-0000-4000-8000-000000000004',
+        '20000000-0000-4000-8000-000000000005',
+        '20000000-0000-4000-8000-000000000006'
       )
     `);
   }

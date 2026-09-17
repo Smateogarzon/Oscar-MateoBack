@@ -12,7 +12,14 @@ export class GqlAllExceptionsFilter implements GqlExceptionFilter {
     }
 
     if (exception instanceof HttpException) {
-      return new GraphQLError(exception.message, {
+      const response = exception.getResponse();
+      const responseMessage =
+        typeof response === 'string' ? response : (response as { message?: string | string[] }).message;
+      const message = Array.isArray(responseMessage)
+        ? responseMessage.join(', ')
+        : (responseMessage ?? exception.message);
+
+      return new GraphQLError(message, {
         extensions: {
           code: exception.constructor.name,
           status: exception.getStatus(),
