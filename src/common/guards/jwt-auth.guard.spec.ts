@@ -16,12 +16,26 @@ function createGuard(storedUser: unknown, skipsPasswordCheck = false) {
   };
 }
 
+// El guard los pasa al Reflector para leer @SkipMustChangePassword(); el Reflector está
+// mockeado, así que basta con que existan.
+const handlerAndClass = { getHandler: () => undefined, getClass: () => undefined };
+
 function contextWith(authorization?: string) {
   const req = { headers: { authorization }, user: undefined };
   vi.spyOn(GqlExecutionContext, 'create').mockReturnValue({
     getContext: () => ({ req }),
   } as unknown as GqlExecutionContext);
-  return { req, context: {} as never };
+  return { req, context: { getType: () => 'graphql', ...handlerAndClass } as never };
+}
+
+function httpContextWith(authorization?: string) {
+  const req = { headers: { authorization }, user: undefined };
+  const context = {
+    getType: () => 'http',
+    switchToHttp: () => ({ getRequest: () => req }),
+    ...handlerAndClass,
+  };
+  return { req, context: context as never };
 }
 
 const activeUser = {
@@ -66,6 +80,14 @@ describe('JwtAuthGuard', () => {
   it('attaches the payload to the request for an active user', async () => {
     const { guard } = createGuard(activeUser);
     const { req, context } = contextWith('Bearer token');
+
+    await expect(guard.canActivate(context)).resolves.toBe(true);
+    expect(req.user).toEqual({ sub: 'user-1', email: 'ana@example.com' });
+  });
+
+  it('also authenticates REST requests, like the upload endpoint', async () => {
+    const { guard } = createGuard(activeUser);
+    const { req, context } = httpContextWith('Bearer token');
 
     await expect(guard.canActivate(context)).resolves.toBe(true);
     expect(req.user).toEqual({ sub: 'user-1', email: 'ana@example.com' });
