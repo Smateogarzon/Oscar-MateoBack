@@ -34,7 +34,7 @@ if [ "$SERVICE" = backend ]; then
 fi
 
 export "$TAG_VAR=$TAG"
-docker compose pull "$SERVICE"
+docker compose pull --quiet "$SERVICE"
 
 if [ "$SERVICE" = backend ]; then
   # Las migraciones corren antes de reemplazar el contenedor: si fallan, el script se
