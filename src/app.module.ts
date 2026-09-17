@@ -1,5 +1,6 @@
 import './config/decimal.config.js';
 import { envValidationSchema } from './config/env.validation.js';
+import { databaseSsl } from './config/database-ssl.js';
 import { DecimalScalar } from './common/scalars/decimal.scalar.js';
 import { join } from 'node:path';
 import { LoggerModule } from 'nestjs-pino';
@@ -25,6 +26,8 @@ import { PermissionModule } from './graphql/permission/permission.module.js';
 import { RoleModule } from './graphql/role/role.module.js';
 import { UserModule } from './graphql/user/user.module.js';
 import { UserCompanyRoleModule } from './graphql/user-company-role/user-company-role.module.js';
+import { RolePermissionModule } from './graphql/role-permission/role-permission.module.js';
+import { UserLocationAccessModule } from './graphql/user-location-access/user-location-access.module.js';
 import { StorageModule } from './common/storage/storage.module.js';
 import { UploadModule } from './uploads/upload.module.js';
 
@@ -66,6 +69,7 @@ const { validationRules, plugins } = new ApolloArmor().protect();
         username: config.getOrThrow<string>('DB_USER'),
         password: config.getOrThrow<string>('DB_PASSWORD'),
         database: config.getOrThrow<string>('DB_NAME'),
+        ssl: databaseSsl(config.get<boolean>('DB_SSL') === true),
         autoLoadEntities: true,
         synchronize: false,
         extra: {
@@ -79,7 +83,12 @@ const { validationRules, plugins } = new ApolloArmor().protect();
     }),
     GraphQLModule.forRoot<ApolloDriverConfig>({
       driver: ApolloDriver,
-      autoSchemaFile: join(process.cwd(), 'src/schema.gql'),
+      // En producción el schema se arma en memoria: el contenedor no trae src/ y
+      // corre sin permisos de escritura.
+      autoSchemaFile:
+        process.env.NODE_ENV === 'production'
+          ? true
+          : join(process.cwd(), 'src/schema.gql'),
       sortSchema: true,
       introspection: process.env.NODE_ENV !== 'production',
       validationRules,
@@ -96,6 +105,8 @@ const { validationRules, plugins } = new ApolloArmor().protect();
     RoleModule,
     UserModule,
     UserCompanyRoleModule,
+    RolePermissionModule,
+    UserLocationAccessModule,
     StorageModule,
     UploadModule,
   ],

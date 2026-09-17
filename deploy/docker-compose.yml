@@ -1,0 +1,40 @@
+# Se copia a /opt/oscarymateo en el servidor en cada despliegue del backend. Las etiquetas
+# de imagen (BACKEND_TAG y WEB_TAG) las mantiene deploy.sh en /opt/oscarymateo/.env.
+name: oscarymateo
+
+# Sin límite, los logs de Docker crecen hasta llenar el disco del servidor.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: '3'
+
+services:
+  backend:
+    image: 384078510350.dkr.ecr.us-east-1.amazonaws.com/oscarymateo-backend:${BACKEND_TAG:-none}
+    env_file: backend.env
+    restart: unless-stopped
+    logging: *logging
+
+  web:
+    image: 384078510350.dkr.ecr.us-east-1.amazonaws.com/oscarymateo-web:${WEB_TAG:-none}
+    environment:
+      APP_DOMAIN: tiendadeoscarymateo.com
+      API_DOMAIN: server.tiendadeoscarymateo.com
+      WWW_DOMAIN: www.tiendadeoscarymateo.com
+    ports:
+      - '80:80'
+      - '443:443'
+    volumes:
+      # Guarda los certificados HTTPS entre reinicios: sin esto Caddy los volvería a pedir
+      # en cada despliegue, y Let's Encrypt bloquea por exceso de solicitudes.
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - backend
+    restart: unless-stopped
+    logging: *logging
+
+volumes:
+  caddy_data:
+  caddy_config:

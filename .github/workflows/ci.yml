@@ -1,4 +1,4 @@
-name: CI
+name: CI/CD
 
 on:
   push:
@@ -31,3 +31,70 @@ jobs:
 
       - name: Audit (high/critical only)
         run: npm audit --audit-level=high
+
+  # Solo en push a main y solo si build-and-test pasó. Los PR nunca despliegan.
+  deploy:
+    needs: build-and-test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production
+    # Un despliegue a la vez: si llega otro merge mientras tanto, espera en vez de cancelar.
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      AWS_REGION: us-east-1
+      ECR_REPOSITORY: oscarymateo-backend
+      INSTANCE_ID: i-04b6684e7c199a1e5
+      IMAGE_TAG: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::384078510350:role/github-deploy-role
+          aws-region: ${{ env.AWS_REGION }}
+
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # Las etiquetas en ECR son inmutables: si se re-ejecuta el despliegue de un commit,
+      # la imagen ya existe y se salta el build en vez de fallar al subirla.
+      - name: Check if image already exists
+        id: image
+        run: |
+          if aws ecr describe-images --repository-name "$ECR_REPOSITORY" --image-ids imageTag="$IMAGE_TAG" > /dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - if: steps.image.outputs.exists == 'false'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push image
+        if: steps.image.outputs.exists == 'false'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          provenance: false
+          tags: ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Copia al servidor la versión actual de docker-compose.yml y deploy.sh, y despliega.
+      - name: Deploy on server
+        run: |
+          {
+            echo "set -e"
+            echo "mkdir -p /opt/oscarymateo"
+            echo "echo $(base64 -w0 deploy/docker-compose.yml) | base64 -d > /opt/oscarymateo/docker-compose.yml"
+            echo "echo $(base64 -w0 deploy/deploy.sh) | base64 -d > /opt/oscarymateo/deploy.sh"
+            echo "chmod +x /opt/oscarymateo/deploy.sh"
+            echo "/opt/oscarymateo/deploy.sh backend $IMAGE_TAG"
+          } > ssm-commands.txt
+          bash .github/scripts/ssm-run.sh ssm-commands.txt

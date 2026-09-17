@@ -1,0 +1,69 @@
+import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { DataSource, QueryFailedError, Repository } from 'typeorm';
+import { RecordStatus } from '../../common/enums/record-status.enum.js';
+import { CreateUserLocationAccessInput } from './dto/create-user-location-access.input.js';
+import { UserLocationAccess } from './entities/user-location-access.entity.js';
+
+const FOREIGN_KEY_VIOLATION = '23503';
+const UNIQUE_VIOLATION = '23505';
+
+@Injectable()
+export class UserLocationAccessService {
+  constructor(
+    @InjectRepository(UserLocationAccess)
+    private readonly userLocationAccessRepository: Repository<UserLocationAccess>,
+    private readonly dataSource: DataSource,
+  ) {}
+
+  findAll(userId?: string, locationId?: string, status?: RecordStatus): Promise<UserLocationAccess[]> {
+    return this.userLocationAccessRepository.find({
+      where: { ...(userId && { userId }), ...(locationId && { locationId }), ...(status && { status }) },
+    });
+  }
+
+  async findOne(id: string): Promise<UserLocationAccess> {
+    const access = await this.userLocationAccessRepository.findOneBy({ id });
+    if (!access) throw new NotFoundException(`Acceso ${id} no encontrado`);
+    return access;
+  }
+
+  async create(input: CreateUserLocationAccessInput): Promise<UserLocationAccess> {
+    try {
+      return await this.dataSource.transaction((manager) => {
+        const repo = manager.getRepository(UserLocationAccess);
+        return repo.save(repo.create(input));
+      });
+    } catch (error) {
+      throw this.mapWriteError(error);
+    }
+  }
+
+  async deactivate(id: string): Promise<UserLocationAccess> {
+    const access = await this.findOne(id);
+    access.status = RecordStatus.INACTIVE;
+    return this.dataSource.transaction((manager) => manager.getRepository(UserLocationAccess).save(access));
+  }
+
+  // A diferencia de User/Location, esto sí necesita reactivar: es un checkbox que
+  // se prende y apaga, y el índice único (userId, locationId) no distingue estado
+  // — recrear el registro tras desactivarlo violaría esa restricción.
+  async activate(id: string): Promise<UserLocationAccess> {
+    const access = await this.findOne(id);
+    access.status = RecordStatus.ACTIVE;
+    return this.dataSource.transaction((manager) => manager.getRepository(UserLocationAccess).save(access));
+  }
+
+  private mapWriteError(error: unknown): Error {
+    if (!(error instanceof QueryFailedError)) return error as Error;
+    const code = (error.driverError as { code?: string } | undefined)?.code;
+
+    if (code === FOREIGN_KEY_VIOLATION) {
+      return new BadRequestException('El usuario o la ubicación indicada no existe');
+    }
+    if (code === UNIQUE_VIOLATION) {
+      return new ConflictException('Este usuario ya tiene acceso a esa ubicación');
+    }
+    return error as Error;
+  }
+}

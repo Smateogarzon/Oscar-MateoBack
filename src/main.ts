@@ -14,6 +14,13 @@ async function bootstrap() {
 
   app.enableShutdownHooks();
 
+  // En producción todas las peticiones llegan a través de Caddy. Sin esto, req.ip sería
+  // la IP de Caddy para todos los usuarios y el límite de peticiones los sumaría como
+  // si fueran uno solo.
+  if (process.env.NODE_ENV === 'production') {
+    app.set('trust proxy', 1);
+  }
+
   app.use(helmet({ contentSecurityPolicy: false }));
   app.use(cookieParser());
   app.useStaticAssets(UPLOADS_ROOT, { prefix: '/uploads/' });

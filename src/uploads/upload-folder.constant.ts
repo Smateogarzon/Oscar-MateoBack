@@ -1,3 +1,7 @@
+// La política del bucket solo abre `public/*`: todo lo que cuelgue de este prefijo se
+// puede abrir con su link, y agregar carpetas nuevas no requiere tocar la política.
+export const PUBLIC_PREFIX = 'public';
+
 // Lista blanca de carpetas válidas para POST /uploads/image. El front manda
 // `folder` como flag de qué está subiendo (users, brands, ...); se valida acá
 // para que nunca escriba a una ruta arbitraria del bucket.

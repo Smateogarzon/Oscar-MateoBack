@@ -14,12 +14,15 @@ export class S3StorageService implements StorageService {
   constructor(config: ConfigService) {
     this.region = config.getOrThrow<string>('AWS_REGION');
     this.bucket = config.getOrThrow<string>('AWS_S3_BUCKET');
+    const accessKeyId = config.get<string>('AWS_ACCESS_KEY_ID');
+    const secretAccessKey = config.get<string>('AWS_SECRET_ACCESS_KEY');
+
+    // Las llaves solo existen en el .env local. En el EC2 no se configuran y el SDK
+    // toma credenciales temporales del rol asignado al servidor.
     this.client = new S3Client({
       region: this.region,
-      credentials: {
-        accessKeyId: config.getOrThrow<string>('AWS_ACCESS_KEY_ID'),
-        secretAccessKey: config.getOrThrow<string>('AWS_SECRET_ACCESS_KEY'),
-      },
+      ...(accessKeyId &&
+        secretAccessKey && { credentials: { accessKeyId, secretAccessKey } }),
     });
   }
 

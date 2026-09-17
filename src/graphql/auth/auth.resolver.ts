@@ -15,6 +15,10 @@ import { AuthService } from './auth.service.js';
 import { AuthPayload } from './dto/auth-payload.object-type.js';
 import { LoginInput } from './dto/login.input.js';
 
+// En local queda sin definir (localhost comparte cookies entre puertos); en producción es
+// el dominio principal, para que la cookie CSRF sea visible también desde el front.
+const COOKIE_DOMAIN = process.env.COOKIE_DOMAIN || undefined;
+
 interface GqlContext {
   res: Response;
 }
@@ -30,9 +34,11 @@ export class AuthResolver {
   ): Promise<AuthPayload> {
     const { accessToken, user, isAdmin } = await this.authService.login(input);
 
+    // Front (tiendadeoscarymateo.com) y API (server.tiendadeoscarymateo.com) son el mismo
+    // sitio, así que 'lax' alcanza y además impide que sitios ajenos usen la sesión.
     const baseCookieOptions: CookieOptions = {
       secure: process.env.NODE_ENV === 'production',
-      sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+      sameSite: 'lax',
       maxAge: isAdmin ? ADMIN_TOKEN_TTL_MS : DEFAULT_TOKEN_TTL_MS,
       path: '/',
     };
@@ -42,9 +48,12 @@ export class AuthResolver {
       httpOnly: true,
     });
 
+    // La sesión queda solo en el host de la API, pero el token CSRF lo tiene que leer el
+    // JavaScript del front, que vive en otro subdominio: se declara para todo el dominio.
     context.res.cookie(CSRF_COOKIE, randomBytes(32).toString('hex'), {
       ...baseCookieOptions,
       httpOnly: false,
+      domain: COOKIE_DOMAIN,
     });
 
     return { user };
@@ -55,7 +64,7 @@ export class AuthResolver {
   @SkipMustChangePassword()
   logout(@Context() context: GqlContext) {
     context.res.clearCookie(ACCESS_TOKEN_COOKIE, { path: '/' });
-    context.res.clearCookie(CSRF_COOKIE, { path: '/' });
+    context.res.clearCookie(CSRF_COOKIE, { path: '/', domain: COOKIE_DOMAIN });
     return this.authService.logout();
   }
 }

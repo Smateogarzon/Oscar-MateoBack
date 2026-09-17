@@ -1,0 +1,2 @@
+# Los scripts corren en Linux: con finales de línea de Windows (CRLF), bash falla.
+*.sh text eol=lf

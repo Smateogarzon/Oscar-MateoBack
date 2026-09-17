@@ -13,10 +13,13 @@ export const envValidationSchema = Joi.object({
   DB_USER: Joi.string().required(),
   DB_PASSWORD: Joi.string().required(),
   DB_NAME: Joi.string().required(),
+  DB_SSL: Joi.boolean().default(false),
   CORS_ORIGIN: Joi.string().required(),
+  COOKIE_DOMAIN: Joi.string().allow('').optional(),
   JWT_SECRET: Joi.string().required(),
   AWS_REGION: Joi.string().required(),
-  AWS_ACCESS_KEY_ID: Joi.string().required(),
-  AWS_SECRET_ACCESS_KEY: Joi.string().required(),
+  // Solo en desarrollo local: en el servidor no existen y S3 usa el rol del EC2.
+  AWS_ACCESS_KEY_ID: Joi.string().optional(),
+  AWS_SECRET_ACCESS_KEY: Joi.string().optional(),
   AWS_S3_BUCKET: Joi.string().required(),
 });
