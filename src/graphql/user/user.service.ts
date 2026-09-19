@@ -8,8 +8,10 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import bcrypt from 'bcryptjs';
-import { DataSource, In, Not, QueryFailedError, Repository } from 'typeorm';
+import { DataSource, In, Not, Repository } from 'typeorm';
+import { isPlatformRole, PLATFORM_ROLE } from '../../common/access/platform-role.js';
 import { RecordStatus } from '../../common/enums/record-status.enum.js';
+import { Role } from '../role/entities/role.entity.js';
 import { UserCompanyRole } from '../user-company-role/entities/user-company-role.entity.js';
 import { ChangePasswordInput } from './dto/change-password.input.js';
 import { CreateUserInput } from './dto/create-user.input.js';
@@ -17,11 +19,12 @@ import { UpdateUserInput } from './dto/update-user.input.js';
 import { User } from './entities/user.entity.js';
 
 const PASSWORD_SALT_ROUNDS = 10;
-const FOREIGN_KEY_VIOLATION = '23503';
 
 // `users` es una tabla común a todas las empresas: un usuario "es de" una empresa cuando
 // tiene una membresía en ella (user_company_roles). Lo que se lista, se lee o se modifica
 // desde una empresa se limita a sus miembros.
+// Los usuarios de plataforma (los que tienen un rol global, el super admin) quedan fuera: son
+// invisibles para todas las empresas y ninguna puede tocarlos.
 @Injectable()
 export class UserService {
   constructor(
@@ -36,7 +39,9 @@ export class UserService {
     const memberships = await this.dataSource
       .getRepository(UserCompanyRole)
       .find({ where: { companyId } });
-    const userIds = [...new Set(memberships.map((membership) => membership.userId))];
+    const memberIds = [...new Set(memberships.map((membership) => membership.userId))];
+    const platformIds = await this.platformUserIds(memberIds);
+    const userIds = memberIds.filter((id) => !platformIds.has(id));
     if (userIds.length === 0) return [];
 
     return this.userRepository.find({ where: { id: In(userIds), ...(status && { status }) } });
@@ -49,12 +54,12 @@ export class UserService {
     return user;
   }
 
-  // Un usuario de otra empresa se responde igual que uno que no existe.
+  // Un usuario de otra empresa, o de plataforma, se responde igual que uno que no existe.
   async findInCompany(companyId: string, id: string): Promise<User> {
-    const isMember = await this.dataSource
-      .getRepository(UserCompanyRole)
-      .existsBy({ userId: id, companyId });
-    if (!isMember) throw new NotFoundException(`Usuario ${id} no encontrado`);
+    const memberships = this.dataSource.getRepository(UserCompanyRole);
+    const isMember = await memberships.existsBy({ userId: id, companyId });
+    const isPlatformUser = isMember && (await memberships.existsBy({ userId: id, role: PLATFORM_ROLE }));
+    if (!isMember || isPlatformUser) throw new NotFoundException(`Usuario ${id} no encontrado`);
     return this.findOne(id);
   }
 
@@ -67,31 +72,34 @@ export class UserService {
   async create(companyId: string, input: CreateUserInput): Promise<User> {
     const { roleId, ...userData } = input;
 
-    try {
-      return await this.dataSource.transaction(async (manager) => {
-        const repo = manager.getRepository(User);
+    return this.dataSource.transaction(async (manager) => {
+      // Un rol de plataforma se responde igual que uno inexistente: ninguna empresa puede
+      // asignarlo, aunque conozca su id.
+      const role = await manager.getRepository(Role).findOneBy({ id: roleId });
+      if (!role || isPlatformRole(role)) {
+        throw new BadRequestException('El rol indicado no existe');
+      }
 
-        const existing = await repo.findOneBy({ email: userData.email });
-        if (existing) {
-          throw new ConflictException(`Ya existe un usuario con el email ${userData.email}`);
-        }
+      const repo = manager.getRepository(User);
 
-        const passwordHash = await bcrypt.hash(userData.documentNumber, PASSWORD_SALT_ROUNDS);
+      const existing = await repo.findOneBy({ email: userData.email });
+      if (existing) {
+        throw new ConflictException(`Ya existe un usuario con el email ${userData.email}`);
+      }
 
-        const user = await repo.save(
-          repo.create({ ...userData, passwordHash, mustChangePassword: true }),
-        );
+      const passwordHash = await bcrypt.hash(userData.documentNumber, PASSWORD_SALT_ROUNDS);
 
-        const membershipRepo = manager.getRepository(UserCompanyRole);
-        await membershipRepo.save(
-          membershipRepo.create({ userId: user.id, companyId, roleId }),
-        );
+      const user = await repo.save(
+        repo.create({ ...userData, passwordHash, mustChangePassword: true }),
+      );
 
-        return user;
-      });
-    } catch (error) {
-      throw this.mapCreateError(error);
-    }
+      const membershipRepo = manager.getRepository(UserCompanyRole);
+      await membershipRepo.save(
+        membershipRepo.create({ userId: user.id, companyId, roleId }),
+      );
+
+      return user;
+    });
   }
 
   async update(companyId: string, id: string, input: UpdateUserInput): Promise<User> {
@@ -166,13 +174,13 @@ export class UserService {
     return user;
   }
 
-  private mapCreateError(error: unknown): Error {
-    const isForeignKeyViolation =
-      error instanceof QueryFailedError &&
-      (error.driverError as { code?: string } | undefined)?.code === FOREIGN_KEY_VIOLATION;
+  // De los usuarios dados, los que tienen un rol de plataforma en alguna empresa.
+  private async platformUserIds(userIds: string[]): Promise<Set<string>> {
+    if (userIds.length === 0) return new Set();
 
-    return isForeignKeyViolation
-      ? new BadRequestException('El rol indicado no existe')
-      : (error as Error);
+    const platformMemberships = await this.dataSource
+      .getRepository(UserCompanyRole)
+      .find({ where: { userId: In(userIds), role: PLATFORM_ROLE } });
+    return new Set(platformMemberships.map((membership) => membership.userId));
   }
 }

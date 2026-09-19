@@ -3,6 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { JwtService } from '@nestjs/jwt';
 import bcrypt from 'bcryptjs';
 import { DataSource, In, Repository } from 'typeorm';
+import { isPlatformRole } from '../../common/access/platform-role.js';
 import { RecordStatus } from '../../common/enums/record-status.enum.js';
 import { Role } from '../role/entities/role.entity.js';
 import { UserCompanyRole } from '../user-company-role/entities/user-company-role.entity.js';
@@ -49,8 +50,8 @@ export class AuthService {
     return user;
   }
 
-  // Solo decide cuánto dura la sesión (los administradores, menos). Qué puede hacer el
-  // usuario NO va en el token: depende de la empresa y se consulta en cada petición.
+  // Solo decide cuánto dura la sesión (los administradores y el super admin, menos). Qué puede
+  // hacer el usuario NO va en el token: depende de la empresa y se consulta en cada petición.
   private async isAdminInAnyCompany(userId: string): Promise<boolean> {
     const assignments = await this.userCompanyRoleRepository.find({
       where: { userId, status: RecordStatus.ACTIVE },
@@ -61,7 +62,7 @@ export class AuthService {
     if (roleIds.length === 0) return false;
 
     const roles = await this.roleRepository.findBy({ id: In(roleIds) });
-    return roles.some((role) => role.code === ADMIN_ROLE_CODE);
+    return roles.some((role) => role.code === ADMIN_ROLE_CODE || isPlatformRole(role));
   }
 
   async login(input: LoginInput): Promise<LoginResult> {

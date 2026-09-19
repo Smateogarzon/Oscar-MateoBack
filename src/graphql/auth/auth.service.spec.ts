@@ -1,6 +1,7 @@
 import { UnauthorizedException } from '@nestjs/common';
 import bcrypt from 'bcryptjs';
 import { RecordStatus } from '../../common/enums/record-status.enum.js';
+import { RoleScope } from '../role/entities/role-scope.enum.js';
 import { AuthService } from './auth.service.js';
 
 function createService() {
@@ -115,6 +116,26 @@ describe('AuthService', () => {
         { roleId: 'role-1', status: RecordStatus.ACTIVE },
       ]);
       roleRepository.findBy.mockResolvedValue([{ id: 'role-1', code: 'ADMIN' }]);
+
+      const result = await service.login({ email: 'ana@example.com', password: rawPassword });
+
+      expect(jwtService.sign).toHaveBeenCalledWith(
+        { sub: 'user-1', email: 'ana@example.com' },
+        { expiresIn: '1h' },
+      );
+      expect(result.isAdmin).toBe(true);
+    });
+
+    it('signs a 1h token for a super admin (a platform role)', async () => {
+      const { service, userService, jwtService, userCompanyRoleRepository, roleRepository } =
+        createService();
+      userService.findByEmail.mockResolvedValue(await activeUser());
+      userCompanyRoleRepository.find.mockResolvedValue([
+        { roleId: 'role-1', status: RecordStatus.ACTIVE },
+      ]);
+      roleRepository.findBy.mockResolvedValue([
+        { id: 'role-1', code: 'SUPER_ADMIN', scope: RoleScope.GLOBAL },
+      ]);
 
       const result = await service.login({ email: 'ana@example.com', password: rawPassword });
 

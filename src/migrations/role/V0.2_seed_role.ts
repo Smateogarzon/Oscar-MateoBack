@@ -15,7 +15,8 @@ export class SeedRole1789598255954 implements MigrationInterface {
         ('20000000-0000-4000-8000-000000000003', 'WAREHOUSE', 'Bodeguero', 'Acepta, alista y despacha', 'COMPANY', 'ACTIVE'),
         ('20000000-0000-4000-8000-000000000004', 'RUNNER', 'Corredor', 'Transporta entre ubicaciones', 'COMPANY', 'ACTIVE'),
         ('20000000-0000-4000-8000-000000000005', 'CASHIER', 'Caja', 'Cobra y cierra la venta', 'COMPANY', 'ACTIVE'),
-        ('20000000-0000-4000-8000-000000000006', 'SUPPLIER', 'Proveedor', 'Solo órdenes de compra', 'SUPPLIER', 'ACTIVE')
+        ('20000000-0000-4000-8000-000000000006', 'SUPPLIER', 'Proveedor', 'Solo órdenes de compra', 'SUPPLIER', 'ACTIVE'),
+        ('20000000-0000-4000-8000-000000000007', 'SUPER_ADMIN', 'Super administrador', 'Administra la plataforma; las empresas no lo ven', 'GLOBAL', 'ACTIVE')
     `);
   }
 
@@ -27,7 +28,8 @@ export class SeedRole1789598255954 implements MigrationInterface {
         '20000000-0000-4000-8000-000000000003',
         '20000000-0000-4000-8000-000000000004',
         '20000000-0000-4000-8000-000000000005',
-        '20000000-0000-4000-8000-000000000006'
+        '20000000-0000-4000-8000-000000000006',
+        '20000000-0000-4000-8000-000000000007'
       )
     `);
   }

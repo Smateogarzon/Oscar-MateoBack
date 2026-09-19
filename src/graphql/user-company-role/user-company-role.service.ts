@@ -2,7 +2,13 @@ import { BadRequestException, ConflictException, Injectable, NotFoundException }
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, QueryFailedError, Repository } from 'typeorm';
 import { assertActiveCompany } from '../../common/access/assert-active-company.js';
+import {
+  COMPANY_VISIBLE_ROLE,
+  isPlatformRole,
+  PLATFORM_ROLE,
+} from '../../common/access/platform-role.js';
 import { RecordStatus } from '../../common/enums/record-status.enum.js';
+import { Role } from '../role/entities/role.entity.js';
 import { CreateUserCompanyRoleInput } from './dto/create-user-company-role.input.js';
 import { UserCompanyRole } from './entities/user-company-role.entity.js';
 
@@ -10,7 +16,8 @@ const FOREIGN_KEY_VIOLATION = '23503';
 const UNIQUE_VIOLATION = '23505';
 
 // Todo se hace dentro de la empresa activa: una empresa nunca ve ni toca las membresías de
-// otra, aunque conozca el id.
+// otra, aunque conozca el id. Las membresías con un rol de plataforma (el super admin) no se
+// listan, no se desactivan y no se pueden crear desde una empresa.
 @Injectable()
 export class UserCompanyRoleService {
   constructor(
@@ -21,12 +28,21 @@ export class UserCompanyRoleService {
 
   findAll(companyId: string, userId?: string, status?: RecordStatus): Promise<UserCompanyRole[]> {
     return this.userCompanyRoleRepository.find({
-      where: { companyId, ...(userId && { userId }), ...(status && { status }) },
+      where: {
+        companyId,
+        role: COMPANY_VISIBLE_ROLE,
+        ...(userId && { userId }),
+        ...(status && { status }),
+      },
     });
   }
 
   async findOne(companyId: string, id: string): Promise<UserCompanyRole> {
-    const userCompanyRole = await this.userCompanyRoleRepository.findOneBy({ id, companyId });
+    const userCompanyRole = await this.userCompanyRoleRepository.findOneBy({
+      id,
+      companyId,
+      role: COMPANY_VISIBLE_ROLE,
+    });
     if (!userCompanyRole) throw new NotFoundException(`Asignación ${id} no encontrada`);
     return userCompanyRole;
   }
@@ -39,10 +55,20 @@ export class UserCompanyRoleService {
 
     try {
       return await this.dataSource.transaction(async (manager) => {
+        // Un rol de plataforma se responde igual que uno inexistente: ninguna empresa puede
+        // asignarlo, aunque conozca su id.
+        const role = await manager.getRepository(Role).findOneBy({ id: input.roleId });
+        if (!role || isPlatformRole(role)) {
+          throw new NotFoundException(`Rol ${input.roleId} no encontrado`);
+        }
+
         const repo = manager.getRepository(UserCompanyRole);
 
         const isMember = await repo.existsBy({ userId: input.userId, companyId });
-        if (!isMember) throw new NotFoundException(`Usuario ${input.userId} no encontrado`);
+        const isPlatformUser = isMember && (await repo.existsBy({ userId: input.userId, role: PLATFORM_ROLE }));
+        if (!isMember || isPlatformUser) {
+          throw new NotFoundException(`Usuario ${input.userId} no encontrado`);
+        }
 
         return repo.save(repo.create({ ...input, companyId }));
       });

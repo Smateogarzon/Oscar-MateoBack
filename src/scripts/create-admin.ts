@@ -8,7 +8,9 @@ import { Role } from '../graphql/role/entities/role.entity.js';
 import { UserCompanyRole } from '../graphql/user-company-role/entities/user-company-role.entity.js';
 import { User } from '../graphql/user/entities/user.entity.js';
 
-const ADMIN_ROLE_CODE = 'ADMIN';
+// Rol de plataforma (alcance GLOBAL): ninguna empresa lo ve en sus listas ni puede asignarlo;
+// por eso este es el único lugar donde se crea un super admin.
+const SUPER_ADMIN_ROLE_CODE = 'SUPER_ADMIN';
 const MIN_PASSWORD_LENGTH = 8;
 // Debe coincidir con PASSWORD_SALT_ROUNDS de user.service.ts.
 const PASSWORD_SALT_ROUNDS = 10;
@@ -29,7 +31,9 @@ async function main(): Promise<void> {
       throw new Error('Nombre, apellido y email son obligatorios.');
     }
     if (password.length < MIN_PASSWORD_LENGTH) {
-      throw new Error(`La contraseña debe tener al menos ${MIN_PASSWORD_LENGTH} caracteres.`);
+      throw new Error(
+        `La contraseña debe tener al menos ${MIN_PASSWORD_LENGTH} caracteres.`,
+      );
     }
 
     await dataSource.transaction(async (manager) => {
@@ -39,18 +43,23 @@ async function main(): Promise<void> {
         throw new Error(`Ya existe un usuario con el email ${email}.`);
       }
 
-      const role = await manager.getRepository(Role).findOneBy({ code: ADMIN_ROLE_CODE });
+      const role = await manager
+        .getRepository(Role)
+        .findOneBy({ code: SUPER_ADMIN_ROLE_CODE });
       if (!role) {
         throw new Error(
-          `No existe el rol ${ADMIN_ROLE_CODE}. Corre primero: npm run migration:run`,
+          `No existe el rol ${SUPER_ADMIN_ROLE_CODE}. Corre primero: npm run migration:run`,
         );
       }
 
-      const company = await manager
+      // El super admin lo es en todas las empresas: puede elegir con cuál trabajar al entrar.
+      const companies = await manager
         .getRepository(Company)
-        .findOne({ where: {}, order: { createdAt: 'ASC' } });
-      if (!company) {
-        throw new Error('No hay ninguna empresa registrada. Corre primero: npm run migration:run');
+        .find({ order: { name: 'ASC' } });
+      if (companies.length === 0) {
+        throw new Error(
+          'No hay ninguna empresa registrada. Corre primero: npm run migration:run',
+        );
       }
 
       const user = await userRepository.save(
@@ -67,15 +76,21 @@ async function main(): Promise<void> {
 
       const assignmentRepository = manager.getRepository(UserCompanyRole);
       await assignmentRepository.save(
-        assignmentRepository.create({
-          userId: user.id,
-          companyId: company.id,
-          roleId: role.id,
-          status: RecordStatus.ACTIVE,
-        }),
+        companies.map((company) =>
+          assignmentRepository.create({
+            userId: user.id,
+            companyId: company.id,
+            roleId: role.id,
+            status: RecordStatus.ACTIVE,
+          }),
+        ),
       );
 
-      console.log(`\nSuper admin creado: ${email} — empresa "${company.name}"`);
+      console.log(
+        `\nSuper admin creado: ${email} — en ${companies
+          .map((company) => `"${company.name}"`)
+          .join(' y ')}`,
+      );
     });
   } finally {
     rl.close();

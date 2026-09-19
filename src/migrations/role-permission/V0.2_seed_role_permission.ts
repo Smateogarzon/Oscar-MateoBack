@@ -6,10 +6,10 @@ export class SeedRolePermission1789598255956 implements MigrationInterface {
   name = 'SeedRolePermission1789598255956';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    // Administrador: ve todo, tiene los 20 permisos del catálogo.
+    // Administrador y super administrador: ven todo, tienen los 20 permisos del catálogo.
     await queryRunner.query(`
       INSERT INTO "role_permissions" ("roleId", "permissionId")
-      SELECT r.id, p.id FROM "roles" r CROSS JOIN "permissions" p WHERE r."code" = 'ADMIN'
+      SELECT r.id, p.id FROM "roles" r CROSS JOIN "permissions" p WHERE r."code" IN ('ADMIN', 'SUPER_ADMIN')
     `);
 
     await queryRunner.query(`
