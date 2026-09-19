@@ -7,8 +7,6 @@ function createService() {
   const userService = { findByEmail: vi.fn() };
   const jwtService = { sign: vi.fn(() => 'signed-token') };
   const roleRepository = { findBy: vi.fn().mockResolvedValue([]) };
-  const permissionRepository = { findBy: vi.fn().mockResolvedValue([]) };
-  const rolePermissionRepository = { find: vi.fn().mockResolvedValue([]) };
   const userCompanyRoleRepository = { find: vi.fn().mockResolvedValue([]) };
   const userRepository = { update: vi.fn().mockResolvedValue(undefined) };
   const dataSource = {
@@ -21,8 +19,6 @@ function createService() {
     userService as never,
     jwtService as never,
     roleRepository as never,
-    permissionRepository as never,
-    rolePermissionRepository as never,
     userCompanyRoleRepository as never,
     dataSource as never,
   );
@@ -32,8 +28,6 @@ function createService() {
     userService,
     jwtService,
     roleRepository,
-    permissionRepository,
-    rolePermissionRepository,
     userCompanyRoleRepository,
     userRepository,
   };
@@ -106,10 +100,11 @@ describe('AuthService', () => {
       const result = await service.login({ email: 'ana@example.com', password: rawPassword });
 
       expect(jwtService.sign).toHaveBeenCalledWith(
-        expect.objectContaining({ isAdmin: false }),
+        { sub: 'user-1', email: 'ana@example.com' },
         { expiresIn: '24h' },
       );
       expect(result.accessToken).toBe('signed-token');
+      expect(result.isAdmin).toBe(false);
     });
 
     it('signs a 1h token for a user with the ADMIN role', async () => {
@@ -121,12 +116,28 @@ describe('AuthService', () => {
       ]);
       roleRepository.findBy.mockResolvedValue([{ id: 'role-1', code: 'ADMIN' }]);
 
-      await service.login({ email: 'ana@example.com', password: rawPassword });
+      const result = await service.login({ email: 'ana@example.com', password: rawPassword });
 
       expect(jwtService.sign).toHaveBeenCalledWith(
-        expect.objectContaining({ isAdmin: true, roleCodes: ['ADMIN'] }),
+        { sub: 'user-1', email: 'ana@example.com' },
         { expiresIn: '1h' },
       );
+      expect(result.isAdmin).toBe(true);
+    });
+
+    it('keeps roles and permissions out of the token, they are checked per company on each request', async () => {
+      const { service, userService, jwtService, userCompanyRoleRepository, roleRepository } =
+        createService();
+      userService.findByEmail.mockResolvedValue(await activeUser());
+      userCompanyRoleRepository.find.mockResolvedValue([
+        { roleId: 'role-1', status: RecordStatus.ACTIVE },
+      ]);
+      roleRepository.findBy.mockResolvedValue([{ id: 'role-1', code: 'ADMIN' }]);
+
+      await service.login({ email: 'ana@example.com', password: rawPassword });
+
+      const [payload] = jwtService.sign.mock.calls[0] as unknown as [Record<string, unknown>];
+      expect(Object.keys(payload).sort()).toEqual(['email', 'sub']);
     });
   });
 

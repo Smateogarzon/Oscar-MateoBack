@@ -4,9 +4,7 @@ import { JwtService } from '@nestjs/jwt';
 import bcrypt from 'bcryptjs';
 import { DataSource, In, Repository } from 'typeorm';
 import { RecordStatus } from '../../common/enums/record-status.enum.js';
-import { Permission } from '../permission/entities/permission.entity.js';
 import { Role } from '../role/entities/role.entity.js';
-import { RolePermission } from '../role-permission/entities/role-permission.entity.js';
 import { UserCompanyRole } from '../user-company-role/entities/user-company-role.entity.js';
 import { User } from '../user/entities/user.entity.js';
 import { UserService } from '../user/user.service.js';
@@ -29,10 +27,6 @@ export class AuthService {
     private readonly jwtService: JwtService,
     @InjectRepository(Role)
     private readonly roleRepository: Repository<Role>,
-    @InjectRepository(Permission)
-    private readonly permissionRepository: Repository<Permission>,
-    @InjectRepository(RolePermission)
-    private readonly rolePermissionRepository: Repository<RolePermission>,
     @InjectRepository(UserCompanyRole)
     private readonly userCompanyRoleRepository: Repository<UserCompanyRole>,
     private readonly dataSource: DataSource,
@@ -55,52 +49,26 @@ export class AuthService {
     return user;
   }
 
-  // Roles y permisos de todas las empresas del usuario, aplanados; se hornean en el JWT
-  // para no tener que consultarlos en cada request.
-  private async loadRolesAndPermissions(
-    userId: string,
-  ): Promise<{ roleCodes: string[]; permissionCodes: string[] }> {
+  // Solo decide cuánto dura la sesión (los administradores, menos). Qué puede hacer el
+  // usuario NO va en el token: depende de la empresa y se consulta en cada petición.
+  private async isAdminInAnyCompany(userId: string): Promise<boolean> {
     const assignments = await this.userCompanyRoleRepository.find({
       where: { userId, status: RecordStatus.ACTIVE },
     });
     const roleIds = [
       ...new Set(assignments.map((assignment) => assignment.roleId)),
     ];
-    if (roleIds.length === 0) return { roleCodes: [], permissionCodes: [] };
+    if (roleIds.length === 0) return false;
 
     const roles = await this.roleRepository.findBy({ id: In(roleIds) });
-    const roleCodes = roles.map((role) => role.code);
-
-    const rolePermissions = await this.rolePermissionRepository.find({
-      where: { roleId: In(roleIds) },
-    });
-    const permissionIds = [
-      ...new Set(rolePermissions.map((rp) => rp.permissionId)),
-    ];
-    const permissions = permissionIds.length
-      ? await this.permissionRepository.findBy({ id: In(permissionIds) })
-      : [];
-
-    return {
-      roleCodes,
-      permissionCodes: permissions.map((permission) => permission.code),
-    };
+    return roles.some((role) => role.code === ADMIN_ROLE_CODE);
   }
 
   async login(input: LoginInput): Promise<LoginResult> {
     const user = await this.validateCredentials(input.email, input.password);
-    const { roleCodes, permissionCodes } = await this.loadRolesAndPermissions(
-      user.id,
-    );
-    const isAdmin = roleCodes.includes(ADMIN_ROLE_CODE);
+    const isAdmin = await this.isAdminInAnyCompany(user.id);
 
-    const payload: JwtPayload = {
-      sub: user.id,
-      email: user.email,
-      isAdmin,
-      roleCodes,
-      permissionCodes,
-    };
+    const payload: JwtPayload = { sub: user.id, email: user.email };
 
     const accessToken = this.jwtService.sign(payload, {
       expiresIn: isAdmin ? ADMIN_TOKEN_TTL : DEFAULT_TOKEN_TTL,

@@ -1,10 +1,14 @@
 import { randomBytes } from 'node:crypto';
 import { UseGuards } from '@nestjs/common';
-import { Args, Context, Mutation, Resolver } from '@nestjs/graphql';
+import { Args, Context, Mutation, Query, Resolver } from '@nestjs/graphql';
 import type { CookieOptions, Response } from 'express';
+import type { CompanyAccess } from '../../common/access/company-access.js';
+import { CurrentCompanyAccess } from '../../common/decorators/current-company.decorator.js';
+import { RequireCompanyMembership } from '../../common/decorators/permissions.decorator.js';
 import { SkipMustChangePassword } from '../../common/decorators/skip-must-change-password.decorator.js';
 import { CsrfGuard } from '../../common/guards/csrf.guard.js';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard.js';
+import { PermissionsGuard } from '../../common/guards/permissions.guard.js';
 import {
   ACCESS_TOKEN_COOKIE,
   ADMIN_TOKEN_TTL_MS,
@@ -13,6 +17,7 @@ import {
 } from './auth-cookie.constants.js';
 import { AuthService } from './auth.service.js';
 import { AuthPayload } from './dto/auth-payload.object-type.js';
+import { CompanyAccessObjectType } from './dto/company-access.object-type.js';
 import { LoginInput } from './dto/login.input.js';
 
 // En local queda sin definir (localhost comparte cookies entre puertos); en producción es
@@ -57,6 +62,15 @@ export class AuthResolver {
     });
 
     return { user };
+  }
+
+  // Roles y permisos del usuario en la empresa con la que trabaja (x-company-id), leídos de
+  // la base en el momento: reflejan los cambios de la configuración sin volver a entrar.
+  @Query(() => CompanyAccessObjectType)
+  @UseGuards(JwtAuthGuard, PermissionsGuard, CsrfGuard)
+  @RequireCompanyMembership()
+  myAccess(@CurrentCompanyAccess() access: CompanyAccess): CompanyAccessObjectType {
+    return access;
   }
 
   @Mutation(() => Boolean)

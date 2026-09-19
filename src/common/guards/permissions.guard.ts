@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ForbiddenException,
   Injectable,
   UnauthorizedException,
@@ -6,32 +7,52 @@ import {
   type ExecutionContext,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
-import { GqlExecutionContext } from '@nestjs/graphql';
-import type { JwtPayload } from '../../graphql/auth/interface/jwt-payload.interface.js';
-import { PERMISSIONS_KEY } from '../decorators/permissions.decorator.js';
+import { isUUID } from 'class-validator';
+import { DataSource } from 'typeorm';
+import { COMPANY_HEADER } from '../../graphql/auth/auth-cookie.constants.js';
+import { loadCompanyAccess } from '../access/company-access.js';
+import { ACCESS_RULE_KEY, type AccessRule } from '../decorators/permissions.decorator.js';
+import { getRequestFromContext } from '../utils/request-from-context.util.js';
 
+// Deja pasar solo si el usuario cumple la regla de acceso de la operación (ver
+// permissions.decorator.ts) en la empresa indicada en el encabezado x-company-id. La empresa
+// se valida contra la base, no se confía en el encabezado: si el usuario no es miembro de
+// ella, se rechaza. Debe ir después de JwtAuthGuard, que es quien identifica al usuario.
 @Injectable()
 export class PermissionsGuard implements CanActivate {
-  constructor(private readonly reflector: Reflector) {}
+  constructor(
+    private readonly reflector: Reflector,
+    private readonly dataSource: DataSource,
+  ) {}
 
-  canActivate(context: ExecutionContext): boolean {
-    const requiredPermissions = this.reflector.getAllAndOverride<string[]>(PERMISSIONS_KEY, [
+  async canActivate(context: ExecutionContext): Promise<boolean> {
+    const rule = this.reflector.getAllAndOverride<AccessRule | undefined>(ACCESS_RULE_KEY, [
       context.getHandler(),
       context.getClass(),
     ]);
-    if (!requiredPermissions || requiredPermissions.length === 0) return true;
+    if (!rule) return true;
 
-    const req = GqlExecutionContext.create(context).getContext().req;
-    const user: JwtPayload | undefined = req.user;
+    const req = getRequestFromContext(context);
+    const user = req.user;
     if (!user) throw new UnauthorizedException();
 
-    const hasAllPermissions = requiredPermissions.every((permission) =>
-      user.permissionCodes.includes(permission),
-    );
-    if (!hasAllPermissions) {
+    const companyId = req.headers[COMPANY_HEADER];
+    if (typeof companyId !== 'string' || !isUUID(companyId)) {
+      throw new BadRequestException('Falta indicar la empresa con la que estás trabajando');
+    }
+
+    const access = await loadCompanyAccess(this.dataSource, user.sub, companyId);
+    if (!access) {
+      throw new ForbiddenException('No perteneces a esta empresa');
+    }
+
+    const has = (permission: string) => access.permissionCodes.includes(permission);
+    const granted = rule.mode === 'all' ? rule.permissions.every(has) : rule.permissions.some(has);
+    if (!granted) {
       throw new ForbiddenException('No tienes los permisos requeridos para esta operación');
     }
 
+    req.companyAccess = access;
     return true;
   }
 }

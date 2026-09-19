@@ -9,6 +9,8 @@ const UNIQUE_VIOLATION = '23505';
 
 // RolePermission es una tabla inmutable (ver ImmutableEntity): no tiene `status`,
 // así que quitar un permiso de un rol es un delete real, no una desactivación.
+// Todo se hace dentro de la empresa activa: una empresa nunca ve ni toca las asignaciones
+// de otra, aunque conozca el id.
 @Injectable()
 export class RolePermissionService {
   constructor(
@@ -17,23 +19,23 @@ export class RolePermissionService {
     private readonly dataSource: DataSource,
   ) {}
 
-  findAll(roleId?: string): Promise<RolePermission[]> {
-    return this.rolePermissionRepository.find({ where: { ...(roleId && { roleId }) } });
+  findAll(companyId: string, roleId?: string): Promise<RolePermission[]> {
+    return this.rolePermissionRepository.find({ where: { companyId, ...(roleId && { roleId }) } });
   }
 
-  async create(input: CreateRolePermissionInput): Promise<RolePermission> {
+  async create(companyId: string, input: CreateRolePermissionInput): Promise<RolePermission> {
     try {
       return await this.dataSource.transaction((manager) => {
         const repo = manager.getRepository(RolePermission);
-        return repo.save(repo.create(input));
+        return repo.save(repo.create({ ...input, companyId }));
       });
     } catch (error) {
       throw this.mapWriteError(error);
     }
   }
 
-  async remove(id: string): Promise<boolean> {
-    const rolePermission = await this.rolePermissionRepository.findOneBy({ id });
+  async remove(companyId: string, id: string): Promise<boolean> {
+    const rolePermission = await this.rolePermissionRepository.findOneBy({ id, companyId });
     if (!rolePermission) throw new NotFoundException(`Asignación ${id} no encontrada`);
 
     await this.dataSource.transaction((manager) => manager.getRepository(RolePermission).delete(id));

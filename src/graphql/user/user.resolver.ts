@@ -1,12 +1,17 @@
 import { UseGuards } from '@nestjs/common';
 import { Args, ID, Mutation, Query, Resolver } from '@nestjs/graphql';
+import { CurrentCompanyId } from '../../common/decorators/current-company.decorator.js';
 import { CurrentUser } from '../../common/decorators/current-user.decorator.js';
-import { Roles } from '../../common/decorators/roles.decorator.js';
+import {
+  RequireAnyPermission,
+  RequirePermissions,
+} from '../../common/decorators/permissions.decorator.js';
 import { SkipMustChangePassword } from '../../common/decorators/skip-must-change-password.decorator.js';
+import { PermissionCode } from '../../common/enums/permission-code.enum.js';
 import { RecordStatus } from '../../common/enums/record-status.enum.js';
 import { CsrfGuard } from '../../common/guards/csrf.guard.js';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard.js';
-import { RolesGuard } from '../../common/guards/roles.guard.js';
+import { PermissionsGuard } from '../../common/guards/permissions.guard.js';
 import type { JwtPayload } from '../auth/interface/jwt-payload.interface.js';
 import { ChangePasswordInput } from './dto/change-password.input.js';
 import { CreateUserInput } from './dto/create-user.input.js';
@@ -14,24 +19,30 @@ import { UpdateUserInput } from './dto/update-user.input.js';
 import { UserObjectType } from './dto/user.object-type.js';
 import { UserService } from './user.service.js';
 
+// Todo lo que administra usuarios trabaja sobre los de la empresa activa: ver UserService.
 @Resolver(() => UserObjectType)
-@UseGuards(JwtAuthGuard, RolesGuard, CsrfGuard)
+@UseGuards(JwtAuthGuard, PermissionsGuard, CsrfGuard)
 export class UserResolver {
   constructor(private readonly userService: UserService) {}
 
+  // Las pantallas de Usuarios y de Configuración (personal por ubicación) listan usuarios.
   @Query(() => [UserObjectType])
-  @Roles('ADMIN')
+  @RequireAnyPermission(PermissionCode.USERS_MANAGE, PermissionCode.SETTINGS_MANAGE)
   users(
+    @CurrentCompanyId() companyId: string,
     @Args('status', { type: () => RecordStatus, nullable: true })
     status?: RecordStatus,
   ) {
-    return this.userService.findAll(status);
+    return this.userService.findAll(companyId, status);
   }
 
   @Query(() => UserObjectType)
-  @Roles('ADMIN')
-  user(@Args('id', { type: () => ID }) id: string) {
-    return this.userService.findOne(id);
+  @RequireAnyPermission(PermissionCode.USERS_MANAGE, PermissionCode.SETTINGS_MANAGE)
+  user(
+    @CurrentCompanyId() companyId: string,
+    @Args('id', { type: () => ID }) id: string,
+  ) {
+    return this.userService.findInCompany(companyId, id);
   }
 
   @Query(() => UserObjectType)
@@ -41,24 +52,40 @@ export class UserResolver {
   }
 
   @Mutation(() => UserObjectType)
-  @Roles('ADMIN')
-  createUser(@Args('input') input: CreateUserInput) {
-    return this.userService.create(input);
+  @RequirePermissions(PermissionCode.USERS_MANAGE)
+  createUser(
+    @CurrentCompanyId() companyId: string,
+    @Args('input') input: CreateUserInput,
+  ) {
+    return this.userService.create(companyId, input);
   }
 
   @Mutation(() => UserObjectType)
-  @Roles('ADMIN')
+  @RequirePermissions(PermissionCode.USERS_MANAGE)
   updateUser(
+    @CurrentCompanyId() companyId: string,
     @Args('id', { type: () => ID }) id: string,
     @Args('input') input: UpdateUserInput,
   ) {
-    return this.userService.update(id, input);
+    return this.userService.update(companyId, id, input);
   }
 
   @Mutation(() => UserObjectType)
-  @Roles('ADMIN')
-  deactivateUser(@Args('id', { type: () => ID }) id: string) {
-    return this.userService.deactivate(id);
+  @RequirePermissions(PermissionCode.USERS_MANAGE)
+  deactivateUser(
+    @CurrentCompanyId() companyId: string,
+    @Args('id', { type: () => ID }) id: string,
+  ) {
+    return this.userService.deactivate(companyId, id);
+  }
+
+  @Mutation(() => UserObjectType)
+  @RequirePermissions(PermissionCode.USERS_MANAGE)
+  resetUserPassword(
+    @CurrentCompanyId() companyId: string,
+    @Args('id', { type: () => ID }) id: string,
+  ) {
+    return this.userService.resetPassword(companyId, id);
   }
 
   @Mutation(() => UserObjectType)

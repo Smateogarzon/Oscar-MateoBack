@@ -2,12 +2,16 @@ import { BadRequestException, ConflictException, Injectable, NotFoundException }
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, QueryFailedError, Repository } from 'typeorm';
 import { RecordStatus } from '../../common/enums/record-status.enum.js';
+import { Location } from '../location/entities/location.entity.js';
+import { UserCompanyRole } from '../user-company-role/entities/user-company-role.entity.js';
 import { CreateUserLocationAccessInput } from './dto/create-user-location-access.input.js';
 import { UserLocationAccess } from './entities/user-location-access.entity.js';
 
 const FOREIGN_KEY_VIOLATION = '23503';
 const UNIQUE_VIOLATION = '23505';
 
+// El acceso no lleva empresa propia: es la de su sede. Todo se hace dentro de la empresa
+// activa, así que un acceso a una sede de otra empresa se responde como si no existiera.
 @Injectable()
 export class UserLocationAccessService {
   constructor(
@@ -16,21 +20,47 @@ export class UserLocationAccessService {
     private readonly dataSource: DataSource,
   ) {}
 
-  findAll(userId?: string, locationId?: string, status?: RecordStatus): Promise<UserLocationAccess[]> {
+  findAll(
+    companyId: string,
+    userId?: string,
+    locationId?: string,
+    status?: RecordStatus,
+  ): Promise<UserLocationAccess[]> {
     return this.userLocationAccessRepository.find({
-      where: { ...(userId && { userId }), ...(locationId && { locationId }), ...(status && { status }) },
+      where: {
+        location: { companyId },
+        ...(userId && { userId }),
+        ...(locationId && { locationId }),
+        ...(status && { status }),
+      },
     });
   }
 
-  async findOne(id: string): Promise<UserLocationAccess> {
-    const access = await this.userLocationAccessRepository.findOneBy({ id });
+  async findOne(companyId: string, id: string): Promise<UserLocationAccess> {
+    const access = await this.userLocationAccessRepository.findOneBy({
+      id,
+      location: { companyId },
+    });
     if (!access) throw new NotFoundException(`Acceso ${id} no encontrado`);
     return access;
   }
 
-  async create(input: CreateUserLocationAccessInput): Promise<UserLocationAccess> {
+  // La sede tiene que ser de la empresa y el usuario, miembro activo de ella.
+  async create(companyId: string, input: CreateUserLocationAccessInput): Promise<UserLocationAccess> {
     try {
-      return await this.dataSource.transaction((manager) => {
+      return await this.dataSource.transaction(async (manager) => {
+        const location = await manager
+          .getRepository(Location)
+          .findOneBy({ id: input.locationId, companyId });
+        if (!location) throw new NotFoundException(`Ubicación ${input.locationId} no encontrada`);
+
+        const isMember = await manager.getRepository(UserCompanyRole).existsBy({
+          userId: input.userId,
+          companyId,
+          status: RecordStatus.ACTIVE,
+        });
+        if (!isMember) throw new NotFoundException(`Usuario ${input.userId} no encontrado`);
+
         const repo = manager.getRepository(UserLocationAccess);
         return repo.save(repo.create(input));
       });
@@ -39,8 +69,8 @@ export class UserLocationAccessService {
     }
   }
 
-  async deactivate(id: string): Promise<UserLocationAccess> {
-    const access = await this.findOne(id);
+  async deactivate(companyId: string, id: string): Promise<UserLocationAccess> {
+    const access = await this.findOne(companyId, id);
     access.status = RecordStatus.INACTIVE;
     return this.dataSource.transaction((manager) => manager.getRepository(UserLocationAccess).save(access));
   }
@@ -48,8 +78,8 @@ export class UserLocationAccessService {
   // A diferencia de User/Location, esto sí necesita reactivar: es un checkbox que
   // se prende y apaga, y el índice único (userId, locationId) no distingue estado
   // — recrear el registro tras desactivarlo violaría esa restricción.
-  async activate(id: string): Promise<UserLocationAccess> {
-    const access = await this.findOne(id);
+  async activate(companyId: string, id: string): Promise<UserLocationAccess> {
+    const access = await this.findOne(companyId, id);
     access.status = RecordStatus.ACTIVE;
     return this.dataSource.transaction((manager) => manager.getRepository(UserLocationAccess).save(access));
   }

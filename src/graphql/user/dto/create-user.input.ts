@@ -1,5 +1,5 @@
-import { Field, InputType } from '@nestjs/graphql';
-import { IsEmail, IsNotEmpty, IsOptional, IsString, MaxLength } from 'class-validator';
+import { Field, ID, InputType } from '@nestjs/graphql';
+import { IsEmail, IsNotEmpty, IsOptional, IsString, IsUUID, MaxLength } from 'class-validator';
 
 @InputType()
 export class CreateUserInput {
@@ -37,4 +37,10 @@ export class CreateUserInput {
   @IsOptional()
   @IsString()
   avatarUrl?: string;
+
+  // Rol con el que entra a la empresa de quien lo crea: el usuario nace ya como miembro de
+  // ella, en el mismo paso, porque un usuario sin empresa no lo vería nadie.
+  @Field(() => ID)
+  @IsUUID()
+  roleId: string;
 }
