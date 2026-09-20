@@ -28,6 +28,13 @@ import { UserModule } from './graphql/user/user.module.js';
 import { UserCompanyRoleModule } from './graphql/user-company-role/user-company-role.module.js';
 import { RolePermissionModule } from './graphql/role-permission/role-permission.module.js';
 import { UserLocationAccessModule } from './graphql/user-location-access/user-location-access.module.js';
+import { SaleModule } from './graphql/sale/sale.module.js';
+import { DiscountRequestModule } from './graphql/discount-request/discount-request.module.js';
+import { PaymentMethodModule } from './graphql/payment-method/payment-method.module.js';
+import { CashRegisterModule } from './graphql/cash-register/cash-register.module.js';
+import { CashSessionModule } from './graphql/cash-session/cash-session.module.js';
+import { CashMovementModule } from './graphql/cash-movement/cash-movement.module.js';
+import { SalePaymentModule } from './graphql/sale-payment/sale-payment.module.js';
 import { StorageModule } from './common/storage/storage.module.js';
 import { UploadModule } from './uploads/upload.module.js';
 
@@ -107,6 +114,13 @@ const { validationRules, plugins } = new ApolloArmor().protect();
     UserCompanyRoleModule,
     RolePermissionModule,
     UserLocationAccessModule,
+    SaleModule,
+    DiscountRequestModule,
+    PaymentMethodModule,
+    CashRegisterModule,
+    CashSessionModule,
+    CashMovementModule,
+    SalePaymentModule,
     StorageModule,
     UploadModule,
   ],

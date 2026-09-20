@@ -1,0 +1,415 @@
+import {
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Decimal } from 'decimal.js';
+import { DataSource, EntityManager, In, Repository } from 'typeorm';
+import { SaleItem } from '../sale/entities/sale-item.entity.js';
+import { Sale } from '../sale/entities/sale.entity.js';
+import { SaleService } from '../sale/sale.service.js';
+import { ApproveDiscountRequestInput } from './dto/approve-discount-request.input.js';
+import { DiscountRequestNotesInput } from './dto/discount-request-notes.input.js';
+import { RequestDiscountInput } from './dto/request-discount.input.js';
+import { lineGross, MAX_DISCOUNT_PERCENT, maxDiscountFor } from './discount-rules.js';
+import {
+  ACTIVE_DISCOUNT_REQUEST_STATUSES,
+  DiscountRequestStatus,
+} from './entities/discount-request-status.enum.js';
+import { DiscountRequestItem } from './entities/discount-request-item.entity.js';
+import { DiscountRequest } from './entities/discount-request.entity.js';
+
+// Flujo de un descuento: el cajero lo solicita, un administrador lo aprueba (con los montos que
+// decida) o lo rechaza, y solo el aprobado descuenta. Un administrador también puede editar los
+// montos de un descuento ya aprobado. Una venta tiene a lo sumo UNA solicitud activa (pendiente
+// o aprobada): rechazada o cancelada, se puede pedir otra.
+//
+// La solicitud es sobre toda la venta (un monto) o sobre líneas (un monto por línea). Nadie, ni un
+// administrador, pasa del 30 % del valor de la venta o de la línea (ver discount-rules.ts).
+// Al aprobarse, el descuento de cada línea se escribe en la línea (sale_items.discountAmount) y el
+// de toda la venta en sales.generalDiscount, y los totales se recalculan.
+//
+// Toda operación bloquea primero la VENTA (SaleService.lockDraft), nunca la solicitud sola: así
+// cualquier cambio a la venta o a sus solicitudes espera al anterior y no hay bloqueos cruzados.
+// La empresa de una solicitud es la de su venta.
+@Injectable()
+export class DiscountRequestService {
+  constructor(
+    @InjectRepository(DiscountRequest)
+    private readonly requestRepository: Repository<DiscountRequest>,
+    @InjectRepository(DiscountRequestItem)
+    private readonly requestItemRepository: Repository<DiscountRequestItem>,
+    private readonly dataSource: DataSource,
+    private readonly sales: SaleService,
+  ) {}
+
+  // Las más recientes primero.
+  findAll(
+    companyId: string,
+    filters: { status?: DiscountRequestStatus; saleId?: string } = {},
+  ): Promise<DiscountRequest[]> {
+    const { status, saleId } = filters;
+    return this.requestRepository.find({
+      where: { sale: { companyId }, ...(status && { status }), ...(saleId && { saleId }) },
+      order: { requestedAt: 'DESC' },
+    });
+  }
+
+  async findOne(companyId: string, id: string): Promise<DiscountRequest> {
+    const request = await this.requestRepository.findOne({ where: { id, sale: { companyId } } });
+    if (!request) throw new NotFoundException(`Solicitud ${id} no encontrada`);
+    return request;
+  }
+
+  // Los montos por línea de una solicitud; vacío si es sobre toda la venta.
+  async findItems(companyId: string, requestId: string): Promise<DiscountRequestItem[]> {
+    await this.findOne(companyId, requestId);
+    return this.requestItemRepository.find({ where: { discountRequestId: requestId } });
+  }
+
+  // Pide un descuento sobre toda la venta (`requestedDiscount`) o sobre líneas (`items`, cada una
+  // con su monto): uno de los dos. No cambia los totales: eso pasa solo si se aprueba.
+  async request(
+    companyId: string,
+    requesterId: string,
+    input: RequestDiscountInput,
+  ): Promise<DiscountRequest> {
+    const itemInputs = input.items ?? [];
+    const wantsItems = itemInputs.length > 0;
+    const wantsWholeSale = input.requestedDiscount !== undefined && input.requestedDiscount !== null;
+    if (wantsItems === wantsWholeSale) {
+      throw new BadRequestException(
+        'Pide el descuento de toda la venta (requestedDiscount) o el de sus líneas (items), no ambos ni ninguno',
+      );
+    }
+
+    const saleItemIds = itemInputs.map((item) => item.saleItemId);
+    if (new Set(saleItemIds).size !== saleItemIds.length) {
+      throw new BadRequestException('Una línea no puede repetirse en la solicitud');
+    }
+
+    const wholeSaleAmount = wantsWholeSale ? new Decimal(input.requestedDiscount as string) : null;
+    const itemAmounts = itemInputs.map((item) => ({
+      saleItemId: item.saleItemId,
+      amount: new Decimal(item.amount),
+    }));
+    if (
+      (wholeSaleAmount && wholeSaleAmount.lessThanOrEqualTo(0)) ||
+      itemAmounts.some((item) => item.amount.lessThanOrEqualTo(0))
+    ) {
+      throw new BadRequestException('El descuento solicitado debe ser mayor que cero');
+    }
+    const reason = input.reason?.trim() || null;
+
+    return this.dataSource.transaction(async (manager) => {
+      const sale = await this.sales.lockDraft(manager, companyId, input.saleId);
+
+      const repo = manager.getRepository(DiscountRequest);
+      const hasActiveRequest = await repo.existsBy({
+        saleId: sale.id,
+        status: In(ACTIVE_DISCOUNT_REQUEST_STATUSES),
+      });
+      if (hasActiveRequest) {
+        throw new ConflictException('La venta ya tiene una solicitud de descuento activa');
+      }
+
+      const lines = await manager.getRepository(SaleItem).find({ where: { saleId: sale.id } });
+      if (lines.length === 0) throw new BadRequestException('La venta no tiene líneas para descontar');
+
+      if (wholeSaleAmount) {
+        this.assertWithinCap(wholeSaleAmount, this.saleValue(lines), 'de la venta');
+      } else {
+        const linesById = new Map(lines.map((line) => [line.id, line]));
+        for (const item of itemAmounts) {
+          const line = linesById.get(item.saleItemId);
+          if (!line) throw new BadRequestException('Alguna de las líneas indicadas no pertenece a la venta');
+          this.assertWithinCap(item.amount, lineGross(line), 'de una línea');
+        }
+      }
+
+      const requestedDiscount =
+        wholeSaleAmount ?? itemAmounts.reduce((sum, item) => sum.plus(item.amount), new Decimal(0));
+      const request = await repo.save(
+        repo.create({
+          saleId: sale.id,
+          requestedBy: requesterId,
+          requestedDiscount,
+          reason,
+          status: DiscountRequestStatus.PENDING,
+        }),
+      );
+
+      if (itemAmounts.length > 0) {
+        const itemRepo = manager.getRepository(DiscountRequestItem);
+        await itemRepo.save(
+          itemAmounts.map((item) =>
+            itemRepo.create({
+              discountRequestId: request.id,
+              saleItemId: item.saleItemId,
+              requestedDiscount: item.amount,
+            }),
+          ),
+        );
+      }
+
+      return request;
+    });
+  }
+
+  // Aprueba una solicitud pendiente y aplica los montos aprobados. Los que no se indiquen se
+  // aprueban como se pidieron. Cualquier administrador puede aprobar, también una solicitud que él
+  // mismo hizo.
+  async approve(
+    companyId: string,
+    resolverId: string,
+    id: string,
+    input: ApproveDiscountRequestInput,
+  ): Promise<DiscountRequest> {
+    return this.dataSource.transaction(async (manager) => {
+      const { request, sale } = await this.lockRequestAndSale(manager, companyId, id);
+      if (request.status !== DiscountRequestStatus.PENDING) {
+        throw new ConflictException('La solicitud ya fue resuelta');
+      }
+
+      await this.applyAmounts(manager, request, sale, input, 'approve');
+
+      request.status = DiscountRequestStatus.APPROVED;
+      this.markResolved(request, resolverId, input.notes);
+      return manager.getRepository(DiscountRequest).save(request);
+    });
+  }
+
+  // Cambia los montos de un descuento YA aprobado (no las líneas a las que apunta). Lo que no se
+  // indique se queda como estaba. Solo mientras la venta siga en borrador.
+  async editApproved(
+    companyId: string,
+    editorId: string,
+    id: string,
+    input: ApproveDiscountRequestInput,
+  ): Promise<DiscountRequest> {
+    return this.dataSource.transaction(async (manager) => {
+      const { request, sale } = await this.lockRequestAndSale(manager, companyId, id);
+      if (request.status !== DiscountRequestStatus.APPROVED) {
+        throw new ConflictException('Solo se puede editar un descuento aprobado');
+      }
+
+      await this.applyAmounts(manager, request, sale, input, 'edit');
+
+      this.markResolved(request, editorId, input.notes);
+      return manager.getRepository(DiscountRequest).save(request);
+    });
+  }
+
+  // Rechaza una solicitud pendiente: la venta no cambia y queda libre para pedir otra.
+  async reject(
+    companyId: string,
+    resolverId: string,
+    id: string,
+    input: DiscountRequestNotesInput,
+  ): Promise<DiscountRequest> {
+    return this.dataSource.transaction(async (manager) => {
+      const { request } = await this.lockRequestAndSale(manager, companyId, id);
+      if (request.status !== DiscountRequestStatus.PENDING) {
+        throw new ConflictException('La solicitud ya fue resuelta');
+      }
+
+      request.status = DiscountRequestStatus.REJECTED;
+      this.markResolved(request, resolverId, input.notes);
+      return manager.getRepository(DiscountRequest).save(request);
+    });
+  }
+
+  // Cancela una solicitud activa. La puede cancelar quien la pidió o quien puede aprobar
+  // (`canApprove`). Si ya estaba aprobada, el descuento se quita de la venta y de sus líneas.
+  async cancel(
+    companyId: string,
+    userId: string,
+    id: string,
+    canApprove: boolean,
+    input: DiscountRequestNotesInput,
+  ): Promise<DiscountRequest> {
+    return this.dataSource.transaction(async (manager) => {
+      const { request, sale } = await this.lockRequestAndSale(manager, companyId, id);
+
+      if (!ACTIVE_DISCOUNT_REQUEST_STATUSES.includes(request.status)) {
+        throw new ConflictException('La solicitud ya no está activa');
+      }
+      if (request.requestedBy !== userId && !canApprove) {
+        throw new ForbiddenException('Solo quien la pidió o quien aprueba descuentos puede cancelarla');
+      }
+
+      if (request.status === DiscountRequestStatus.APPROVED) {
+        await this.removeAppliedDiscount(manager, request, sale);
+      }
+
+      request.status = DiscountRequestStatus.CANCELLED;
+      this.markResolved(request, userId, input.notes);
+      return manager.getRepository(DiscountRequest).save(request);
+    });
+  }
+
+  // Decide los montos, comprueba el tope y los aplica: en las líneas si la solicitud es sobre
+  // líneas, o en el descuento general de la venta si es sobre toda la venta. Después recalcula los
+  // totales; si algo falla, todo se deshace con la transacción.
+  private async applyAmounts(
+    manager: EntityManager,
+    request: DiscountRequest,
+    sale: Sale,
+    input: ApproveDiscountRequestInput,
+    mode: 'approve' | 'edit',
+  ): Promise<void> {
+    const requestItems = await manager
+      .getRepository(DiscountRequestItem)
+      .find({ where: { discountRequestId: request.id } });
+    const lines = await manager.getRepository(SaleItem).find({ where: { saleId: sale.id } });
+
+    const isWholeSale = requestItems.length === 0;
+    const givenItems = input.items ?? [];
+    const givesAmount = input.approvedDiscount !== undefined && input.approvedDiscount !== null;
+
+    if (isWholeSale && givenItems.length > 0) {
+      throw new BadRequestException(
+        'Esta solicitud es sobre toda la venta: indica un solo monto (approvedDiscount), no líneas',
+      );
+    }
+    if (!isWholeSale && givesAmount) {
+      throw new BadRequestException(
+        'Esta solicitud es sobre líneas: indica el monto de cada una (items), no un monto único',
+      );
+    }
+    if (mode === 'edit' && !givesAmount && givenItems.length === 0) {
+      throw new BadRequestException('Indica el nuevo monto del descuento');
+    }
+
+    if (isWholeSale) {
+      const amount = givesAmount
+        ? new Decimal(input.approvedDiscount as string)
+        : request.requestedDiscount;
+      if (amount.lessThanOrEqualTo(0)) {
+        throw new BadRequestException('El descuento aprobado debe ser mayor que cero');
+      }
+      this.assertWithinCap(amount, this.saleValue(lines), 'de la venta');
+
+      sale.generalDiscount = amount;
+      request.approvedDiscount = amount;
+    } else {
+      const given = new Map<string, Decimal>();
+      for (const item of givenItems) {
+        if (given.has(item.saleItemId)) {
+          throw new BadRequestException('Una línea no puede repetirse');
+        }
+        if (!requestItems.some((requestItem) => requestItem.saleItemId === item.saleItemId)) {
+          throw new BadRequestException('Alguna de las líneas indicadas no pertenece a esta solicitud');
+        }
+        given.set(item.saleItemId, new Decimal(item.amount));
+      }
+
+      const linesById = new Map(lines.map((line) => [line.id, line]));
+      const changedLines: SaleItem[] = [];
+      let total = new Decimal(0);
+
+      for (const requestItem of requestItems) {
+        const line = linesById.get(requestItem.saleItemId);
+        if (!line) throw new BadRequestException('Una línea de la solicitud ya no está en la venta');
+
+        // Lo que no se indica: al aprobar se aprueba lo pedido; al editar, lo ya aprobado.
+        const current =
+          mode === 'edit'
+            ? (requestItem.approvedDiscount ?? requestItem.requestedDiscount)
+            : requestItem.requestedDiscount;
+        const amount = given.get(requestItem.saleItemId) ?? current;
+
+        const gross = lineGross(line);
+        this.assertWithinCap(amount, gross, 'de una línea');
+
+        requestItem.approvedDiscount = amount;
+        line.discountAmount = amount;
+        line.total = gross.minus(amount);
+        changedLines.push(line);
+        total = total.plus(amount);
+      }
+      if (total.lessThanOrEqualTo(0)) {
+        throw new BadRequestException('El descuento aprobado debe ser mayor que cero');
+      }
+
+      await manager.getRepository(DiscountRequestItem).save(requestItems);
+      await manager.getRepository(SaleItem).save(changedLines);
+      sale.generalDiscount = new Decimal(0);
+      request.approvedDiscount = total;
+    }
+
+    await this.sales.recalculate(manager, sale);
+  }
+
+  // Quita de la venta un descuento que estaba aplicado: deja las líneas sin descuento (o el
+  // descuento general en cero) y recalcula. Los montos aprobados quedan en la solicitud, como
+  // historial de lo que se llegó a aprobar.
+  private async removeAppliedDiscount(
+    manager: EntityManager,
+    request: DiscountRequest,
+    sale: Sale,
+  ): Promise<void> {
+    const requestItems = await manager
+      .getRepository(DiscountRequestItem)
+      .find({ where: { discountRequestId: request.id } });
+
+    if (requestItems.length > 0) {
+      const lineRepo = manager.getRepository(SaleItem);
+      const lines = await lineRepo.find({
+        where: { id: In(requestItems.map((requestItem) => requestItem.saleItemId)) },
+      });
+      for (const line of lines) {
+        const gross = lineGross(line);
+        line.discountAmount = new Decimal(0);
+        line.total = gross;
+      }
+      await lineRepo.save(lines);
+    }
+
+    sale.generalDiscount = new Decimal(0);
+    await this.sales.recalculate(manager, sale);
+  }
+
+  // Trae la solicitud y su venta, con la venta bloqueada y en borrador. La solicitud se lee dos
+  // veces: la primera solo para saber de qué venta es, y la segunda ya con la venta bloqueada,
+  // para ver su estado real. Una solicitud de otra empresa se responde como inexistente.
+  private async lockRequestAndSale(
+    manager: EntityManager,
+    companyId: string,
+    id: string,
+  ): Promise<{ request: DiscountRequest; sale: Sale }> {
+    const repo = manager.getRepository(DiscountRequest);
+
+    const found = await repo.findOneBy({ id });
+    const inCompany =
+      found !== null && (await manager.getRepository(Sale).existsBy({ id: found.saleId, companyId }));
+    if (!found || !inCompany) throw new NotFoundException(`Solicitud ${id} no encontrada`);
+
+    const sale = await this.sales.lockDraft(manager, companyId, found.saleId);
+    const request = await repo.findOneBy({ id });
+    if (!request) throw new NotFoundException(`Solicitud ${id} no encontrada`);
+    return { request, sale };
+  }
+
+  // Lo que vale la venta antes de descuentos: la suma de sus líneas.
+  private saleValue(lines: SaleItem[]): Decimal {
+    return lines.reduce((sum, line) => sum.plus(lineGross(line)), new Decimal(0));
+  }
+
+  private assertWithinCap(amount: Decimal, value: Decimal, subject: string): void {
+    if (amount.greaterThan(maxDiscountFor(value))) {
+      throw new BadRequestException(
+        `El descuento ${subject} no puede pasar del ${MAX_DISCOUNT_PERCENT}% de su valor`,
+      );
+    }
+  }
+
+  private markResolved(request: DiscountRequest, userId: string, notes?: string | null): void {
+    request.resolvedBy = userId;
+    request.resolvedAt = new Date();
+    request.resolutionNotes = notes?.trim() || null;
+  }
+}

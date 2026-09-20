@@ -1,5 +1,6 @@
 import { ForbiddenException, NotFoundException } from '@nestjs/common';
 import { RecordStatus } from '../../common/enums/record-status.enum.js';
+import { CashRegister } from '../cash-register/entities/cash-register.entity.js';
 import { LocationType } from './entities/location-type.enum.js';
 import { LocationService } from './location.service.js';
 
@@ -12,13 +13,20 @@ function createService() {
     create: vi.fn((data: object) => data),
     save: vi.fn(async (location: object) => ({ id: '1', ...location })),
   };
+  const cashRegisterRepo = {
+    create: vi.fn((data: object) => data),
+    save: vi.fn(async (register: object) => ({ id: 'register-1', ...register })),
+  };
   const dataSource = {
     transaction: vi.fn(async (fn: (manager: unknown) => unknown) =>
-      fn({ getRepository: () => transactionRepo }),
+      fn({
+        getRepository: (entity: unknown) =>
+          entity === CashRegister ? cashRegisterRepo : transactionRepo,
+      }),
     ),
   };
   const service = new LocationService(repo as never, dataSource as never);
-  return { service, repo, transactionRepo, dataSource };
+  return { service, repo, transactionRepo, cashRegisterRepo, dataSource };
 }
 
 const COMPANY = 'company-1';
@@ -60,6 +68,44 @@ describe('LocationService', () => {
 
       expect(dataSource.transaction).toHaveBeenCalled();
       expect(location).toMatchObject(input);
+    });
+
+    it('gives a new store its cash register, named after the store, in the same transaction', async () => {
+      const { service, cashRegisterRepo, dataSource } = createService();
+
+      await service.create(COMPANY, input);
+
+      expect(dataSource.transaction).toHaveBeenCalledTimes(1);
+      expect(cashRegisterRepo.create).toHaveBeenCalledWith({
+        storeId: '1',
+        name: 'Sede principal',
+        code: 'C1',
+      });
+      expect(cashRegisterRepo.save).toHaveBeenCalledTimes(1);
+    });
+
+    it('cuts the store name to what a cash register name admits', async () => {
+      const { service, cashRegisterRepo } = createService();
+
+      await service.create(COMPANY, { ...input, name: 'A'.repeat(120) });
+
+      expect(cashRegisterRepo.create.mock.calls[0][0].name).toHaveLength(80);
+    });
+
+    it('does not give a warehouse a cash register', async () => {
+      const { service, cashRegisterRepo } = createService();
+
+      const location = await service.create(COMPANY, { ...input, type: LocationType.WAREHOUSE });
+
+      expect(location.type).toBe(LocationType.WAREHOUSE);
+      expect(cashRegisterRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('fails as a whole when the cash register cannot be saved, so the store is not left without one', async () => {
+      const { service, cashRegisterRepo } = createService();
+      cashRegisterRepo.save.mockRejectedValue(new Error('boom'));
+
+      await expect(service.create(COMPANY, input)).rejects.toThrow('boom');
     });
 
     it('rejects an input that points at another company, before touching the database', async () => {
