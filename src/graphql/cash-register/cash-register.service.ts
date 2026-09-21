@@ -55,14 +55,21 @@ export class CashRegisterService {
 
     try {
       return await this.dataSource.transaction(async (manager) => {
-        // La caja está en una tienda (no en una bodega) activa de la empresa
+        // La caja está en una tienda (no en una bodega) de la empresa. Se busca sin filtrar por
+        // estado, a propósito: una tienda desactivada sí existe, y responder "no encontrada"
+        // mandaría a buscar el problema donde no está. Una de otra empresa sigue respondiéndose
+        // como inexistente (el filtro por `companyId` no se toca).
         const store = await manager.getRepository(Location).findOneBy({
           id: input.storeId,
           companyId,
           type: LocationType.STORE,
-          status: RecordStatus.ACTIVE,
         });
         if (!store) throw new NotFoundException(`Tienda ${input.storeId} no encontrada`);
+        if (store.status !== RecordStatus.ACTIVE) {
+          throw new ConflictException(
+            `La tienda ${store.name} está desactivada: no se pueden crear cajas en ella`,
+          );
+        }
 
         const repo = manager.getRepository(CashRegister);
         if (await repo.existsBy({ storeId: store.id, code })) throw this.duplicateCode();

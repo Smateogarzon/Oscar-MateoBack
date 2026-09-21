@@ -7,6 +7,7 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { Decimal } from 'decimal.js';
 import { DataSource, In, Repository } from 'typeorm';
+import { assertStoreAccess } from '../../common/access/store-access.js';
 import { RecordStatus } from '../../common/enums/record-status.enum.js';
 import { CashActor } from '../cash-session/cash-actor.js';
 import { CashSessionService } from '../cash-session/cash-session.service.js';
@@ -17,6 +18,7 @@ import { SaleItem } from '../sale/entities/sale-item.entity.js';
 import { SaleStatus } from '../sale/entities/sale-status.enum.js';
 import { Sale } from '../sale/entities/sale.entity.js';
 import { SaleService } from '../sale/sale.service.js';
+import { StorePaymentMethod } from '../store-payment-method/entities/store-payment-method.entity.js';
 import { SaleReturnService } from '../sale-return/sale-return.service.js';
 import { CompleteSaleInput } from './dto/complete-sale.input.js';
 import { SalePayment } from './entities/sale-payment.entity.js';
@@ -68,6 +70,9 @@ export class SalePaymentService {
 
     return this.dataSource.transaction(async (manager) => {
       const sale = await this.sales.lockDraft(manager, companyId, input.saleId);
+      // Cobrar es operar en la tienda: hace falta seguir teniendo acceso a ella, no basta con
+      // haberlo tenido cuando se abrió la venta.
+      await assertStoreAccess(manager, actor.userId, sale.storeId);
 
       const hasPendingRequest = await manager.getRepository(DiscountRequest).existsBy({
         saleId: sale.id,
@@ -119,6 +124,19 @@ export class SalePaymentService {
         }
         if (method.requiresReference && !payment.reference) {
           throw new BadRequestException(`El medio de pago ${method.name} exige una referencia`);
+        }
+      }
+
+      // Cada tienda elige con qué se cobra en ella (Configuración → Medios de pago por tienda).
+      if (methods.length > 0) {
+        const allowed = await manager.getRepository(StorePaymentMethod).find({
+          where: { storeId: sale.storeId, paymentMethodId: In(methodIds), status: RecordStatus.ACTIVE },
+          select: { paymentMethodId: true },
+        });
+        const allowedIds = new Set(allowed.map((row) => row.paymentMethodId));
+        const refused = methods.find((method) => !allowedIds.has(method.id));
+        if (refused) {
+          throw new ConflictException(`Esta tienda no acepta ${refused.name}: elige otro medio de pago`);
         }
       }
 

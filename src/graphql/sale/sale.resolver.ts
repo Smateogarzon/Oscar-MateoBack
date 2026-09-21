@@ -67,32 +67,38 @@ export class SaleResolver {
   // cambiar su cantidad mientras siga en borrador. Devuelven la venta con los totales
   // recalculados. Los descuentos no se aplican aquí: pasan por una solicitud
   // (DiscountRequestResolver).
+  //
+  // Llevan el usuario porque el servicio comprueba en cada una que siga teniendo acceso a la tienda
+  // de la venta: si se lo quitan con la venta a medias, deja de poder tocarla en ese momento.
   @Mutation(() => SaleObjectType)
   @RequirePermissions(PermissionCode.SALES_CREATE)
   addSaleItem(
     @CurrentCompanyId() companyId: string,
+    @CurrentUser() currentUser: JwtPayload,
     @Args('input') input: AddSaleItemInput,
   ) {
-    return this.saleService.addItem(companyId, input);
+    return this.saleService.addItem(companyId, currentUser.sub, input);
   }
 
   @Mutation(() => SaleObjectType)
   @RequirePermissions(PermissionCode.SALES_CREATE)
   updateSaleItemQuantity(
     @CurrentCompanyId() companyId: string,
+    @CurrentUser() currentUser: JwtPayload,
     @Args('input') input: UpdateSaleItemQuantityInput,
   ) {
-    return this.saleService.updateItemQuantity(companyId, input);
+    return this.saleService.updateItemQuantity(companyId, currentUser.sub, input);
   }
 
   @Mutation(() => SaleObjectType)
   @RequirePermissions(PermissionCode.SALES_CREATE)
   removeSaleItem(
     @CurrentCompanyId() companyId: string,
+    @CurrentUser() currentUser: JwtPayload,
     @Args('saleId', { type: () => ID }) saleId: string,
     @Args('itemId', { type: () => ID }) itemId: string,
   ) {
-    return this.saleService.removeItem(companyId, saleId, itemId);
+    return this.saleService.removeItem(companyId, currentUser.sub, saleId, itemId);
   }
 
   @Mutation(() => SaleObjectType)

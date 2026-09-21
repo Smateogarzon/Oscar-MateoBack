@@ -19,6 +19,7 @@ import { PermissionCode } from '../../common/enums/permission-code.enum.js';
 import { RecordStatus } from '../../common/enums/record-status.enum.js';
 import { CashMovement } from '../cash-movement/entities/cash-movement.entity.js';
 import { CashRegister } from '../cash-register/entities/cash-register.entity.js';
+import { Location } from '../location/entities/location.entity.js';
 import { SalePayment } from '../sale-payment/entities/sale-payment.entity.js';
 import { RefundPayment } from '../sale-return/entities/refund-payment.entity.js';
 import { UserLocationAccess } from '../user-location-access/entities/user-location-access.entity.js';
@@ -154,6 +155,15 @@ export class CashSessionService {
         });
         if (!register || register.status !== RecordStatus.ACTIVE) {
           throw new ConflictException('La caja está desactivada');
+        }
+
+        // La tienda también tiene que estar en servicio: una caja activa de una tienda desactivada
+        // no sirve para vender, así que tampoco para abrir un turno.
+        const store = await manager.getRepository(Location).findOneBy({ id: register.storeId });
+        if (store?.status !== RecordStatus.ACTIVE) {
+          throw new ConflictException(
+            'La tienda de esta caja está desactivada: no se puede abrir un turno en ella',
+          );
         }
 
         const repo = manager.getRepository(CashSession);

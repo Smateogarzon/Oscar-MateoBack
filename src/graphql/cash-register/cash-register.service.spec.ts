@@ -32,7 +32,9 @@ function createService() {
     create: vi.fn((value: unknown) => value),
     save: vi.fn(async (value: object) => ({ id: 'register-1', ...value })),
   };
-  const txLocationRepo = { findOneBy: vi.fn().mockResolvedValue({ id: 'store-1' }) };
+  const txLocationRepo = {
+    findOneBy: vi.fn().mockResolvedValue({ id: 'store-1', name: 'Tienda centro', status: RecordStatus.ACTIVE }),
+  };
   const txSessionRepo = { existsBy: vi.fn().mockResolvedValue(false) };
   const dataSource = {
     transaction: vi.fn(async (fn: (manager: unknown) => unknown) =>
@@ -100,11 +102,12 @@ describe('CashRegisterService', () => {
         code: ' C1 ',
       });
 
+      // Sin filtrar por estado: hace falta encontrar la tienda para poder distinguir "no existe"
+      // de "está desactivada". El filtro por empresa sí se mantiene.
       expect(txLocationRepo.findOneBy).toHaveBeenCalledWith({
         id: 'store-1',
         companyId: COMPANY,
         type: LocationType.STORE,
-        status: RecordStatus.ACTIVE,
       });
       expect(txRegisterRepo.existsBy).toHaveBeenCalledWith({ storeId: 'store-1', code: 'C1' });
       expect(txRegisterRepo.create).toHaveBeenCalledWith({
@@ -122,6 +125,20 @@ describe('CashRegisterService', () => {
       await expect(
         service.create(COMPANY, { storeId: 'warehouse-1', name: 'Caja', code: 'C1' }),
       ).rejects.toThrow(NotFoundException);
+      expect(txRegisterRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('says a deactivated store is deactivated, instead of pretending it does not exist', async () => {
+      const { service, txLocationRepo, txRegisterRepo } = createService();
+      txLocationRepo.findOneBy.mockResolvedValue({
+        id: 'store-1',
+        name: 'Tienda centro',
+        status: RecordStatus.INACTIVE,
+      });
+
+      await expect(service.create(COMPANY, { storeId: 'store-1', name: 'Caja', code: 'C1' })).rejects.toThrow(
+        'La tienda Tienda centro está desactivada: no se pueden crear cajas en ella',
+      );
       expect(txRegisterRepo.save).not.toHaveBeenCalled();
     });
 

@@ -2,6 +2,7 @@ import { BadRequestException, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Decimal } from 'decimal.js';
 import { DataSource, Repository } from 'typeorm';
+import { assertStoreAccess } from '../../common/access/store-access.js';
 import { CashActor } from '../cash-session/cash-actor.js';
 import { CashCodeVerdict, cashCodeException } from '../cash-session/cash-code.js';
 import { CashSessionService } from '../cash-session/cash-session.service.js';
@@ -71,6 +72,10 @@ export class CashMovementService {
         input.cashSessionId,
         actor,
       );
+
+      // Mover el efectivo de una gaveta es operar en esa tienda: hace falta seguir teniendo acceso
+      // a ella. Va antes del código del día para no gastar un intento en algo que ya está negado.
+      await assertStoreAccess(manager, actor.userId, session.cashRegister.storeId);
 
       // El código del día del turno. Un intento equivocado se cuenta aunque el movimiento se
       // rechace, así que se guarda en esta transacción y el error se lanza después de confirmarla

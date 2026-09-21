@@ -71,4 +71,13 @@ export class LocationResolver {
   ) {
     return this.locationService.deactivate(companyId, id);
   }
+
+  @Mutation(() => LocationObjectType)
+  @RequirePermissions(PermissionCode.SETTINGS_MANAGE)
+  activateLocation(
+    @CurrentCompanyId() companyId: string,
+    @Args('id', { type: () => ID }) id: string,
+  ) {
+    return this.locationService.activate(companyId, id);
+  }
 }

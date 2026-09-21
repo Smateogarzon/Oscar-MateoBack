@@ -20,9 +20,15 @@ import { UpdateCashRegisterInput } from './dto/update-cash-register.input.js';
 export class CashRegisterResolver {
   constructor(private readonly cashRegisterService: CashRegisterService) {}
 
-  // Quien abre turnos necesita la lista para elegir su caja; quien configura, para administrarla.
+  // Quien abre turnos necesita la lista para elegir su caja; quien configura, para administrarla; y
+  // quien cobra, para saber en qué caja y en qué tienda está trabajando (sin eso no puede ni
+  // nombrar su caja ni registrar una venta). Solo se leen las de la empresa activa.
   @Query(() => [CashRegisterObjectType])
-  @RequireAnyPermission(PermissionCode.CASH_OPEN_CLOSE_SHIFT, PermissionCode.SETTINGS_MANAGE)
+  @RequireAnyPermission(
+    PermissionCode.CASH_OPEN_CLOSE_SHIFT,
+    PermissionCode.SETTINGS_MANAGE,
+    PermissionCode.CASH_REGISTER_PAYMENT,
+  )
   cashRegisters(
     @CurrentCompanyId() companyId: string,
     @Args('storeId', { type: () => ID, nullable: true }) storeId?: string,
@@ -32,7 +38,11 @@ export class CashRegisterResolver {
   }
 
   @Query(() => CashRegisterObjectType)
-  @RequireAnyPermission(PermissionCode.CASH_OPEN_CLOSE_SHIFT, PermissionCode.SETTINGS_MANAGE)
+  @RequireAnyPermission(
+    PermissionCode.CASH_OPEN_CLOSE_SHIFT,
+    PermissionCode.SETTINGS_MANAGE,
+    PermissionCode.CASH_REGISTER_PAYMENT,
+  )
   cashRegister(
     @CurrentCompanyId() companyId: string,
     @Args('id', { type: () => ID }) id: string,

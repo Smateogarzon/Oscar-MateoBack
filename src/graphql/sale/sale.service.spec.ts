@@ -41,7 +41,9 @@ function createService() {
     existsBy: vi.fn().mockResolvedValue(false),
     update: vi.fn().mockResolvedValue(undefined),
   };
-  const locationRepo = { findOneBy: vi.fn().mockResolvedValue({ id: 'store-1' }) };
+  const locationRepo = {
+    findOneBy: vi.fn().mockResolvedValue({ id: 'store-1', name: 'Tienda centro', status: RecordStatus.ACTIVE }),
+  };
   const accessRepo = { existsBy: vi.fn().mockResolvedValue(true) };
   const membershipRepo = { existsBy: vi.fn().mockResolvedValue(true) };
   const sequences = { next: vi.fn().mockResolvedValue(7) };
@@ -204,18 +206,35 @@ describe('SaleService', () => {
       expect(sequences.next).toHaveBeenCalledWith(expect.anything(), COMPANY, SALE_SERIES);
     });
 
-    it('only sells from an active store of the company', async () => {
+    it('only sells from a store of the company', async () => {
       const { service, locationRepo, sequences, txSaleRepo } = createService();
       locationRepo.findOneBy.mockResolvedValue(null);
 
       await expect(service.create(COMPANY, CASHIER, input)).rejects.toThrow(NotFoundException);
+      // La búsqueda no filtra por estado: hay que encontrar la tienda para poder distinguir
+      // "no existe" de "está desactivada". El filtro por empresa sí se mantiene.
       expect(locationRepo.findOneBy).toHaveBeenCalledWith({
         id: 'store-1',
         companyId: COMPANY,
         type: LocationType.STORE,
-        status: RecordStatus.ACTIVE,
       });
       // No se gasta un consecutivo ni se guarda nada.
+      expect(sequences.next).not.toHaveBeenCalled();
+      expect(txSaleRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('says a deactivated store is deactivated, instead of pretending it does not exist', async () => {
+      const { service, locationRepo, sequences, txSaleRepo } = createService();
+      locationRepo.findOneBy.mockResolvedValue({
+        id: 'store-1',
+        name: 'Tienda centro',
+        status: RecordStatus.INACTIVE,
+      });
+
+      await expect(service.create(COMPANY, CASHIER, input)).rejects.toThrow(ConflictException);
+      await expect(service.create(COMPANY, CASHIER, input)).rejects.toThrow(
+        'La tienda Tienda centro está desactivada: no se puede vender en ella',
+      );
       expect(sequences.next).not.toHaveBeenCalled();
       expect(txSaleRepo.save).not.toHaveBeenCalled();
     });

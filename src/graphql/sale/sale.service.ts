@@ -8,6 +8,7 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { Decimal } from 'decimal.js';
 import { DataSource, EntityManager, In, Repository } from 'typeorm';
+import { assertStoreAccess } from '../../common/access/store-access.js';
 import { RecordStatus } from '../../common/enums/record-status.enum.js';
 import {
   ACTIVE_DISCOUNT_REQUEST_STATUSES,
@@ -74,22 +75,22 @@ export class SaleService {
   // cero y cambian a medida que se agregan líneas.
   async create(companyId: string, cashierId: string, input: CreateSaleInput): Promise<Sale> {
     return this.dataSource.transaction(async (manager) => {
+      // La tienda se busca sin filtrar por estado, a propósito: una desactivada sí existe, y
+      // responder "no encontrada" mandaría a buscar el problema donde no está. Una de otra
+      // empresa sigue respondiéndose como inexistente (el filtro por `companyId` no se toca).
       const store = await manager.getRepository(Location).findOneBy({
         id: input.storeId,
         companyId,
         type: LocationType.STORE,
-        status: RecordStatus.ACTIVE,
       });
       if (!store) throw new NotFoundException(`Tienda ${input.storeId} no encontrada`);
+      if (store.status !== RecordStatus.ACTIVE) {
+        throw new ConflictException(`La tienda ${store.name} está desactivada: no se puede vender en ella`);
+      }
 
       // Solo se vende desde las tiendas a las que el usuario tiene acceso (Configuración →
       // Personal por ubicación).
-      const hasAccess = await manager.getRepository(UserLocationAccess).existsBy({
-        userId: cashierId,
-        locationId: store.id,
-        status: RecordStatus.ACTIVE,
-      });
-      if (!hasAccess) throw new ForbiddenException('No tienes acceso a esta tienda');
+      await assertStoreAccess(manager, cashierId, store.id);
 
       if (input.sellerId) {
         const sellerIsMember = await manager.getRepository(UserCompanyRole).existsBy({
@@ -125,7 +126,7 @@ export class SaleService {
   // Agrega una línea genérica y recalcula los totales de la venta. La línea nace sin descuento:
   // los descuentos solo llegan por una solicitud aprobada. Agregar líneas se puede aunque haya
   // una solicitud activa. Devuelve la venta con sus totales al día.
-  async addItem(companyId: string, input: AddSaleItemInput): Promise<Sale> {
+  async addItem(companyId: string, userId: string, input: AddSaleItemInput): Promise<Sale> {
     const description = input.description.trim();
     if (!description) throw new BadRequestException('La descripción de la línea no puede estar vacía');
 
@@ -143,6 +144,7 @@ export class SaleService {
 
     return this.dataSource.transaction(async (manager) => {
       const sale = await this.lockDraft(manager, companyId, input.saleId);
+      await assertStoreAccess(manager, userId, sale.storeId);
 
       const repo = manager.getRepository(SaleItem);
       await repo.save(
@@ -167,7 +169,11 @@ export class SaleService {
   // puede mientras haya una solicitud de descuento activa: el monto pedido o aprobado se calculó
   // sobre el valor anterior de la línea y quedaría desfasado. Para cambiarla hay que cancelar la
   // solicitud y pedir otra. Devuelve la venta con sus totales al día.
-  async updateItemQuantity(companyId: string, input: UpdateSaleItemQuantityInput): Promise<Sale> {
+  async updateItemQuantity(
+    companyId: string,
+    userId: string,
+    input: UpdateSaleItemQuantityInput,
+  ): Promise<Sale> {
     const quantity = new Decimal(input.quantity);
     if (quantity.lessThanOrEqualTo(0)) {
       throw new BadRequestException('La cantidad debe ser mayor que cero');
@@ -175,6 +181,7 @@ export class SaleService {
 
     return this.dataSource.transaction(async (manager) => {
       const sale = await this.lockDraft(manager, companyId, input.saleId);
+      await assertStoreAccess(manager, userId, sale.storeId);
       await this.assertNoActiveDiscountRequest(manager, sale.id, 'cambiar cantidades');
 
       const repo = manager.getRepository(SaleItem);
@@ -197,9 +204,10 @@ export class SaleService {
   // Quita una línea y recalcula. Mientras haya una solicitud de descuento activa no se quitan
   // líneas: el monto pedido o aprobado se calculó sobre ellas y quedaría desfasado. Para
   // cambiarlas hay que cancelar la solicitud y pedir otra.
-  async removeItem(companyId: string, saleId: string, itemId: string): Promise<Sale> {
+  async removeItem(companyId: string, userId: string, saleId: string, itemId: string): Promise<Sale> {
     return this.dataSource.transaction(async (manager) => {
       const sale = await this.lockDraft(manager, companyId, saleId);
+      await assertStoreAccess(manager, userId, sale.storeId);
       await this.assertNoActiveDiscountRequest(manager, sale.id, 'quitar líneas');
 
       const repo = manager.getRepository(SaleItem);

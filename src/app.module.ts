@@ -31,6 +31,7 @@ import { UserLocationAccessModule } from './graphql/user-location-access/user-lo
 import { SaleModule } from './graphql/sale/sale.module.js';
 import { DiscountRequestModule } from './graphql/discount-request/discount-request.module.js';
 import { PaymentMethodModule } from './graphql/payment-method/payment-method.module.js';
+import { StorePaymentMethodModule } from './graphql/store-payment-method/store-payment-method.module.js';
 import { CashRegisterModule } from './graphql/cash-register/cash-register.module.js';
 import { CashSessionModule } from './graphql/cash-session/cash-session.module.js';
 import { CashMovementModule } from './graphql/cash-movement/cash-movement.module.js';
@@ -118,6 +119,7 @@ const { validationRules, plugins } = new ApolloArmor().protect();
     SaleModule,
     DiscountRequestModule,
     PaymentMethodModule,
+    StorePaymentMethodModule,
     CashRegisterModule,
     CashSessionModule,
     CashMovementModule,
