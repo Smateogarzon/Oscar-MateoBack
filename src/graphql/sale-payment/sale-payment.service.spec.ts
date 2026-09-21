@@ -71,6 +71,11 @@ function createService() {
     recalculate: vi.fn(async (_manager: unknown, sale: object) => sale),
   };
   const cashSessions = { lockOpen: vi.fn().mockResolvedValue(openSession()) };
+  // Las devoluciones: solo se usan al cobrar la venta nueva de un cambio
+  const returns = {
+    lockForExchange: vi.fn(),
+    applyExchange: vi.fn().mockResolvedValue(undefined),
+  };
   const dataSource = {
     transaction: vi.fn(async (fn: (manager: unknown) => unknown) =>
       fn({
@@ -95,6 +100,7 @@ function createService() {
     dataSource as never,
     sales as never,
     cashSessions as never,
+    returns as never,
   );
   return {
     service,
@@ -106,6 +112,7 @@ function createService() {
     txSaleRepo,
     sales,
     cashSessions,
+    returns,
     dataSource,
   };
 }
@@ -340,6 +347,145 @@ describe('SalePaymentService', () => {
       );
       expect(txPaymentRepo.save).not.toHaveBeenCalled();
       expect(txSaleRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('leaves a normal sale with no credit, and never touches the returns', async () => {
+      const { service, sales, returns } = createService();
+      const sale = draftSale();
+      sales.lockDraft.mockResolvedValue(sale);
+
+      await service.complete(COMPANY, cashier, charge([cash('100000')]));
+
+      expect(sale.returnCredit.toFixed(2)).toBe('0.00');
+      expect(returns.lockForExchange).not.toHaveBeenCalled();
+      expect(returns.applyExchange).not.toHaveBeenCalled();
+    });
+  });
+
+  // La venta nueva de un cambio: el crédito de la devolución aprobada paga hasta lo que valió lo
+  // devuelto, y los pagos suman solo lo que falte.
+  describe('complete, when the sale is the exchange of a return', () => {
+    const returned = (totalReturned: string) => ({ id: 'return-1', totalReturned: d(totalReturned) });
+    const exchangeCharge = (payments: { paymentMethodId: string; amount: string }[]) => ({
+      ...charge(payments),
+      saleReturnId: 'return-1',
+    });
+
+    it('pays a more expensive exchange with the credit and the difference', async () => {
+      const { service, sales, returns, txPaymentRepo } = createService();
+      // Devuelve $100.000 y lleva uno de $130.000: el cliente paga $30.000
+      const sale = draftSale({ total: d('130000') });
+      sales.lockDraft.mockResolvedValue(sale);
+      returns.lockForExchange.mockResolvedValue(returned('100000'));
+
+      const completed = await service.complete(COMPANY, cashier, exchangeCharge([cash('30000')]));
+
+      expect(returns.lockForExchange).toHaveBeenCalledWith(expect.anything(), COMPANY, 'return-1');
+      expect(sale.returnCredit.toFixed(2)).toBe('100000.00');
+      expect(txPaymentRepo.create).toHaveBeenCalledTimes(1);
+      expect(txPaymentRepo.create.mock.calls[0][0].amount.toFixed(2)).toBe('30000.00');
+      expect(completed.status).toBe(SaleStatus.COMPLETED);
+    });
+
+    it('needs no payment at all when the credit covers the whole exchange of the same value', async () => {
+      const { service, sales, returns, txPaymentRepo } = createService();
+      const sale = draftSale({ total: d('100000') });
+      sales.lockDraft.mockResolvedValue(sale);
+      returns.lockForExchange.mockResolvedValue(returned('100000'));
+
+      const completed = await service.complete(COMPANY, cashier, exchangeCharge([]));
+
+      expect(sale.returnCredit.toFixed(2)).toBe('100000.00');
+      expect(txPaymentRepo.save).not.toHaveBeenCalled();
+      expect(completed.status).toBe(SaleStatus.COMPLETED);
+    });
+
+    it('only uses the credit the exchange is worth when it is cheaper, and the rest is left to refund', async () => {
+      const { service, sales, returns } = createService();
+      // Devuelve $100.000 y lleva uno de $80.000: el crédito usado es $80.000
+      const sale = draftSale({ total: d('80000') });
+      const saleReturn = returned('100000');
+      sales.lockDraft.mockResolvedValue(sale);
+      returns.lockForExchange.mockResolvedValue(saleReturn);
+
+      await service.complete(COMPANY, cashier, exchangeCharge([]));
+
+      expect(sale.returnCredit.toFixed(2)).toBe('80000.00');
+      expect(returns.applyExchange).toHaveBeenCalledTimes(1);
+      const [, appliedReturn, appliedSale, credit] = returns.applyExchange.mock.calls[0];
+      expect(appliedReturn).toBe(saleReturn);
+      expect(appliedSale.id).toBe('sale-1');
+      expect(credit.toFixed(2)).toBe('80000.00');
+    });
+
+    it('tells the return about the credit that was used, so it can finish or wait for the refund', async () => {
+      const { service, sales, returns } = createService();
+      sales.lockDraft.mockResolvedValue(draftSale({ total: d('130000') }));
+      returns.lockForExchange.mockResolvedValue(returned('100000'));
+
+      await service.complete(COMPANY, cashier, exchangeCharge([cash('30000')]));
+
+      expect(returns.applyExchange.mock.calls[0][3].toFixed(2)).toBe('100000.00');
+    });
+
+    it.each([[[]], [[cash('20000')]]])(
+      'does not complete the exchange when the payments do not cover what is left after the credit (payments: %j)',
+      async (payments) => {
+        const { service, sales, returns, txPaymentRepo, txSaleRepo } = createService();
+        sales.lockDraft.mockResolvedValue(draftSale({ total: d('130000') }));
+        returns.lockForExchange.mockResolvedValue(returned('100000'));
+
+        await expect(service.complete(COMPANY, cashier, exchangeCharge(payments))).rejects.toThrow(
+          BadRequestException,
+        );
+        expect(txPaymentRepo.save).not.toHaveBeenCalled();
+        expect(txSaleRepo.save).not.toHaveBeenCalled();
+        expect(returns.applyExchange).not.toHaveBeenCalled();
+      },
+    );
+
+    it('says how much is left to collect after the credit', async () => {
+      const { service, sales, returns } = createService();
+      sales.lockDraft.mockResolvedValue(draftSale({ total: d('130000') }));
+      returns.lockForExchange.mockResolvedValue(returned('100000'));
+
+      await expect(service.complete(COMPANY, cashier, exchangeCharge([cash('20000')]))).rejects.toThrow(
+        'hay que cobrar 30000.00',
+      );
+    });
+
+    it('does not complete the sale when the return cannot be used, and does not even lock the shift', async () => {
+      const { service, returns, cashSessions, txPaymentRepo, txSaleRepo } = createService();
+      returns.lockForExchange.mockRejectedValue(new ConflictException('La devolución no está aprobada'));
+
+      await expect(service.complete(COMPANY, cashier, exchangeCharge([cash('100000')]))).rejects.toThrow(
+        ConflictException,
+      );
+      expect(cashSessions.lockOpen).not.toHaveBeenCalled();
+      expect(txPaymentRepo.save).not.toHaveBeenCalled();
+      expect(txSaleRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('locks the sale first, then the return and the shift last, always in that order', async () => {
+      const { service, sales, returns, cashSessions } = createService();
+      sales.lockDraft.mockResolvedValue(draftSale({ total: d('100000') }));
+      returns.lockForExchange.mockResolvedValue(returned('100000'));
+
+      await service.complete(COMPANY, cashier, exchangeCharge([]));
+
+      const order = (mock: { mock: { invocationCallOrder: number[] } }) =>
+        mock.mock.invocationCallOrder[0];
+      expect(order(sales.lockDraft)).toBeLessThan(order(returns.lockForExchange));
+      expect(order(returns.lockForExchange)).toBeLessThan(order(cashSessions.lockOpen));
+    });
+
+    it('still asks for at least one payment when the sale is not an exchange', async () => {
+      const { service, dataSource } = createService();
+
+      await expect(service.complete(COMPANY, cashier, charge([]))).rejects.toThrow(
+        BadRequestException,
+      );
+      expect(dataSource.transaction).not.toHaveBeenCalled();
     });
   });
 });

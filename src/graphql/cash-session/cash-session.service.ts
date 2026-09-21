@@ -20,6 +20,7 @@ import { RecordStatus } from '../../common/enums/record-status.enum.js';
 import { CashMovement } from '../cash-movement/entities/cash-movement.entity.js';
 import { CashRegister } from '../cash-register/entities/cash-register.entity.js';
 import { SalePayment } from '../sale-payment/entities/sale-payment.entity.js';
+import { RefundPayment } from '../sale-return/entities/refund-payment.entity.js';
 import { UserLocationAccess } from '../user-location-access/entities/user-location-access.entity.js';
 import { CashActor } from './cash-actor.js';
 import {
@@ -340,7 +341,8 @@ export class CashSessionService {
     manager: EntityManager,
     session: CashSession,
   ): Promise<CashSessionSummary> {
-    // Los pagos de las ventas cobradas en este turno y sus movimientos manuales
+    // Los pagos de las ventas cobradas en este turno, sus movimientos manuales y los reembolsos de
+    // devoluciones que se entregaron desde él
     const payments = await manager.getRepository(SalePayment).find({
       where: { sale: { cashSessionId: session.id } },
       relations: { paymentMethod: true },
@@ -348,6 +350,10 @@ export class CashSessionService {
     const movements = await manager
       .getRepository(CashMovement)
       .find({ where: { cashSessionId: session.id } });
+    const refunds = await manager.getRepository(RefundPayment).find({
+      where: { cashSessionId: session.id },
+      relations: { paymentMethod: true },
+    });
 
     return {
       cashSessionId: session.id,
@@ -357,6 +363,7 @@ export class CashSessionService {
         session.openingAmount,
         payments.map((payment) => ({ amount: payment.amount, type: payment.paymentMethod.type })),
         movements,
+        refunds.map((refund) => ({ amount: refund.amount, type: refund.paymentMethod.type })),
       ),
     };
   }

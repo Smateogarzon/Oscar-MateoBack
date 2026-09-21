@@ -33,7 +33,11 @@ export class CashSessionSummaryObjectType {
   @Field(() => Decimal)
   cashOut: Decimal;
 
-  // apertura + ventas en efectivo + ingresos − egresos
+  // Reembolsos de devoluciones entregados en efectivo desde este turno: salen del cajón
+  @Field(() => Decimal)
+  cashRefunds: Decimal;
+
+  // apertura + ventas en efectivo + ingresos − egresos − reembolsos en efectivo
   @Field(() => Decimal)
   expectedCash: Decimal;
 }

@@ -35,6 +35,7 @@ import { CashRegisterModule } from './graphql/cash-register/cash-register.module
 import { CashSessionModule } from './graphql/cash-session/cash-session.module.js';
 import { CashMovementModule } from './graphql/cash-movement/cash-movement.module.js';
 import { SalePaymentModule } from './graphql/sale-payment/sale-payment.module.js';
+import { SaleReturnModule } from './graphql/sale-return/sale-return.module.js';
 import { StorageModule } from './common/storage/storage.module.js';
 import { UploadModule } from './uploads/upload.module.js';
 
@@ -121,6 +122,7 @@ const { validationRules, plugins } = new ApolloArmor().protect();
     CashSessionModule,
     CashMovementModule,
     SalePaymentModule,
+    SaleReturnModule,
     StorageModule,
     UploadModule,
   ],

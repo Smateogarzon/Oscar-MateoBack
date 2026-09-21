@@ -17,6 +17,7 @@ import { SaleItem } from '../sale/entities/sale-item.entity.js';
 import { SaleStatus } from '../sale/entities/sale-status.enum.js';
 import { Sale } from '../sale/entities/sale.entity.js';
 import { SaleService } from '../sale/sale.service.js';
+import { SaleReturnService } from '../sale-return/sale-return.service.js';
 import { CompleteSaleInput } from './dto/complete-sale.input.js';
 import { SalePayment } from './entities/sale-payment.entity.js';
 
@@ -30,6 +31,7 @@ export class SalePaymentService {
     private readonly dataSource: DataSource,
     private readonly sales: SaleService,
     private readonly cashSessions: CashSessionService,
+    private readonly returns: SaleReturnService,
   ) {}
 
   // En el orden en que se registraron. La empresa se comprueba a través de la venta.
@@ -42,19 +44,24 @@ export class SalePaymentService {
   // de caja en que se cobró. Todo o nada, en una transacción. Se exige que:
   //   - la venta tenga líneas y ninguna solicitud de descuento pendiente (una aprobada ya está
   //     aplicada en los totales)
-  //   - el turno esté abierto, sea de una caja de la misma tienda y lo opere quien lo abrió o quien
-  //     puede operar turnos ajenos (CashSessionService.lockOpen)
+  //   - el turno esté abierto, sea de una caja de la misma tienda y lo opere su cajero asignado
+  //     (CashSessionService.lockOpen)
   //   - cada medio de pago sea activo y de la empresa, y traiga referencia si la exige
-  //   - los pagos sumen EXACTAMENTE el total de la venta: el vuelto de un pago en efectivo de más
-  //     lo maneja quien cobra y no se guarda
-  // Primero se bloquea la venta y después el turno, siempre en ese orden, para no cruzar bloqueos.
+  //   - los pagos sumen EXACTAMENTE lo que hay que cobrar: el total de la venta, menos el crédito
+  //     de una devolución si esta es la venta nueva de un cambio (`saleReturnId`). El crédito cubre
+  //     hasta lo que valió lo devuelto; los pagos pueden ir vacíos si alcanza para todo. El vuelto
+  //     de un pago en efectivo de más lo maneja quien cobra y no se guarda.
+  // Primero se bloquea la venta, después la devolución (si hay) y por último el turno, siempre en
+  // ese orden, para no cruzar bloqueos.
   async complete(companyId: string, actor: CashActor, input: CompleteSaleInput): Promise<Sale> {
     const payments = input.payments.map((payment) => ({
       paymentMethodId: payment.paymentMethodId,
       amount: new Decimal(payment.amount),
       reference: payment.reference?.trim() || null,
     }));
-    if (payments.length === 0) throw new BadRequestException('Indica al menos un pago');
+    if (payments.length === 0 && !input.saleReturnId) {
+      throw new BadRequestException('Indica al menos un pago');
+    }
     if (payments.some((payment) => payment.amount.lessThanOrEqualTo(0))) {
       throw new BadRequestException('Cada pago debe ser mayor que cero');
     }
@@ -81,6 +88,12 @@ export class SalePaymentService {
         throw new BadRequestException('La venta no tiene nada que cobrar');
       }
 
+      // Si es un cambio, el crédito de la devolución paga hasta lo que valió lo devuelto.
+      const exchange = input.saleReturnId
+        ? await this.returns.lockForExchange(manager, companyId, input.saleReturnId)
+        : null;
+      const credit = exchange ? Decimal.min(exchange.totalReturned, sale.total) : new Decimal(0);
+
       const session = await this.cashSessions.lockOpen(
         manager,
         companyId,
@@ -92,9 +105,12 @@ export class SalePaymentService {
       }
 
       const methodIds = [...new Set(payments.map((payment) => payment.paymentMethodId))];
-      const methods = await manager.getRepository(PaymentMethod).find({
-        where: { id: In(methodIds), companyId, status: RecordStatus.ACTIVE },
-      });
+      const methods =
+        methodIds.length === 0
+          ? []
+          : await manager.getRepository(PaymentMethod).find({
+              where: { id: In(methodIds), companyId, status: RecordStatus.ACTIVE },
+            });
       const methodsById = new Map(methods.map((method) => [method.id, method]));
       for (const payment of payments) {
         const method = methodsById.get(payment.paymentMethodId);
@@ -107,29 +123,38 @@ export class SalePaymentService {
       }
 
       const paid = payments.reduce((sum, payment) => sum.plus(payment.amount), new Decimal(0));
-      if (!paid.equals(sale.total)) {
+      const due = sale.total.minus(credit);
+      if (!paid.equals(due)) {
         throw new BadRequestException(
-          `Los pagos suman ${paid.toFixed(2)} y la venta vale ${sale.total.toFixed(2)}: tienen que ser iguales`,
+          credit.isZero()
+            ? `Los pagos suman ${paid.toFixed(2)} y la venta vale ${sale.total.toFixed(2)}: tienen que ser iguales`
+            : `Los pagos suman ${paid.toFixed(2)} y hay que cobrar ${due.toFixed(2)} (la venta vale ${sale.total.toFixed(2)} y el crédito de la devolución cubre ${credit.toFixed(2)})`,
         );
       }
 
-      const paymentRepo = manager.getRepository(SalePayment);
-      await paymentRepo.save(
-        payments.map((payment) =>
-          paymentRepo.create({
-            saleId: sale.id,
-            paymentMethodId: payment.paymentMethodId,
-            amount: payment.amount,
-            reference: payment.reference,
-            receivedBy: actor.userId,
-          }),
-        ),
-      );
+      if (payments.length > 0) {
+        const paymentRepo = manager.getRepository(SalePayment);
+        await paymentRepo.save(
+          payments.map((payment) =>
+            paymentRepo.create({
+              saleId: sale.id,
+              paymentMethodId: payment.paymentMethodId,
+              amount: payment.amount,
+              reference: payment.reference,
+              receivedBy: actor.userId,
+            }),
+          ),
+        );
+      }
 
       sale.status = SaleStatus.COMPLETED;
       sale.completedAt = new Date();
       sale.cashSessionId = session.id;
-      return manager.getRepository(Sale).save(sale);
+      sale.returnCredit = credit;
+      const completed = await manager.getRepository(Sale).save(sale);
+
+      if (exchange) await this.returns.applyExchange(manager, exchange, completed, credit);
+      return completed;
     });
   }
 }

@@ -288,6 +288,21 @@ export class SaleService {
     return sale;
   }
 
+  // Trae la venta bloqueada y exige que esté completada: es la que se devuelve. La venta no se
+  // modifica; el bloqueo solo hace que dos devoluciones de la misma venta no pidan a la vez las
+  // mismas unidades. Pública porque SaleReturnService la usa.
+  async lockCompleted(manager: EntityManager, companyId: string, id: string): Promise<Sale> {
+    const sale = await manager.getRepository(Sale).findOne({
+      where: { id, companyId },
+      lock: { mode: 'pessimistic_write' },
+    });
+    if (!sale) throw new NotFoundException(`Venta ${id} no encontrada`);
+    if (sale.status !== SaleStatus.COMPLETED) {
+      throw new ConflictException('Solo se devuelve una venta completada');
+    }
+    return sale;
+  }
+
   // Vuelve a calcular subtotal, descuento y total de la venta desde sus líneas y la guarda. Si
   // algo no cuadra lanza un error, y como corre dentro de la transacción del cambio que lo
   // provocó, ese cambio también se deshace. Pública porque DiscountRequestService la usa al

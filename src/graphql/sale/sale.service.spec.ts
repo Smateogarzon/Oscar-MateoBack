@@ -537,6 +537,45 @@ describe('SaleService', () => {
     });
   });
 
+  describe('lockCompleted', () => {
+    const managerOf = (txSaleRepo: object) => ({ getRepository: () => txSaleRepo });
+
+    it('brings the completed sale locked, without changing it', async () => {
+      const { service, txSaleRepo } = createService();
+      txSaleRepo.findOne.mockResolvedValue(draft({ status: SaleStatus.COMPLETED }));
+
+      const sale = await service.lockCompleted(managerOf(txSaleRepo) as never, COMPANY, 'sale-1');
+
+      expect(txSaleRepo.findOne).toHaveBeenCalledWith({
+        where: { id: 'sale-1', companyId: COMPANY },
+        lock: { mode: 'pessimistic_write' },
+      });
+      expect(sale.status).toBe(SaleStatus.COMPLETED);
+      expect(txSaleRepo.save).not.toHaveBeenCalled();
+    });
+
+    it.each([SaleStatus.DRAFT, SaleStatus.CANCELLED])(
+      'only works on a completed sale, not on one that is %s',
+      async (status) => {
+        const { service, txSaleRepo } = createService();
+        txSaleRepo.findOne.mockResolvedValue(draft({ status }));
+
+        await expect(
+          service.lockCompleted(managerOf(txSaleRepo) as never, COMPANY, 'sale-1'),
+        ).rejects.toThrow(ConflictException);
+      },
+    );
+
+    it('cannot reach a sale of another company', async () => {
+      const { service, txSaleRepo } = createService();
+      txSaleRepo.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.lockCompleted(managerOf(txSaleRepo) as never, COMPANY, 'sale-9'),
+      ).rejects.toThrow(NotFoundException);
+    });
+  });
+
   describe('cancel', () => {
     it('leaves who cancelled it, when and why', async () => {
       const { service, txSaleRepo } = createService();

@@ -46,6 +46,10 @@ export class SaleObjectType extends BaseObjectType {
   @Field(() => Decimal)
   total: Decimal;
 
+  // Crédito de una devolución con el que se pagó (un cambio): pagos + crédito = total
+  @Field(() => Decimal)
+  returnCredit: Decimal;
+
   @Field(() => SaleStatus)
   status: SaleStatus;
 

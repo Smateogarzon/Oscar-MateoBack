@@ -6,6 +6,7 @@ import { calculateSessionTotals } from './cash-session-totals.js';
 const d = (value: string) => new Decimal(value);
 const payment = (amount: string, type: PaymentMethodType) => ({ amount: d(amount), type });
 const movement = (amount: string, type: CashMovementType) => ({ amount: d(amount), type });
+const refund = (amount: string, type: PaymentMethodType) => ({ amount: d(amount), type });
 
 describe('calculateSessionTotals', () => {
   it('is just the opening amount for a shift with nothing in it', () => {
@@ -70,5 +71,50 @@ describe('calculateSessionTotals', () => {
     const totals = calculateSessionTotals(d('1000'), [], [movement('1500', CashMovementType.CASH_OUT)]);
 
     expect(totals.expectedCash.toFixed(2)).toBe('-500.00');
+  });
+
+  it('takes the cash refunds out of the cash that should be in the register', () => {
+    const totals = calculateSessionTotals(
+      d('200000'),
+      [payment('800000', PaymentMethodType.CASH)],
+      [movement('50000', CashMovementType.CASH_OUT)],
+      [refund('100000', PaymentMethodType.CASH)],
+    );
+
+    expect(totals.cashRefunds.toFixed(2)).toBe('100000.00');
+    // El ejemplo del diseño: 200.000 + 800.000 − 100.000 de devoluciones − 50.000 de otras salidas
+    expect(totals.expectedCash.toFixed(2)).toBe('850000.00');
+  });
+
+  it('does not take refunds by card or transfer out of the cash in the register', () => {
+    const totals = calculateSessionTotals(
+      d('200000'),
+      [payment('100000', PaymentMethodType.CASH)],
+      [],
+      [refund('30000', PaymentMethodType.TRANSFER), refund('20000', PaymentMethodType.CARD)],
+    );
+
+    expect(totals.cashRefunds.toFixed(2)).toBe('0.00');
+    expect(totals.expectedCash.toFixed(2)).toBe('300000.00');
+  });
+
+  it('adds several cash refunds exactly', () => {
+    const totals = calculateSessionTotals(
+      d('0'),
+      [payment('1', PaymentMethodType.CASH)],
+      [],
+      [refund('0.10', PaymentMethodType.CASH), refund('0.20', PaymentMethodType.CASH)],
+    );
+
+    expect(totals.cashRefunds.toFixed(2)).toBe('0.30');
+    expect(totals.expectedCash.toFixed(2)).toBe('0.70');
+  });
+
+  it('is the same as before when there are no refunds', () => {
+    const withNone = calculateSessionTotals(d('1000'), [payment('500', PaymentMethodType.CASH)], []);
+    const withEmpty = calculateSessionTotals(d('1000'), [payment('500', PaymentMethodType.CASH)], [], []);
+
+    expect(withNone.expectedCash.toFixed(2)).toBe('1500.00');
+    expect(withEmpty.expectedCash.toFixed(2)).toBe('1500.00');
   });
 });

@@ -83,6 +83,11 @@ export class Sale extends BaseEntity {
   @Column({ type: 'numeric', precision: 14, scale: 2, default: 0, transformer: decimalTransformer })
   total: Decimal;
 
+  // Crédito de una devolución con el que se pagó esta venta, en parte o toda (un cambio): los pagos
+  // más este crédito suman el total. Cero en una venta normal.
+  @Column({ type: 'numeric', precision: 14, scale: 2, default: 0, transformer: decimalTransformer })
+  returnCredit: Decimal;
+
   @Column({
     type: 'enum',
     enum: SaleStatus,

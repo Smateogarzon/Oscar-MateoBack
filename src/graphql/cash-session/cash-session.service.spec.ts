@@ -13,6 +13,7 @@ import { CashRegister } from '../cash-register/entities/cash-register.entity.js'
 import { PaymentMethodType } from '../payment-method/entities/payment-method-type.enum.js';
 import { RolePermission } from '../role-permission/entities/role-permission.entity.js';
 import { SalePayment } from '../sale-payment/entities/sale-payment.entity.js';
+import { RefundPayment } from '../sale-return/entities/refund-payment.entity.js';
 import { UserCompanyRole } from '../user-company-role/entities/user-company-role.entity.js';
 import { UserLocationAccess } from '../user-location-access/entities/user-location-access.entity.js';
 import type { CashActor } from './cash-actor.js';
@@ -72,6 +73,7 @@ function createService() {
   const accessRepo = { existsBy: vi.fn().mockResolvedValue(true) };
   const paymentRepo = { find: vi.fn().mockResolvedValue([]) };
   const movementRepo = { find: vi.fn().mockResolvedValue([]) };
+  const refundRepo = { find: vi.fn().mockResolvedValue([]) };
   // Lo que lee loadCompanyAccess para saber si el cajero asignado puede cobrar: por defecto, es un
   // miembro con el rol Caja, que trae cash.register_payment.
   const membershipRepo = {
@@ -98,7 +100,9 @@ function createService() {
               ? paymentRepo
               : entity === CashMovement
                 ? movementRepo
-                : undefined,
+                : entity === RefundPayment
+                  ? refundRepo
+                  : undefined,
   };
   const dataSource = {
     manager,
@@ -120,6 +124,7 @@ function createService() {
     accessRepo,
     paymentRepo,
     movementRepo,
+    refundRepo,
     membershipRepo,
     rolePermissionRepo,
     dataSource,
@@ -264,6 +269,27 @@ describe('CashSessionService', () => {
         NotFoundException,
       );
       expect(paymentRepo.find).not.toHaveBeenCalled();
+    });
+
+    it('takes the cash refunds of returns out of the expected cash, and not the ones by transfer', async () => {
+      const { service, sessionRepo, paymentRepo, movementRepo, refundRepo } = createService();
+      sessionRepo.findOne.mockResolvedValue(openSession());
+      paymentRepo.find.mockResolvedValue([cashPayment('800000')]);
+      movementRepo.find.mockResolvedValue([movement('50000', CashMovementType.CASH_OUT)]);
+      refundRepo.find.mockResolvedValue([
+        { amount: d('100000'), paymentMethod: { type: PaymentMethodType.CASH } },
+        { amount: d('30000'), paymentMethod: { type: PaymentMethodType.TRANSFER } },
+      ]);
+
+      const summary = await service.summary(COMPANY, cashier, 'session-1');
+
+      expect(refundRepo.find).toHaveBeenCalledWith({
+        where: { cashSessionId: 'session-1' },
+        relations: { paymentMethod: true },
+      });
+      expect(summary.cashRefunds.toFixed(2)).toBe('100000.00');
+      // El ejemplo del diseño: 200.000 + 800.000 − 100.000 de devoluciones − 50.000 de otras salidas
+      expect(summary.expectedCash.toFixed(2)).toBe('850000.00');
     });
   });
 
@@ -494,6 +520,24 @@ describe('CashSessionService', () => {
         service.close(COMPANY, admin, { cashSessionId: 'session-1', countedAmount: '210000' }),
       ).rejects.toThrow(BadRequestException);
       expect(txSessionRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('counts the cash refunds of returns when it works out the expected cash to close', async () => {
+      const { service, txSessionRepo, paymentRepo, refundRepo } = createService();
+      txSessionRepo.findOne.mockResolvedValue(openSession());
+      paymentRepo.find.mockResolvedValue([cashPayment('300000')]);
+      refundRepo.find.mockResolvedValue([
+        { amount: d('100000'), paymentMethod: { type: PaymentMethodType.CASH } },
+      ]);
+
+      // 200000 + 300000 − 100000
+      const session = await service.close(COMPANY, admin, {
+        cashSessionId: 'session-1',
+        countedAmount: '400000',
+      });
+
+      expect(session.expectedAmount?.toFixed(2)).toBe('400000.00');
+      expect(session.differenceAmount?.toFixed(2)).toBe('0.00');
     });
 
     it('does not close a shift twice', async () => {
