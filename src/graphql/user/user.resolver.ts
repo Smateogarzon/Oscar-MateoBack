@@ -81,6 +81,15 @@ export class UserResolver {
 
   @Mutation(() => UserObjectType)
   @RequirePermissions(PermissionCode.USERS_MANAGE)
+  activateUser(
+    @CurrentCompanyId() companyId: string,
+    @Args('id', { type: () => ID }) id: string,
+  ) {
+    return this.userService.activate(companyId, id);
+  }
+
+  @Mutation(() => UserObjectType)
+  @RequirePermissions(PermissionCode.USERS_MANAGE)
   resetUserPassword(
     @CurrentCompanyId() companyId: string,
     @Args('id', { type: () => ID }) id: string,
