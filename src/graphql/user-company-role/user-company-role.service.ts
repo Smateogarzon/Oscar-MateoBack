@@ -1,6 +1,6 @@
-import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, QueryFailedError, Repository } from 'typeorm';
+import { DataSource, Repository } from 'typeorm';
 import { assertActiveCompany } from '../../common/access/assert-active-company.js';
 import {
   COMPANY_VISIBLE_ROLE,
@@ -8,12 +8,10 @@ import {
   PLATFORM_ROLE,
 } from '../../common/access/platform-role.js';
 import { RecordStatus } from '../../common/enums/record-status.enum.js';
+import { mapPostgresWriteError } from '../../common/utils/postgres-error.js';
 import { Role } from '../role/entities/role.entity.js';
 import { CreateUserCompanyRoleInput } from './dto/create-user-company-role.input.js';
 import { UserCompanyRole } from './entities/user-company-role.entity.js';
-
-const FOREIGN_KEY_VIOLATION = '23503';
-const UNIQUE_VIOLATION = '23505';
 
 // Todo se hace dentro de la empresa activa: una empresa nunca ve ni toca las membresías de
 // otra, aunque conozca el id. Las membresías con un rol de plataforma (el super admin) no se
@@ -84,15 +82,9 @@ export class UserCompanyRoleService {
   }
 
   private mapWriteError(error: unknown): Error {
-    if (!(error instanceof QueryFailedError)) return error as Error;
-    const code = (error.driverError as { code?: string } | undefined)?.code;
-
-    if (code === FOREIGN_KEY_VIOLATION) {
-      return new BadRequestException('El usuario, la empresa o el rol indicado no existe');
-    }
-    if (code === UNIQUE_VIOLATION) {
-      return new ConflictException('Este usuario ya tiene ese rol asignado en la empresa');
-    }
-    return error;
+    return mapPostgresWriteError(error, {
+      foreignKey: 'El usuario, la empresa o el rol indicado no existe',
+      unique: 'Este usuario ya tiene ese rol asignado en la empresa',
+    });
   }
 }

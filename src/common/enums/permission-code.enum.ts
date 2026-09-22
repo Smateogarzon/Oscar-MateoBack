@@ -6,6 +6,9 @@ export enum PermissionCode {
   SETTINGS_MANAGE = 'settings.manage',
   SALES_CREATE = 'sales.create',
   SALES_VIEW = 'sales.view',
+  // Ver el histórico de ventas de TODOS los cajeros y vendedores; sin él, cada quien ve solo las
+  // suyas (las que cobró o las que vendió).
+  SALES_VIEW_ALL = 'sales.view_all',
   SALES_CANCEL = 'sales.cancel',
   SALES_APPROVE_DISCOUNT = 'sales.approve_discount',
   CASH_OPEN_CLOSE_SHIFT = 'cash.open_close_shift',

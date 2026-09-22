@@ -4,18 +4,15 @@ import { ArrayMaxSize, IsArray, IsOptional, IsUUID, ValidateNested } from 'class
 import { SalePaymentInput } from './sale-payment.input.js';
 
 // Completar una venta es cobrarla: todos los pagos van juntos, suman exactamente el total de la
-// venta y se guardan con ella en una sola operación. Los pagos no se editan después.
+// venta y se guardan con ella en una sola operación. Los pagos no se editan después. El turno ya
+// es el que se le asignó al crearla (SaleService.create): no se vuelve a pedir acá, solo se
+// revalida que siga abierto.
 @InputType()
 export class CompleteSaleInput {
   // Venta (en borrador) que se cobra
   @Field(() => ID)
   @IsUUID()
   saleId: string;
-
-  // Turno de caja (abierto, de la misma tienda de la venta) en el que se cobra
-  @Field(() => ID)
-  @IsUUID()
-  cashSessionId: string;
 
   // Devolución aprobada, de tipo cambio, cuyo crédito paga esta venta: es la venta nueva del cambio.
   // El crédito cubre hasta lo que valió lo devuelto; los pagos suman solo lo que falte y pueden ir

@@ -7,22 +7,19 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Decimal } from 'decimal.js';
-import {
-  DataSource,
-  EntityManager,
-  FindOptionsWhere,
-  QueryFailedError,
-  Repository,
-} from 'typeorm';
-import { loadCompanyAccess } from '../../common/access/company-access.js';
+import { DataSource, EntityManager, FindOptionsWhere, Repository } from 'typeorm';
+import { type CompanyAccess, loadCompanyAccess } from '../../common/access/company-access.js';
 import { PermissionCode } from '../../common/enums/permission-code.enum.js';
 import { RecordStatus } from '../../common/enums/record-status.enum.js';
+import { mapPostgresWriteError } from '../../common/utils/postgres-error.js';
 import { CashMovement } from '../cash-movement/entities/cash-movement.entity.js';
 import { CashRegister } from '../cash-register/entities/cash-register.entity.js';
+import { LocationType } from '../location/entities/location-type.enum.js';
 import { Location } from '../location/entities/location.entity.js';
 import { SalePayment } from '../sale-payment/entities/sale-payment.entity.js';
 import { RefundPayment } from '../sale-return/entities/refund-payment.entity.js';
 import { UserLocationAccess } from '../user-location-access/entities/user-location-access.entity.js';
+import { User } from '../user/entities/user.entity.js';
 import { CashActor } from './cash-actor.js';
 import {
   CashCodeVerdict,
@@ -36,7 +33,12 @@ import { OpenCashSessionInput } from './dto/open-cash-session.input.js';
 import { CashSessionStatus } from './entities/cash-session-status.enum.js';
 import { CashSession } from './entities/cash-session.entity.js';
 
-const UNIQUE_VIOLATION = '23505';
+// Quién puede ser el cajero de un turno: alguien cuyos roles le dan el permiso de cobrar. Es la única
+// definición: la usa `open` para rechazar a quien no lo tiene y `findCashierCandidates` para no
+// ofrecerlo, así la lista y la validación nunca se contradicen.
+function canCollect(access: CompanyAccess | null): boolean {
+  return access?.permissionCodes.includes(PermissionCode.CASH_REGISTER_PAYMENT) ?? false;
+}
 
 export type CashSessionSummary = ReturnType<typeof calculateSessionTotals> & {
   cashSessionId: string;
@@ -108,6 +110,30 @@ export class CashSessionService {
     return this.buildSummary(this.dataSource.manager, session);
   }
 
+  // A quién se le puede dar el turno de una caja de esta tienda: usuarios activos, con acceso activo
+  // a la tienda (Configuración → Personal por ubicación) y con un rol que les dé el permiso de cobrar.
+  // Son las mismas condiciones con las que `open` acepta al cajero, así que quien aparece en esta
+  // lista no será rechazado por permisos. (Que ya tenga otro turno abierto sí lo dice `open`: eso
+  // cambia en cada momento y no es una cualidad de la persona.)
+  async findCashierCandidates(companyId: string, storeId: string): Promise<User[]> {
+    const store = await this.dataSource
+      .getRepository(Location)
+      .findOneBy({ id: storeId, companyId, type: LocationType.STORE });
+    if (!store) throw new NotFoundException(`Tienda ${storeId} no encontrada`);
+
+    const withAccess = await this.dataSource.getRepository(UserLocationAccess).find({
+      where: { locationId: store.id, status: RecordStatus.ACTIVE, user: { status: RecordStatus.ACTIVE } },
+      relations: { user: true },
+    });
+
+    const verdicts = await Promise.all(
+      withAccess.map(async ({ user }) =>
+        canCollect(await loadCompanyAccess(this.dataSource, user.id, companyId)) ? user : null,
+      ),
+    );
+    return verdicts.filter((user): user is User => user !== null);
+  }
+
   // Abre el turno de una caja activa, con el efectivo inicial, para UN cajero. El cajero tiene que
   // ser un miembro de la empresa con permiso para cobrar y acceso a la tienda de la caja, y no
   // puede tener otro turno abierto; la caja tampoco. Cada apertura crea un código nuevo de 6
@@ -122,7 +148,7 @@ export class CashSessionService {
     // El cajero se comprueba antes de abrir la transacción: es una lectura que no necesita bloqueos.
     const cashierAccess = await loadCompanyAccess(this.dataSource, input.cashierId, companyId);
     if (!cashierAccess) throw new NotFoundException(`Cajero ${input.cashierId} no encontrado`);
-    if (!cashierAccess.permissionCodes.includes(PermissionCode.CASH_REGISTER_PAYMENT)) {
+    if (!canCollect(cashierAccess)) {
       throw new BadRequestException(
         'Ese usuario no tiene permiso para cobrar, así que no puede ser el cajero del turno',
       );
@@ -381,10 +407,8 @@ export class CashSessionService {
   // Dos aperturas a la vez de la misma caja (o del mismo cajero) pasan las comprobaciones de
   // arriba si no se bloquearon a tiempo; los índices únicos parciales frenan a la segunda.
   private mapWriteError(error: unknown): Error {
-    if (!(error instanceof QueryFailedError)) return error as Error;
-    const code = (error.driverError as { code?: string } | undefined)?.code;
-    return code === UNIQUE_VIOLATION
-      ? new ConflictException('La caja o el cajero ya tiene un turno abierto')
-      : (error as Error);
+    return mapPostgresWriteError(error, {
+      unique: 'La caja o el cajero ya tiene un turno abierto',
+    });
   }
 }

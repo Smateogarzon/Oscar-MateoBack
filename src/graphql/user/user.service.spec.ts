@@ -315,6 +315,65 @@ describe('UserService', () => {
     });
   });
 
+  describe('activate', () => {
+    it('brings a deactivated account back, inside a transaction', async () => {
+      const { service, repo, membershipRepo, dataSource } = createService();
+      membership(membershipRepo);
+      repo.findOneBy.mockResolvedValue({ id: '1', status: RecordStatus.INACTIVE });
+
+      const result = await service.activate(COMPANY, '1');
+
+      expect(dataSource.transaction).toHaveBeenCalled();
+      expect(result.status).toBe(RecordStatus.ACTIVE);
+    });
+
+    it('changes nothing else: the password, the role and the branches are left as they were', async () => {
+      const { service, repo, membershipRepo, transactionRepo, transactionMembershipRepo } = createService();
+      membership(membershipRepo);
+      repo.findOneBy.mockResolvedValue({
+        id: '1',
+        status: RecordStatus.INACTIVE,
+        passwordHash: 'hash-anterior',
+        mustChangePassword: false,
+      });
+
+      await service.activate(COMPANY, '1');
+
+      expect(transactionRepo.save).toHaveBeenCalledWith({
+        id: '1',
+        status: RecordStatus.ACTIVE,
+        passwordHash: 'hash-anterior',
+        mustChangePassword: false,
+      });
+      expect(transactionMembershipRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('throws when the user is not a member of the company', async () => {
+      const { service, membershipRepo, dataSource } = createService();
+      membership(membershipRepo, { member: false });
+
+      await expect(service.activate(COMPANY, 'missing')).rejects.toThrow(NotFoundException);
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+    });
+
+    it('refuses to activate an account that another company also uses', async () => {
+      const { service, repo, membershipRepo, dataSource } = createService();
+      membership(membershipRepo, { elsewhere: true });
+      repo.findOneBy.mockResolvedValue({ id: '1', status: RecordStatus.INACTIVE });
+
+      await expect(service.activate(COMPANY, '1')).rejects.toThrow(ForbiddenException);
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+    });
+
+    it('cannot reach a platform user', async () => {
+      const { service, membershipRepo, dataSource } = createService();
+      membership(membershipRepo, { platform: true });
+
+      await expect(service.activate(COMPANY, '1')).rejects.toThrow(NotFoundException);
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+    });
+  });
+
   describe('resetPassword', () => {
     it('leaves the document number as the password and forces a change', async () => {
       const { service, repo, membershipRepo } = createService();

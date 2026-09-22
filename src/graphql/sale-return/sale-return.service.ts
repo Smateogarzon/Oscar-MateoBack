@@ -8,12 +8,11 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { Decimal } from 'decimal.js';
 import { DataSource, EntityManager, In, Repository } from 'typeorm';
-import { RecordStatus } from '../../common/enums/record-status.enum.js';
 import { CashActor } from '../cash-session/cash-actor.js';
 import { CashSessionService } from '../cash-session/cash-session.service.js';
 import { DocumentSequenceService } from '../document-sequence/document-sequence.service.js';
 import { PaymentMethodType } from '../payment-method/entities/payment-method-type.enum.js';
-import { PaymentMethod } from '../payment-method/entities/payment-method.entity.js';
+import { validatePaymentMethods } from '../payment-method/payment-method-validation.js';
 import { SaleItem } from '../sale/entities/sale-item.entity.js';
 import { Sale } from '../sale/entities/sale.entity.js';
 import { SaleService } from '../sale/sale.service.js';
@@ -294,20 +293,7 @@ export class SaleReturnService {
 
       const toRefund = await this.amountToRefund(manager, saleReturn);
 
-      const methodIds = [...new Set(payments.map((payment) => payment.paymentMethodId))];
-      const methods = await manager.getRepository(PaymentMethod).find({
-        where: { id: In(methodIds), companyId, status: RecordStatus.ACTIVE },
-      });
-      const methodsById = new Map(methods.map((method) => [method.id, method]));
-      for (const payment of payments) {
-        const method = methodsById.get(payment.paymentMethodId);
-        if (!method) {
-          throw new NotFoundException(`Medio de pago ${payment.paymentMethodId} no encontrado`);
-        }
-        if (method.requiresReference && !payment.reference) {
-          throw new BadRequestException(`El medio de pago ${method.name} exige una referencia`);
-        }
-      }
+      const methodsById = await validatePaymentMethods(manager, companyId, payments);
 
       const refunded = payments.reduce((sum, payment) => sum.plus(payment.amount), new Decimal(0));
       if (!refunded.equals(toRefund)) {

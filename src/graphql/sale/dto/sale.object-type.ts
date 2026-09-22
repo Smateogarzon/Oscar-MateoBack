@@ -1,5 +1,5 @@
 import { Decimal } from 'decimal.js';
-import { Field, ObjectType, registerEnumType } from '@nestjs/graphql';
+import { Field, Int, ObjectType, registerEnumType } from '@nestjs/graphql';
 import { BaseObjectType } from '../../../common/dto/base.object-type.js';
 import { SaleStatus } from '../entities/sale-status.enum.js';
 
@@ -64,4 +64,8 @@ export class SaleObjectType extends BaseObjectType {
 
   @Field(() => Date, { nullable: true })
   completedAt: Date | null;
+
+  // Cuántas líneas tiene; lo resuelve SaleResolver (no viene de la entidad).
+  @Field(() => Int)
+  itemCount: number;
 }

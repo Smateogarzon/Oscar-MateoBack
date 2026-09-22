@@ -15,6 +15,7 @@ import { CsrfGuard } from '../../common/guards/csrf.guard.js';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard.js';
 import { PermissionsGuard } from '../../common/guards/permissions.guard.js';
 import type { JwtPayload } from '../auth/interface/jwt-payload.interface.js';
+import { UserObjectType } from '../user/dto/user.object-type.js';
 import { cashActor } from './cash-actor.js';
 import { CashSessionService } from './cash-session.service.js';
 import { CashSessionSummaryObjectType } from './dto/cash-session-summary.object-type.js';
@@ -79,6 +80,18 @@ export class CashSessionResolver {
     @CurrentUser() currentUser: JwtPayload,
   ) {
     return this.cashSessionService.findMyOpen(companyId, currentUser.sub);
+  }
+
+  // A quién se le puede asignar el turno de una caja de esta tienda: quienes tienen acceso a ella y un
+  // rol con permiso para cobrar. Es lo que necesita quien abre turnos para elegir cajero, y no exige
+  // poder administrar usuarios.
+  @Query(() => [UserObjectType])
+  @RequirePermissions(PermissionCode.CASH_OPEN_CLOSE_SHIFT)
+  cashierCandidates(
+    @CurrentCompanyId() companyId: string,
+    @Args('storeId', { type: () => ID }) storeId: string,
+  ) {
+    return this.cashSessionService.findCashierCandidates(companyId, storeId);
   }
 
   // Cuánto debería haber en la caja hasta ahora, antes de contarla para cerrar.

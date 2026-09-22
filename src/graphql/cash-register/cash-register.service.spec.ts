@@ -28,12 +28,14 @@ function createService() {
   const registerRepo = { find: vi.fn().mockResolvedValue([]), findOne: vi.fn() };
   const txRegisterRepo = {
     existsBy: vi.fn().mockResolvedValue(false),
+    // Los códigos que la tienda ya usa (por defecto, ninguno: la caja nueva será la C1).
+    find: vi.fn().mockResolvedValue([]),
     findOne: vi.fn(),
     create: vi.fn((value: unknown) => value),
     save: vi.fn(async (value: object) => ({ id: 'register-1', ...value })),
   };
   const txLocationRepo = {
-    findOneBy: vi.fn().mockResolvedValue({ id: 'store-1', name: 'Tienda centro', status: RecordStatus.ACTIVE }),
+    findOne: vi.fn().mockResolvedValue({ id: 'store-1', name: 'Tienda centro', status: RecordStatus.ACTIVE }),
   };
   const txSessionRepo = { existsBy: vi.fn().mockResolvedValue(false) };
   const dataSource = {
@@ -93,23 +95,18 @@ describe('CashRegisterService', () => {
   });
 
   describe('create', () => {
-    it('creates the register in an active store of the company, with name and code trimmed', async () => {
+    it('creates the register in an active store of the company, with the name trimmed', async () => {
       const { service, txLocationRepo, txRegisterRepo } = createService();
 
-      const register = await service.create(COMPANY, {
-        storeId: 'store-1',
-        name: '  Caja 1 ',
-        code: ' C1 ',
-      });
+      const register = await service.create(COMPANY, { storeId: 'store-1', name: '  Caja 1 ' });
 
       // Sin filtrar por estado: hace falta encontrar la tienda para poder distinguir "no existe"
-      // de "está desactivada". El filtro por empresa sí se mantiene.
-      expect(txLocationRepo.findOneBy).toHaveBeenCalledWith({
-        id: 'store-1',
-        companyId: COMPANY,
-        type: LocationType.STORE,
+      // de "está desactivada". El filtro por empresa sí se mantiene. Y la fila se bloquea: así dos
+      // cajas creadas a la vez en la tienda no toman el mismo código.
+      expect(txLocationRepo.findOne).toHaveBeenCalledWith({
+        where: { id: 'store-1', companyId: COMPANY, type: LocationType.STORE },
+        lock: { mode: 'pessimistic_write' },
       });
-      expect(txRegisterRepo.existsBy).toHaveBeenCalledWith({ storeId: 'store-1', code: 'C1' });
       expect(txRegisterRepo.create).toHaveBeenCalledWith({
         storeId: 'store-1',
         name: 'Caja 1',
@@ -118,106 +115,121 @@ describe('CashRegisterService', () => {
       expect(register.id).toBe('register-1');
     });
 
+    it('gives the register the next consecutive code of the store: the client never picks it', async () => {
+      const { service, txRegisterRepo } = createService();
+      txRegisterRepo.find.mockResolvedValue([{ code: 'C1' }, { code: 'C2' }]);
+
+      await service.create(COMPANY, { storeId: 'store-1', name: 'Caja del fondo' });
+
+      expect(txRegisterRepo.find).toHaveBeenCalledWith({
+        where: { storeId: 'store-1' },
+        select: { code: true },
+      });
+      expect(txRegisterRepo.create).toHaveBeenCalledWith({
+        storeId: 'store-1',
+        name: 'Caja del fondo',
+        code: 'C3',
+      });
+    });
+
+    it('never reuses the code of a register that is out of service: it still owns it', async () => {
+      const { service, txRegisterRepo } = createService();
+      // La C2 está desactivada, pero la lista trae todas las cajas de la tienda, activas o no.
+      txRegisterRepo.find.mockResolvedValue([{ code: 'C1' }, { code: 'C2' }]);
+
+      await service.create(COMPANY, { storeId: 'store-1', name: 'Otra' });
+
+      expect(txRegisterRepo.create.mock.calls[0][0].code).toBe('C3');
+    });
+
+    it('does not count the codes that were typed by hand before, only the ones shaped C<number>', async () => {
+      const { service, txRegisterRepo } = createService();
+      txRegisterRepo.find.mockResolvedValue([{ code: 'PRINCIPAL' }, { code: 'C1' }]);
+
+      await service.create(COMPANY, { storeId: 'store-1', name: 'Otra' });
+
+      expect(txRegisterRepo.create.mock.calls[0][0].code).toBe('C2');
+    });
+
     it('only puts registers in stores: not in warehouses, not in other companies', async () => {
       const { service, txLocationRepo, txRegisterRepo } = createService();
-      txLocationRepo.findOneBy.mockResolvedValue(null);
+      txLocationRepo.findOne.mockResolvedValue(null);
 
       await expect(
-        service.create(COMPANY, { storeId: 'warehouse-1', name: 'Caja', code: 'C1' }),
+        service.create(COMPANY, { storeId: 'warehouse-1', name: 'Caja' }),
       ).rejects.toThrow(NotFoundException);
       expect(txRegisterRepo.save).not.toHaveBeenCalled();
     });
 
     it('says a deactivated store is deactivated, instead of pretending it does not exist', async () => {
       const { service, txLocationRepo, txRegisterRepo } = createService();
-      txLocationRepo.findOneBy.mockResolvedValue({
+      txLocationRepo.findOne.mockResolvedValue({
         id: 'store-1',
         name: 'Tienda centro',
         status: RecordStatus.INACTIVE,
       });
 
-      await expect(service.create(COMPANY, { storeId: 'store-1', name: 'Caja', code: 'C1' })).rejects.toThrow(
+      await expect(service.create(COMPANY, { storeId: 'store-1', name: 'Caja' })).rejects.toThrow(
         'La tienda Tienda centro está desactivada: no se pueden crear cajas en ella',
       );
       expect(txRegisterRepo.save).not.toHaveBeenCalled();
     });
 
-    it('rejects a code the store already uses', async () => {
-      const { service, txRegisterRepo } = createService();
-      txRegisterRepo.existsBy.mockResolvedValue(true);
-
-      await expect(
-        service.create(COMPANY, { storeId: 'store-1', name: 'Caja', code: 'C1' }),
-      ).rejects.toThrow(ConflictException);
-      expect(txRegisterRepo.save).not.toHaveBeenCalled();
-    });
-
-    it('rejects a blank name or code, before touching the database', async () => {
+    it('rejects a blank name, before touching the database', async () => {
       const { service, dataSource } = createService();
 
-      await expect(
-        service.create(COMPANY, { storeId: 'store-1', name: '  ', code: 'C1' }),
-      ).rejects.toThrow(BadRequestException);
-      await expect(
-        service.create(COMPANY, { storeId: 'store-1', name: 'Caja', code: '  ' }),
-      ).rejects.toThrow(BadRequestException);
+      await expect(service.create(COMPANY, { storeId: 'store-1', name: '  ' })).rejects.toThrow(
+        BadRequestException,
+      );
       expect(dataSource.transaction).not.toHaveBeenCalled();
     });
 
-    it('turns the unique index error of two creations at once into the same conflict', async () => {
+    it('turns the unique index error, if it ever happens, into a conflict instead of a raw database error', async () => {
       const { service, txRegisterRepo } = createService();
       txRegisterRepo.save.mockRejectedValue(uniqueViolation());
 
-      await expect(
-        service.create(COMPANY, { storeId: 'store-1', name: 'Caja', code: 'C1' }),
-      ).rejects.toThrow(ConflictException);
+      await expect(service.create(COMPANY, { storeId: 'store-1', name: 'Caja' })).rejects.toThrow(
+        ConflictException,
+      );
     });
   });
 
   describe('update', () => {
-    it('changes the name and the code, and never the store', async () => {
+    it('changes only the name: the store and the code are fixed', async () => {
       const { service, txRegisterRepo } = createService();
       txRegisterRepo.findOne.mockResolvedValue(stored());
 
-      const register = await service.update(COMPANY, 'register-1', {
-        name: ' Caja del fondo ',
-        code: ' C2 ',
-      });
+      const register = await service.update(COMPANY, 'register-1', { name: ' Caja del fondo ' });
 
       expect(txRegisterRepo.findOne).toHaveBeenCalledWith({
         where: { id: 'register-1', store: { companyId: COMPANY } },
       });
-      expect(txRegisterRepo.existsBy).toHaveBeenCalledWith({ storeId: 'store-1', code: 'C2' });
-      expect(register).toMatchObject({ name: 'Caja del fondo', code: 'C2', storeId: 'store-1' });
+      expect(register).toMatchObject({ name: 'Caja del fondo', code: 'C1', storeId: 'store-1' });
     });
 
-    it('does not look for duplicates when the code stays the same', async () => {
+    it('never looks at the codes of the store: there is nothing to check, it cannot be changed', async () => {
       const { service, txRegisterRepo } = createService();
       txRegisterRepo.findOne.mockResolvedValue(stored());
 
-      await service.update(COMPANY, 'register-1', { name: 'Otro nombre', code: 'C1' });
+      await service.update(COMPANY, 'register-1', { name: 'Otro nombre' });
 
       expect(txRegisterRepo.existsBy).not.toHaveBeenCalled();
+      expect(txRegisterRepo.find).not.toHaveBeenCalled();
     });
 
-    it('rejects a code that another register of the store has', async () => {
+    it('leaves the register as it was when no name is sent', async () => {
       const { service, txRegisterRepo } = createService();
       txRegisterRepo.findOne.mockResolvedValue(stored());
-      txRegisterRepo.existsBy.mockResolvedValue(true);
 
-      await expect(service.update(COMPANY, 'register-1', { code: 'C2' })).rejects.toThrow(
-        ConflictException,
-      );
-      expect(txRegisterRepo.save).not.toHaveBeenCalled();
+      const register = await service.update(COMPANY, 'register-1', {});
+
+      expect(register).toMatchObject({ name: 'Caja principal', code: 'C1' });
     });
 
-    it('rejects a blank name or code, before touching the database', async () => {
+    it('rejects a blank name, before touching the database', async () => {
       const { service, dataSource } = createService();
 
       await expect(service.update(COMPANY, 'register-1', { name: ' ' })).rejects.toThrow(
-        BadRequestException,
-      );
-      await expect(service.update(COMPANY, 'register-1', { code: ' ' })).rejects.toThrow(
         BadRequestException,
       );
       expect(dataSource.transaction).not.toHaveBeenCalled();

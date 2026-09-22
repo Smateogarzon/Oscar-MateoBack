@@ -10,6 +10,8 @@ import { Decimal } from 'decimal.js';
 import { DataSource, EntityManager, In, Repository } from 'typeorm';
 import { assertStoreAccess } from '../../common/access/store-access.js';
 import { RecordStatus } from '../../common/enums/record-status.enum.js';
+import { CashActor } from '../cash-session/cash-actor.js';
+import { CashSessionService } from '../cash-session/cash-session.service.js';
 import {
   ACTIVE_DISCOUNT_REQUEST_STATUSES,
   DiscountRequestStatus,
@@ -18,12 +20,14 @@ import { DiscountRequest } from '../discount-request/entities/discount-request.e
 import { DocumentSequenceService } from '../document-sequence/document-sequence.service.js';
 import { LocationType } from '../location/entities/location-type.enum.js';
 import { Location } from '../location/entities/location.entity.js';
+import { User } from '../user/entities/user.entity.js';
 import { UserCompanyRole } from '../user-company-role/entities/user-company-role.entity.js';
 import { UserLocationAccess } from '../user-location-access/entities/user-location-access.entity.js';
 import { AddSaleItemInput } from './dto/add-sale-item.input.js';
 import { CancelSaleInput } from './dto/cancel-sale.input.js';
 import { CreateSaleInput } from './dto/create-sale.input.js';
 import { UpdateSaleItemQuantityInput } from './dto/update-sale-item-quantity.input.js';
+import { SaleActor } from './sale-actor.js';
 import { SaleItemType } from './entities/sale-item-type.enum.js';
 import { SaleItem } from './entities/sale-item.entity.js';
 import { SaleStatus } from './entities/sale-status.enum.js';
@@ -45,17 +49,30 @@ export class SaleService {
     private readonly saleItemRepository: Repository<SaleItem>,
     private readonly dataSource: DataSource,
     private readonly sequences: DocumentSequenceService,
+    private readonly cashSessions: CashSessionService,
   ) {}
 
-  // Las más recientes primero.
+  // Las más recientes primero. Para el histórico de ventas: sin sales.view_all (CashActor.canViewAll)
+  // cada quien ve solo las suyas, sea porque las cobró o porque las vendió; con él, ve todas y puede
+  // además filtrar por un cajero concreto (`cashierId`).
   findAll(
     companyId: string,
-    filters: { status?: SaleStatus; storeId?: string } = {},
+    actor: SaleActor,
+    filters: { status?: SaleStatus; storeId?: string; cashierId?: string } = {},
   ): Promise<Sale[]> {
-    const { status, storeId } = filters;
+    const { status, storeId, cashierId } = filters;
+    const base = { companyId, ...(status && { status }), ...(storeId && { storeId }) };
+    const order = { createdAt: 'DESC' as const };
+
+    if (actor.canViewAll) {
+      return this.saleRepository.find({ where: { ...base, ...(cashierId && { cashierId }) }, order });
+    }
     return this.saleRepository.find({
-      where: { companyId, ...(status && { status }), ...(storeId && { storeId }) },
-      order: { createdAt: 'DESC' },
+      where: [
+        { ...base, cashierId: actor.userId },
+        { ...base, sellerId: actor.userId },
+      ],
+      order,
     });
   }
 
@@ -71,9 +88,17 @@ export class SaleService {
     return this.saleItemRepository.find({ where: { saleId }, order: { createdAt: 'ASC' } });
   }
 
+  // Cuántas líneas tiene, para listas de ventas (la cola de "Ventas en curso") que no necesitan
+  // traerlas todas.
+  countItems(saleId: string): Promise<number> {
+    return this.saleItemRepository.count({ where: { saleId } });
+  }
+
   // Crea una venta en borrador: el cajero es quien da "nueva venta". Los totales arrancan en
-  // cero y cambian a medida que se agregan líneas.
-  async create(companyId: string, cashierId: string, input: CreateSaleInput): Promise<Sale> {
+  // cero y cambian a medida que se agregan líneas. Queda atada al turno indicado desde ya (no
+  // solo al cobrarla): así el turno la ve entre sus borradores desde el principio.
+  async create(companyId: string, actor: CashActor, input: CreateSaleInput): Promise<Sale> {
+    const cashierId = actor.userId;
     return this.dataSource.transaction(async (manager) => {
       // La tienda se busca sin filtrar por estado, a propósito: una desactivada sí existe, y
       // responder "no encontrada" mandaría a buscar el problema donde no está. Una de otra
@@ -92,13 +117,25 @@ export class SaleService {
       // Personal por ubicación).
       await assertStoreAccess(manager, cashierId, store.id);
 
+      // El turno tiene que estar abierto, ser de una caja de esta tienda y estar asignado a quien
+      // crea la venta (lockOpen ya lo exige).
+      const session = await this.cashSessions.lockOpen(manager, companyId, input.cashSessionId, actor);
+      if (session.cashRegister.storeId !== store.id) {
+        throw new ConflictException('El turno es de una caja de otra tienda');
+      }
+
       if (input.sellerId) {
         const sellerIsMember = await manager.getRepository(UserCompanyRole).existsBy({
           userId: input.sellerId,
           companyId,
           status: RecordStatus.ACTIVE,
         });
-        if (!sellerIsMember) throw new NotFoundException(`Vendedor ${input.sellerId} no encontrado`);
+        // Una membresía activa no basta: la cuenta misma pudo desactivarse sin que se le
+        // quitaran sus roles.
+        const sellerAccountActive =
+          sellerIsMember &&
+          (await manager.getRepository(User).existsBy({ id: input.sellerId, status: RecordStatus.ACTIVE }));
+        if (!sellerAccountActive) throw new NotFoundException(`Vendedor ${input.sellerId} no encontrado`);
       }
 
       // El número se pide al final y dentro de la misma transacción: si algo de arriba falla,
@@ -112,6 +149,7 @@ export class SaleService {
           storeId: store.id,
           sellerId: input.sellerId ?? null,
           cashierId,
+          cashSessionId: session.id,
           saleNumber: formatSaleNumber(number),
           subtotal: new Decimal(0),
           discountTotal: new Decimal(0),

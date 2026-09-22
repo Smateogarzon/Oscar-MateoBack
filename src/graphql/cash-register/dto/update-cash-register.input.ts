@@ -1,7 +1,8 @@
 import { Field, InputType } from '@nestjs/graphql';
 import { IsOptional, IsString, MaxLength } from 'class-validator';
 
-// La tienda no se cambia: una caja es un objeto físico que no cambia de tienda.
+// Solo el nombre. La tienda no se cambia (una caja es un objeto físico) y el código tampoco: lo asignó
+// el servidor al crearla y es fijo. Mandar `code` se rechaza (whitelist con forbidNonWhitelisted).
 @InputType()
 export class UpdateCashRegisterInput {
   @Field({ nullable: true })
@@ -9,10 +10,4 @@ export class UpdateCashRegisterInput {
   @IsString()
   @MaxLength(80)
   name?: string;
-
-  @Field({ nullable: true })
-  @IsOptional()
-  @IsString()
-  @MaxLength(30)
-  code?: string;
 }

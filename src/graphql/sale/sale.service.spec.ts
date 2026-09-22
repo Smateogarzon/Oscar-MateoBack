@@ -7,6 +7,7 @@ import {
 import { Decimal } from 'decimal.js';
 import { In } from 'typeorm';
 import { RecordStatus } from '../../common/enums/record-status.enum.js';
+import type { CashActor } from '../cash-session/cash-actor.js';
 import {
   ACTIVE_DISCOUNT_REQUEST_STATUSES,
   DiscountRequestStatus,
@@ -14,6 +15,7 @@ import {
 import { DiscountRequest } from '../discount-request/entities/discount-request.entity.js';
 import { LocationType } from '../location/entities/location-type.enum.js';
 import { Location } from '../location/entities/location.entity.js';
+import { User } from '../user/entities/user.entity.js';
 import { UserCompanyRole } from '../user-company-role/entities/user-company-role.entity.js';
 import { UserLocationAccess } from '../user-location-access/entities/user-location-access.entity.js';
 import { SaleItemType } from './entities/sale-item-type.enum.js';
@@ -46,7 +48,11 @@ function createService() {
   };
   const accessRepo = { existsBy: vi.fn().mockResolvedValue(true) };
   const membershipRepo = { existsBy: vi.fn().mockResolvedValue(true) };
+  const userRepo = { existsBy: vi.fn().mockResolvedValue(true) };
   const sequences = { next: vi.fn().mockResolvedValue(7) };
+  const cashSessions = {
+    lockOpen: vi.fn().mockResolvedValue({ id: 'session-1', cashRegister: { storeId: 'store-1' } }),
+  };
   const dataSource = {
     transaction: vi.fn(async (fn: (manager: unknown) => unknown) =>
       fn({
@@ -57,11 +63,13 @@ function createService() {
               ? accessRepo
               : entity === UserCompanyRole
                 ? membershipRepo
-                : entity === SaleItem
-                  ? txItemRepo
-                  : entity === DiscountRequest
-                    ? txRequestRepo
-                    : txSaleRepo,
+                : entity === User
+                  ? userRepo
+                  : entity === SaleItem
+                    ? txItemRepo
+                    : entity === DiscountRequest
+                      ? txRequestRepo
+                      : txSaleRepo,
       }),
     ),
   };
@@ -71,6 +79,7 @@ function createService() {
     saleItemRepo as never,
     dataSource as never,
     sequences as never,
+    cashSessions as never,
   );
   return {
     service,
@@ -82,14 +91,17 @@ function createService() {
     locationRepo,
     accessRepo,
     membershipRepo,
+    userRepo,
     sequences,
+    cashSessions,
     dataSource,
   };
 }
 
 const COMPANY = 'company-1';
 const CASHIER = 'cashier-1';
-const input = { storeId: 'store-1' };
+const CASHIER_ACTOR: CashActor = { userId: CASHIER, canViewAll: false, canManageShifts: false };
+const input = { storeId: 'store-1', cashSessionId: 'session-1' };
 
 const d = (value: string) => new Decimal(value);
 
@@ -120,10 +132,42 @@ const newItem = {
 
 describe('SaleService', () => {
   describe('findAll', () => {
-    it('only lists the sales of the company, newest first', async () => {
+    it('without sales.view_all, only lists the sales the actor cashiered or sold', async () => {
       const { service, saleRepo } = createService();
 
-      await service.findAll(COMPANY);
+      await service.findAll(COMPANY, { userId: CASHIER, canViewAll: false });
+
+      expect(saleRepo.find).toHaveBeenCalledWith({
+        where: [
+          { companyId: COMPANY, cashierId: CASHIER },
+          { companyId: COMPANY, sellerId: CASHIER },
+        ],
+        order: { createdAt: 'DESC' },
+      });
+    });
+
+    it('without sales.view_all, status and store narrow both branches', async () => {
+      const { service, saleRepo } = createService();
+
+      await service.findAll(
+        COMPANY,
+        { userId: CASHIER, canViewAll: false },
+        { status: SaleStatus.DRAFT, storeId: 'store-1' },
+      );
+
+      expect(saleRepo.find).toHaveBeenCalledWith({
+        where: [
+          { companyId: COMPANY, status: SaleStatus.DRAFT, storeId: 'store-1', cashierId: CASHIER },
+          { companyId: COMPANY, status: SaleStatus.DRAFT, storeId: 'store-1', sellerId: CASHIER },
+        ],
+        order: { createdAt: 'DESC' },
+      });
+    });
+
+    it('with sales.view_all, lists every sale of the company', async () => {
+      const { service, saleRepo } = createService();
+
+      await service.findAll(COMPANY, { userId: 'admin-1', canViewAll: true });
 
       expect(saleRepo.find).toHaveBeenCalledWith({
         where: { companyId: COMPANY },
@@ -131,13 +175,13 @@ describe('SaleService', () => {
       });
     });
 
-    it('can narrow the list down by status and store', async () => {
+    it('with sales.view_all, can narrow the list down to one cashier', async () => {
       const { service, saleRepo } = createService();
 
-      await service.findAll(COMPANY, { status: SaleStatus.DRAFT, storeId: 'store-1' });
+      await service.findAll(COMPANY, { userId: 'admin-1', canViewAll: true }, { cashierId: CASHIER });
 
       expect(saleRepo.find).toHaveBeenCalledWith({
-        where: { companyId: COMPANY, status: SaleStatus.DRAFT, storeId: 'store-1' },
+        where: { companyId: COMPANY, cashierId: CASHIER },
         order: { createdAt: 'DESC' },
       });
     });
@@ -180,7 +224,7 @@ describe('SaleService', () => {
     it('creates a draft with zero totals, the session user as cashier and the next number', async () => {
       const { service, txSaleRepo, dataSource } = createService();
 
-      const sale = await service.create(COMPANY, CASHIER, input);
+      const sale = await service.create(COMPANY, CASHIER_ACTOR, input);
 
       expect(dataSource.transaction).toHaveBeenCalledTimes(1);
       expect(txSaleRepo.create).toHaveBeenCalledWith({
@@ -188,6 +232,7 @@ describe('SaleService', () => {
         storeId: 'store-1',
         sellerId: null,
         cashierId: CASHIER,
+        cashSessionId: 'session-1',
         saleNumber: 'VTA-000007',
         subtotal: new Decimal(0),
         discountTotal: new Decimal(0),
@@ -198,10 +243,29 @@ describe('SaleService', () => {
       expect(sale.id).toBe('sale-1');
     });
 
+    it('locks the session as an open one assigned to the cashier who creates the sale', async () => {
+      const { service, cashSessions } = createService();
+
+      await service.create(COMPANY, CASHIER_ACTOR, input);
+
+      expect(cashSessions.lockOpen).toHaveBeenCalledWith(expect.anything(), COMPANY, 'session-1', CASHIER_ACTOR);
+    });
+
+    it('rejects a session whose register is of another store', async () => {
+      const { service, cashSessions, sequences, txSaleRepo } = createService();
+      cashSessions.lockOpen.mockResolvedValue({ id: 'session-1', cashRegister: { storeId: 'store-9' } });
+
+      await expect(service.create(COMPANY, CASHIER_ACTOR, input)).rejects.toThrow(
+        'El turno es de una caja de otra tienda',
+      );
+      expect(sequences.next).not.toHaveBeenCalled();
+      expect(txSaleRepo.save).not.toHaveBeenCalled();
+    });
+
     it('asks for the number of the company, inside the same transaction', async () => {
       const { service, sequences } = createService();
 
-      await service.create(COMPANY, CASHIER, input);
+      await service.create(COMPANY, CASHIER_ACTOR, input);
 
       expect(sequences.next).toHaveBeenCalledWith(expect.anything(), COMPANY, SALE_SERIES);
     });
@@ -210,7 +274,7 @@ describe('SaleService', () => {
       const { service, locationRepo, sequences, txSaleRepo } = createService();
       locationRepo.findOneBy.mockResolvedValue(null);
 
-      await expect(service.create(COMPANY, CASHIER, input)).rejects.toThrow(NotFoundException);
+      await expect(service.create(COMPANY, CASHIER_ACTOR, input)).rejects.toThrow(NotFoundException);
       // La búsqueda no filtra por estado: hay que encontrar la tienda para poder distinguir
       // "no existe" de "está desactivada". El filtro por empresa sí se mantiene.
       expect(locationRepo.findOneBy).toHaveBeenCalledWith({
@@ -231,8 +295,8 @@ describe('SaleService', () => {
         status: RecordStatus.INACTIVE,
       });
 
-      await expect(service.create(COMPANY, CASHIER, input)).rejects.toThrow(ConflictException);
-      await expect(service.create(COMPANY, CASHIER, input)).rejects.toThrow(
+      await expect(service.create(COMPANY, CASHIER_ACTOR, input)).rejects.toThrow(ConflictException);
+      await expect(service.create(COMPANY, CASHIER_ACTOR, input)).rejects.toThrow(
         'La tienda Tienda centro está desactivada: no se puede vender en ella',
       );
       expect(sequences.next).not.toHaveBeenCalled();
@@ -243,7 +307,7 @@ describe('SaleService', () => {
       const { service, accessRepo, sequences, txSaleRepo } = createService();
       accessRepo.existsBy.mockResolvedValue(false);
 
-      await expect(service.create(COMPANY, CASHIER, input)).rejects.toThrow(ForbiddenException);
+      await expect(service.create(COMPANY, CASHIER_ACTOR, input)).rejects.toThrow(ForbiddenException);
       expect(accessRepo.existsBy).toHaveBeenCalledWith({
         userId: CASHIER,
         locationId: 'store-1',
@@ -254,15 +318,16 @@ describe('SaleService', () => {
     });
 
     it('records the seller when it is an active member of the company', async () => {
-      const { service, membershipRepo, txSaleRepo } = createService();
+      const { service, membershipRepo, userRepo, txSaleRepo } = createService();
 
-      await service.create(COMPANY, CASHIER, { ...input, sellerId: 'seller-1' });
+      await service.create(COMPANY, CASHIER_ACTOR, { ...input, sellerId: 'seller-1' });
 
       expect(membershipRepo.existsBy).toHaveBeenCalledWith({
         userId: 'seller-1',
         companyId: COMPANY,
         status: RecordStatus.ACTIVE,
       });
+      expect(userRepo.existsBy).toHaveBeenCalledWith({ id: 'seller-1', status: RecordStatus.ACTIVE });
       expect(txSaleRepo.create).toHaveBeenCalledWith(
         expect.objectContaining({ sellerId: 'seller-1' }),
       );
@@ -273,7 +338,18 @@ describe('SaleService', () => {
       membershipRepo.existsBy.mockResolvedValue(false);
 
       await expect(
-        service.create(COMPANY, CASHIER, { ...input, sellerId: 'seller-9' }),
+        service.create(COMPANY, CASHIER_ACTOR, { ...input, sellerId: 'seller-9' }),
+      ).rejects.toThrow(NotFoundException);
+      expect(sequences.next).not.toHaveBeenCalled();
+      expect(txSaleRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('rejects a seller whose account is deactivated, even with an active membership', async () => {
+      const { service, userRepo, sequences, txSaleRepo } = createService();
+      userRepo.existsBy.mockResolvedValue(false);
+
+      await expect(
+        service.create(COMPANY, CASHIER_ACTOR, { ...input, sellerId: 'seller-inactive' }),
       ).rejects.toThrow(NotFoundException);
       expect(sequences.next).not.toHaveBeenCalled();
       expect(txSaleRepo.save).not.toHaveBeenCalled();

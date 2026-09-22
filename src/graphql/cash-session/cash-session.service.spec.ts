@@ -10,6 +10,8 @@ import { RecordStatus } from '../../common/enums/record-status.enum.js';
 import { CashMovementType } from '../cash-movement/entities/cash-movement-type.enum.js';
 import { CashMovement } from '../cash-movement/entities/cash-movement.entity.js';
 import { CashRegister } from '../cash-register/entities/cash-register.entity.js';
+import { LocationType } from '../location/entities/location-type.enum.js';
+import { Location } from '../location/entities/location.entity.js';
 import { PaymentMethodType } from '../payment-method/entities/payment-method-type.enum.js';
 import { RolePermission } from '../role-permission/entities/role-permission.entity.js';
 import { SalePayment } from '../sale-payment/entities/sale-payment.entity.js';
@@ -70,7 +72,13 @@ function createService() {
     save: vi.fn(async (value: object) => ({ id: 'session-1', ...value })),
   };
   const txRegisterRepo = { findOne: vi.fn().mockResolvedValue(register()) };
-  const accessRepo = { existsBy: vi.fn().mockResolvedValue(true) };
+  // El acceso de un usuario a una tienda: `existsBy` para el cajero de un turno, `find` para armar la
+  // lista de candidatos.
+  const accessRepo = { existsBy: vi.fn().mockResolvedValue(true), find: vi.fn().mockResolvedValue([]) };
+  // La tienda de la caja (que tiene que estar en servicio) y la que se consulta al listar candidatos.
+  const locationRepo = {
+    findOneBy: vi.fn().mockResolvedValue({ id: 'store-1', name: 'Tienda centro', status: RecordStatus.ACTIVE }),
+  };
   const paymentRepo = { find: vi.fn().mockResolvedValue([]) };
   const movementRepo = { find: vi.fn().mockResolvedValue([]) };
   const refundRepo = { find: vi.fn().mockResolvedValue([]) };
@@ -96,13 +104,15 @@ function createService() {
           ? txRegisterRepo
           : entity === UserLocationAccess
             ? accessRepo
-            : entity === SalePayment
-              ? paymentRepo
-              : entity === CashMovement
-                ? movementRepo
-                : entity === RefundPayment
-                  ? refundRepo
-                  : undefined,
+            : entity === Location
+              ? locationRepo
+              : entity === SalePayment
+                ? paymentRepo
+                : entity === CashMovement
+                  ? movementRepo
+                  : entity === RefundPayment
+                    ? refundRepo
+                    : undefined,
   };
   const dataSource = {
     manager,
@@ -112,7 +122,11 @@ function createService() {
         ? membershipRepo
         : entity === RolePermission
           ? rolePermissionRepo
-          : undefined,
+          : entity === Location
+            ? locationRepo
+            : entity === UserLocationAccess
+              ? accessRepo
+              : undefined,
   };
 
   const service = new CashSessionService(sessionRepo as never, dataSource as never);
@@ -122,6 +136,7 @@ function createService() {
     txSessionRepo,
     txRegisterRepo,
     accessRepo,
+    locationRepo,
     paymentRepo,
     movementRepo,
     refundRepo,
@@ -293,6 +308,90 @@ describe('CashSessionService', () => {
     });
   });
 
+  describe('findCashierCandidates', () => {
+    const person = (id: string) => ({ id, firstName: id, lastName: 'Apellido', status: RecordStatus.ACTIVE });
+
+    // Cada usuario tiene su propio rol ('role-<id>'); solo 'role-cashier-1' y 'role-cashier-2' traen el
+    // permiso de cobrar. Es lo que `loadCompanyAccess` lee para saber qué puede hacer cada uno.
+    function withRoles(created: ReturnType<typeof createService>, members: string[]) {
+      created.membershipRepo.find.mockImplementation(async ({ where }: { where: { userId: string } }) =>
+        members.includes(where.userId)
+          ? [{ role: { id: `role-${where.userId}`, code: 'ROLE', status: RecordStatus.ACTIVE } }]
+          : [],
+      );
+      created.rolePermissionRepo.find.mockImplementation(
+        async ({ where }: { where: { roleId: { value: string[] } } }) => {
+          const canCharge = where.roleId.value.some((roleId) => roleId.startsWith('role-cashier'));
+          return [{ permission: { code: canCharge ? 'cash.register_payment' : 'sales.view', status: RecordStatus.ACTIVE } }];
+        },
+      );
+    }
+
+    it('offers only who has access to the store AND a role that lets them charge', async () => {
+      const created = createService();
+      created.accessRepo.find.mockResolvedValue([
+        { user: person('cashier-1') },
+        { user: person('seller-1') },
+        { user: person('cashier-2') },
+      ]);
+      withRoles(created, ['cashier-1', 'seller-1', 'cashier-2']);
+
+      const candidates = await created.service.findCashierCandidates(COMPANY, 'store-1');
+
+      // El vendedor tiene acceso a la tienda pero su rol no cobra: no se ofrece.
+      expect(candidates.map((user) => user.id)).toEqual(['cashier-1', 'cashier-2']);
+    });
+
+    it('is the same rule `open` applies: whoever is offered is not refused for lacking the permission', async () => {
+      const created = createService();
+      created.accessRepo.find.mockResolvedValue([{ user: person('seller-1') }]);
+      withRoles(created, ['seller-1']);
+
+      expect(await created.service.findCashierCandidates(COMPANY, 'store-1')).toEqual([]);
+      await expect(
+        created.service.open(COMPANY, 'admin-1', { ...opening, cashierId: 'seller-1' }),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('does not offer someone who is not a member of the company any more', async () => {
+      const created = createService();
+      created.accessRepo.find.mockResolvedValue([{ user: person('cashier-1') }]);
+      withRoles(created, []);
+
+      expect(await created.service.findCashierCandidates(COMPANY, 'store-1')).toEqual([]);
+    });
+
+    it('only looks at active users with active access to that store', async () => {
+      const created = createService();
+
+      await created.service.findCashierCandidates(COMPANY, 'store-1');
+
+      expect(created.accessRepo.find).toHaveBeenCalledWith({
+        where: { locationId: 'store-1', status: RecordStatus.ACTIVE, user: { status: RecordStatus.ACTIVE } },
+        relations: { user: true },
+      });
+    });
+
+    it('checks the store belongs to the company and is a store, before looking at anyone', async () => {
+      const created = createService();
+      created.locationRepo.findOneBy.mockResolvedValue(null);
+
+      await expect(created.service.findCashierCandidates(COMPANY, 'store-9')).rejects.toThrow(NotFoundException);
+      expect(created.locationRepo.findOneBy).toHaveBeenCalledWith({
+        id: 'store-9',
+        companyId: COMPANY,
+        type: LocationType.STORE,
+      });
+      expect(created.accessRepo.find).not.toHaveBeenCalled();
+    });
+
+    it('a store nobody has access to has no candidates', async () => {
+      const { service } = createService();
+
+      expect(await service.findCashierCandidates(COMPANY, 'store-1')).toEqual([]);
+    });
+  });
+
   describe('open', () => {
     it('opens the shift of an active register for the cashier, with the opening amount and a new code', async () => {
       const { service, txRegisterRepo, txSessionRepo } = createService();
@@ -397,6 +496,16 @@ describe('CashSessionService', () => {
         .mockResolvedValueOnce(register({ status: RecordStatus.INACTIVE }));
 
       await expect(service.open(COMPANY, 'admin-1', opening)).rejects.toThrow(ConflictException);
+      expect(txSessionRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('does not open a register whose store was deactivated, even if the register itself is active', async () => {
+      const { service, locationRepo, txSessionRepo } = createService();
+      locationRepo.findOneBy.mockResolvedValue({ id: 'store-1', status: RecordStatus.INACTIVE });
+
+      await expect(service.open(COMPANY, 'admin-1', opening)).rejects.toThrow(
+        'La tienda de esta caja está desactivada: no se puede abrir un turno en ella',
+      );
       expect(txSessionRepo.save).not.toHaveBeenCalled();
     });
 

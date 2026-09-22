@@ -37,7 +37,7 @@ export class AddSaleItemInput {
   // Precio por unidad, ej: "50000"
   @Field()
   @Matches(MONEY_PATTERN, {
-    message: 'unitPrice debe ser un monto con hasta 2 decimales, por ejemplo 50000.50',
+    message: 'unitPrice debe ser un monto de hasta 12 dígitos enteros y hasta 2 decimales, por ejemplo 50000.50',
   })
   unitPrice: string;
 }

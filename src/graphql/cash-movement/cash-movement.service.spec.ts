@@ -123,19 +123,6 @@ describe('CashMovementService', () => {
       expect(dataSource.transaction).not.toHaveBeenCalled();
     });
 
-    it('does not take a manual income out of the register', async () => {
-      const { service, dataSource } = createService();
-
-      await expect(
-        service.register(COMPANY, cashier, {
-          ...expense,
-          type: CashMovementType.CASH_OUT,
-          reason: CashMovementReason.MANUAL_INCOME,
-        }),
-      ).rejects.toThrow(BadRequestException);
-      expect(dataSource.transaction).not.toHaveBeenCalled();
-    });
-
     it.each([CashMovementReason.EXPENSE, CashMovementReason.WITHDRAWAL, CashMovementReason.REFUND])(
       'does not put cash in for %s, which only takes it out',
       async (reason) => {
@@ -149,13 +136,8 @@ describe('CashMovementService', () => {
     );
 
     it.each([
-      [CashMovementReason.MANUAL_INCOME, CashMovementType.CASH_IN],
       [CashMovementReason.DEPOSIT, CashMovementType.CASH_IN],
       [CashMovementReason.DEPOSIT, CashMovementType.CASH_OUT],
-      [CashMovementReason.ADJUSTMENT, CashMovementType.CASH_IN],
-      [CashMovementReason.ADJUSTMENT, CashMovementType.CASH_OUT],
-      [CashMovementReason.OTHER, CashMovementType.CASH_IN],
-      [CashMovementReason.OTHER, CashMovementType.CASH_OUT],
     ])('accepts %s as %s', async (reason, type) => {
       const { service, txMovementRepo } = createService();
 

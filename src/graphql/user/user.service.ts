@@ -109,8 +109,19 @@ export class UserService {
   }
 
   async deactivate(companyId: string, id: string): Promise<User> {
+    return this.setStatus(companyId, id, RecordStatus.INACTIVE);
+  }
+
+  // Desactivar solo apaga el acceso de la cuenta (no toca su rol ni sus sedes), así que reactivarla
+  // la deja exactamente como estaba: con los mismos permisos y sedes, y con la contraseña que
+  // tuviera. Tiene la misma restricción que desactivar (ver `findManageable`).
+  async activate(companyId: string, id: string): Promise<User> {
+    return this.setStatus(companyId, id, RecordStatus.ACTIVE);
+  }
+
+  private async setStatus(companyId: string, id: string, status: RecordStatus): Promise<User> {
     const user = await this.findManageable(companyId, id);
-    user.status = RecordStatus.INACTIVE;
+    user.status = status;
     return this.dataSource.transaction((manager) => manager.getRepository(User).save(user));
   }
 

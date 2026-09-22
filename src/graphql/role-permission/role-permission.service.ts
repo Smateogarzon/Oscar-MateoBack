@@ -1,13 +1,11 @@
-import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, QueryFailedError, Repository } from 'typeorm';
+import { DataSource, Repository } from 'typeorm';
 import { COMPANY_VISIBLE_ROLE, isPlatformRole } from '../../common/access/platform-role.js';
+import { mapPostgresWriteError } from '../../common/utils/postgres-error.js';
 import { Role } from '../role/entities/role.entity.js';
 import { CreateRolePermissionInput } from './dto/create-role-permission.input.js';
 import { RolePermission } from './entities/role-permission.entity.js';
-
-const FOREIGN_KEY_VIOLATION = '23503';
-const UNIQUE_VIOLATION = '23505';
 
 // RolePermission es una tabla inmutable (ver ImmutableEntity): no tiene `status`,
 // así que quitar un permiso de un rol es un delete real, no una desactivación.
@@ -58,15 +56,9 @@ export class RolePermissionService {
   }
 
   private mapWriteError(error: unknown): Error {
-    if (!(error instanceof QueryFailedError)) return error as Error;
-    const code = (error.driverError as { code?: string } | undefined)?.code;
-
-    if (code === FOREIGN_KEY_VIOLATION) {
-      return new BadRequestException('El rol o el permiso indicado no existe');
-    }
-    if (code === UNIQUE_VIOLATION) {
-      return new ConflictException('Este rol ya tiene asignado ese permiso');
-    }
-    return error as Error;
+    return mapPostgresWriteError(error, {
+      foreignKey: 'El rol o el permiso indicado no existe',
+      unique: 'Este rol ya tiene asignado ese permiso',
+    });
   }
 }

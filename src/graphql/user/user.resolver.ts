@@ -79,6 +79,17 @@ export class UserResolver {
     return this.userService.deactivate(companyId, id);
   }
 
+  // A diferencia de una sede o un medio de pago, un usuario sí se reactiva: desactivar no borra su
+  // rol ni sus sedes, y volver a crearlo no es posible (el correo y el documento no se repiten).
+  @Mutation(() => UserObjectType)
+  @RequirePermissions(PermissionCode.USERS_MANAGE)
+  activateUser(
+    @CurrentCompanyId() companyId: string,
+    @Args('id', { type: () => ID }) id: string,
+  ) {
+    return this.userService.activate(companyId, id);
+  }
+
   @Mutation(() => UserObjectType)
   @RequirePermissions(PermissionCode.USERS_MANAGE)
   resetUserPassword(

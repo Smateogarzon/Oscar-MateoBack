@@ -1,15 +1,13 @@
-import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, QueryFailedError, Repository } from 'typeorm';
+import { DataSource, Repository } from 'typeorm';
 import { RecordStatus } from '../../common/enums/record-status.enum.js';
+import { mapPostgresWriteError } from '../../common/utils/postgres-error.js';
 import { LocationType } from '../location/entities/location-type.enum.js';
 import { Location } from '../location/entities/location.entity.js';
 import { PaymentMethod } from '../payment-method/entities/payment-method.entity.js';
 import { CreateStorePaymentMethodInput } from './dto/create-store-payment-method.input.js';
 import { StorePaymentMethod } from './entities/store-payment-method.entity.js';
-
-const FOREIGN_KEY_VIOLATION = '23503';
-const UNIQUE_VIOLATION = '23505';
 
 // La relación no lleva empresa propia: es la de su tienda. Todo se hace dentro de la empresa
 // activa, así que una fila de una tienda de otra empresa se responde como si no existiera.
@@ -88,15 +86,9 @@ export class StorePaymentMethodService {
   }
 
   private mapWriteError(error: unknown): Error {
-    if (!(error instanceof QueryFailedError)) return error as Error;
-    const code = (error.driverError as { code?: string } | undefined)?.code;
-
-    if (code === FOREIGN_KEY_VIOLATION) {
-      return new BadRequestException('La tienda o el medio de pago indicado no existe');
-    }
-    if (code === UNIQUE_VIOLATION) {
-      return new ConflictException('Esta tienda ya tiene ese medio de pago: actívalo en vez de crearlo');
-    }
-    return error as Error;
+    return mapPostgresWriteError(error, {
+      foreignKey: 'La tienda o el medio de pago indicado no existe',
+      unique: 'Esta tienda ya tiene ese medio de pago: actívalo en vez de crearlo',
+    });
   }
 }

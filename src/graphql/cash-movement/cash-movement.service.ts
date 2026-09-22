@@ -11,9 +11,8 @@ import { CashMovementReason } from './entities/cash-movement-reason.enum.js';
 import { CashMovementType } from './entities/cash-movement-type.enum.js';
 import { CashMovement } from './entities/cash-movement.entity.js';
 
-// Motivos que solo tienen un sentido posible. Los demás (DEPOSIT, ADJUSTMENT, OTHER) pueden ir en
-// cualquiera de los dos: un depósito puede llevar efectivo al banco o al cajón.
-const CASH_IN_ONLY_REASONS = [CashMovementReason.MANUAL_INCOME];
+// Motivos que solo tienen un sentido posible. DEPOSIT es el único que puede ir en cualquiera de
+// los dos: un depósito puede llevar efectivo al banco o al cajón.
 const CASH_OUT_ONLY_REASONS = [
   CashMovementReason.EXPENSE,
   CashMovementReason.WITHDRAWAL,
@@ -104,9 +103,6 @@ export class CashMovementService {
   }
 
   private assertReasonMatchesType(type: CashMovementType, reason: CashMovementReason): void {
-    if (CASH_IN_ONLY_REASONS.includes(reason) && type !== CashMovementType.CASH_IN) {
-      throw new BadRequestException('Un ingreso manual tiene que ser una entrada de efectivo');
-    }
     if (CASH_OUT_ONLY_REASONS.includes(reason) && type !== CashMovementType.CASH_OUT) {
       throw new BadRequestException('Un gasto, un retiro o una devolución tiene que ser una salida de efectivo');
     }

@@ -1,14 +1,12 @@
-import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, QueryFailedError, Repository } from 'typeorm';
+import { DataSource, Repository } from 'typeorm';
 import { RecordStatus } from '../../common/enums/record-status.enum.js';
+import { mapPostgresWriteError } from '../../common/utils/postgres-error.js';
 import { Location } from '../location/entities/location.entity.js';
 import { UserCompanyRole } from '../user-company-role/entities/user-company-role.entity.js';
 import { CreateUserLocationAccessInput } from './dto/create-user-location-access.input.js';
 import { UserLocationAccess } from './entities/user-location-access.entity.js';
-
-const FOREIGN_KEY_VIOLATION = '23503';
-const UNIQUE_VIOLATION = '23505';
 
 // El acceso no lleva empresa propia: es la de su sede. Todo se hace dentro de la empresa
 // activa, así que un acceso a una sede de otra empresa se responde como si no existiera.
@@ -85,15 +83,9 @@ export class UserLocationAccessService {
   }
 
   private mapWriteError(error: unknown): Error {
-    if (!(error instanceof QueryFailedError)) return error as Error;
-    const code = (error.driverError as { code?: string } | undefined)?.code;
-
-    if (code === FOREIGN_KEY_VIOLATION) {
-      return new BadRequestException('El usuario o la ubicación indicada no existe');
-    }
-    if (code === UNIQUE_VIOLATION) {
-      return new ConflictException('Este usuario ya tiene acceso a esa ubicación');
-    }
-    return error as Error;
+    return mapPostgresWriteError(error, {
+      foreignKey: 'El usuario o la ubicación indicada no existe',
+      unique: 'Este usuario ya tiene acceso a esa ubicación',
+    });
   }
 }

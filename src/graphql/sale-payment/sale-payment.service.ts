@@ -1,9 +1,4 @@
-import {
-  BadRequestException,
-  ConflictException,
-  Injectable,
-  NotFoundException,
-} from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Decimal } from 'decimal.js';
 import { DataSource, In, Repository } from 'typeorm';
@@ -13,7 +8,7 @@ import { CashActor } from '../cash-session/cash-actor.js';
 import { CashSessionService } from '../cash-session/cash-session.service.js';
 import { DiscountRequestStatus } from '../discount-request/entities/discount-request-status.enum.js';
 import { DiscountRequest } from '../discount-request/entities/discount-request.entity.js';
-import { PaymentMethod } from '../payment-method/entities/payment-method.entity.js';
+import { validatePaymentMethods } from '../payment-method/payment-method-validation.js';
 import { SaleItem } from '../sale/entities/sale-item.entity.js';
 import { SaleStatus } from '../sale/entities/sale-status.enum.js';
 import { Sale } from '../sale/entities/sale.entity.js';
@@ -99,36 +94,25 @@ export class SalePaymentService {
         : null;
       const credit = exchange ? Decimal.min(exchange.totalReturned, sale.total) : new Decimal(0);
 
+      // El turno ya es el que se le asignó a la venta al crearla: se vuelve a bloquear para
+      // revalidar que siga abierto (si se cerró entre que se creó y ahora, no se cobra).
+      if (!sale.cashSessionId) throw new ConflictException('La venta no tiene un turno asociado: no se puede cobrar');
       const session = await this.cashSessions.lockOpen(
         manager,
         companyId,
-        input.cashSessionId,
+        sale.cashSessionId,
         actor,
       );
       if (session.cashRegister.storeId !== sale.storeId) {
         throw new ConflictException('El turno es de una caja de otra tienda');
       }
 
-      const methodIds = [...new Set(payments.map((payment) => payment.paymentMethodId))];
-      const methods =
-        methodIds.length === 0
-          ? []
-          : await manager.getRepository(PaymentMethod).find({
-              where: { id: In(methodIds), companyId, status: RecordStatus.ACTIVE },
-            });
-      const methodsById = new Map(methods.map((method) => [method.id, method]));
-      for (const payment of payments) {
-        const method = methodsById.get(payment.paymentMethodId);
-        if (!method) {
-          throw new NotFoundException(`Medio de pago ${payment.paymentMethodId} no encontrado`);
-        }
-        if (method.requiresReference && !payment.reference) {
-          throw new BadRequestException(`El medio de pago ${method.name} exige una referencia`);
-        }
-      }
+      const methodsById = await validatePaymentMethods(manager, companyId, payments);
+      const methods = [...methodsById.values()];
 
       // Cada tienda elige con qué se cobra en ella (Configuración → Medios de pago por tienda).
       if (methods.length > 0) {
+        const methodIds = [...methodsById.keys()];
         const allowed = await manager.getRepository(StorePaymentMethod).find({
           where: { storeId: sale.storeId, paymentMethodId: In(methodIds), status: RecordStatus.ACTIVE },
           select: { paymentMethodId: true },

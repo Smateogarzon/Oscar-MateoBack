@@ -57,8 +57,9 @@ export class Sale extends BaseEntity {
   @JoinColumn({ name: 'cashierId' })
   cashier: User;
 
-  // Turno de caja en el que se cobró: se llena al completar la venta (SalePaymentService.complete)
-  // y queda vacío mientras es borrador o si se cancela.
+  // Turno de caja al que queda atada la venta: se llena desde que nace (SaleService.create), no
+  // solo al cobrarla — así el turno la ve entre sus borradores desde el principio. Nulo solo en
+  // ventas de antes de este cambio.
   @Index()
   @Column({ type: 'uuid', nullable: true })
   cashSessionId: string | null;
