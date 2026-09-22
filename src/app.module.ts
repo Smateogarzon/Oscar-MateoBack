@@ -39,6 +39,7 @@ import { SalePaymentModule } from './graphql/sale-payment/sale-payment.module.js
 import { SaleReturnModule } from './graphql/sale-return/sale-return.module.js';
 import { StorageModule } from './common/storage/storage.module.js';
 import { UploadModule } from './uploads/upload.module.js';
+import { PosHardwareModule } from './pos-hardware/pos-hardware.module.js';
 
 const { validationRules, plugins } = new ApolloArmor().protect();
 
@@ -127,6 +128,7 @@ const { validationRules, plugins } = new ApolloArmor().protect();
     SaleReturnModule,
     StorageModule,
     UploadModule,
+    PosHardwareModule,
   ],
   controllers: [AppController],
   providers: [
