@@ -61,7 +61,7 @@ function createService() {
     create: vi.fn((value: unknown) => value),
     save: vi.fn(async (value: unknown) => value),
   };
-  const txRequestRepo = { existsBy: vi.fn().mockResolvedValue(false) };
+  const txRequestRepo = { update: vi.fn().mockResolvedValue(undefined) };
   const txItemRepo = { existsBy: vi.fn().mockResolvedValue(true) };
   const txMethodRepo = { find: vi.fn().mockResolvedValue([cashMethod, cardMethod]) };
   const txSaleRepo = { save: vi.fn(async (value: object) => ({ ...value })) };
@@ -279,19 +279,15 @@ describe('SalePaymentService', () => {
       expect(dataSource.transaction).not.toHaveBeenCalled();
     });
 
-    it('does not charge a sale with a pending discount request', async () => {
-      const { service, txRequestRepo, cashSessions, txPaymentRepo } = createService();
-      txRequestRepo.existsBy.mockResolvedValue(true);
+    it('charges a sale with a pending discount request instead of waiting for it: it withdraws the request and charges today’s total', async () => {
+      const { service, txRequestRepo } = createService();
 
-      await expect(service.complete(COMPANY, cashier, charge([cash('100000')]))).rejects.toThrow(
-        ConflictException,
+      await service.complete(COMPANY, cashier, charge([cash('100000')]));
+
+      expect(txRequestRepo.update).toHaveBeenCalledWith(
+        { saleId: 'sale-1', status: DiscountRequestStatus.PENDING },
+        expect.objectContaining({ status: DiscountRequestStatus.CANCELLED, resolvedBy: cashier.userId }),
       );
-      expect(txRequestRepo.existsBy).toHaveBeenCalledWith({
-        saleId: 'sale-1',
-        status: DiscountRequestStatus.PENDING,
-      });
-      expect(cashSessions.lockOpen).not.toHaveBeenCalled();
-      expect(txPaymentRepo.save).not.toHaveBeenCalled();
     });
 
     it('does not charge a sale without lines', async () => {

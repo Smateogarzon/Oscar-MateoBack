@@ -676,7 +676,7 @@ describe('SaleService', () => {
       const { service, txSaleRepo } = createService();
       txSaleRepo.findOne.mockResolvedValue(draft());
 
-      const sale = await service.cancel(COMPANY, 'admin-1', 'sale-1', { reason: '  Cliente se arrepintió ' });
+      const sale = await service.cancel(COMPANY, { userId: 'admin-1', canCancelAny: true }, 'sale-1', { reason: '  Cliente se arrepintió ' });
 
       expect(sale.status).toBe(SaleStatus.CANCELLED);
       expect(sale.cancelledBy).toBe('admin-1');
@@ -688,7 +688,7 @@ describe('SaleService', () => {
       const { service, txSaleRepo, txRequestRepo } = createService();
       txSaleRepo.findOne.mockResolvedValue(draft());
 
-      await service.cancel(COMPANY, 'admin-1', 'sale-1', { reason: 'X' });
+      await service.cancel(COMPANY, { userId: 'admin-1', canCancelAny: true }, 'sale-1', { reason: 'X' });
 
       expect(txRequestRepo.update).toHaveBeenCalledWith(
         { saleId: 'sale-1', status: In(ACTIVE_DISCOUNT_REQUEST_STATUSES) },
@@ -704,7 +704,7 @@ describe('SaleService', () => {
       const { service, txSaleRepo } = createService();
       txSaleRepo.findOne.mockResolvedValue(draft());
 
-      await service.cancel(COMPANY, 'admin-1', 'sale-1', { reason: 'X' });
+      await service.cancel(COMPANY, { userId: 'admin-1', canCancelAny: true }, 'sale-1', { reason: 'X' });
 
       expect(txSaleRepo.findOne).toHaveBeenCalledWith({
         where: { id: 'sale-1', companyId: COMPANY },
@@ -716,7 +716,7 @@ describe('SaleService', () => {
       const { service, txSaleRepo, txRequestRepo } = createService();
       txSaleRepo.findOne.mockResolvedValue(null);
 
-      await expect(service.cancel(COMPANY, 'admin-1', 'sale-9', { reason: 'X' })).rejects.toThrow(
+      await expect(service.cancel(COMPANY, { userId: 'admin-1', canCancelAny: true }, 'sale-9', { reason: 'X' })).rejects.toThrow(
         NotFoundException,
       );
       expect(txSaleRepo.save).not.toHaveBeenCalled();
@@ -727,7 +727,7 @@ describe('SaleService', () => {
       const { service, txSaleRepo } = createService();
       txSaleRepo.findOne.mockResolvedValue(draft({ status: SaleStatus.CANCELLED }));
 
-      await expect(service.cancel(COMPANY, 'admin-1', 'sale-1', { reason: 'X' })).rejects.toThrow(
+      await expect(service.cancel(COMPANY, { userId: 'admin-1', canCancelAny: true }, 'sale-1', { reason: 'X' })).rejects.toThrow(
         ConflictException,
       );
       expect(txSaleRepo.save).not.toHaveBeenCalled();
@@ -737,7 +737,7 @@ describe('SaleService', () => {
       const { service, txSaleRepo, txRequestRepo } = createService();
       txSaleRepo.findOne.mockResolvedValue(draft({ status: SaleStatus.COMPLETED }));
 
-      await expect(service.cancel(COMPANY, 'admin-1', 'sale-1', { reason: 'X' })).rejects.toThrow(
+      await expect(service.cancel(COMPANY, { userId: 'admin-1', canCancelAny: true }, 'sale-1', { reason: 'X' })).rejects.toThrow(
         ConflictException,
       );
       expect(txSaleRepo.save).not.toHaveBeenCalled();
@@ -747,7 +747,7 @@ describe('SaleService', () => {
     it('asks for a reason that is not just blank spaces, before touching the database', async () => {
       const { service, dataSource } = createService();
 
-      await expect(service.cancel(COMPANY, 'admin-1', 'sale-1', { reason: '   ' })).rejects.toThrow(
+      await expect(service.cancel(COMPANY, { userId: 'admin-1', canCancelAny: true }, 'sale-1', { reason: '   ' })).rejects.toThrow(
         BadRequestException,
       );
       expect(dataSource.transaction).not.toHaveBeenCalled();

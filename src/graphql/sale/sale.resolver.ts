@@ -142,41 +142,50 @@ export class SaleResolver {
   @RequirePermissions(PermissionCode.SALES_CREATE)
   addSaleItem(
     @CurrentCompanyId() companyId: string,
+    @CurrentCompanyAccess() access: CompanyAccess,
     @CurrentUser() currentUser: JwtPayload,
     @Args('input') input: AddSaleItemInput,
   ) {
-    return this.saleService.addItem(companyId, currentUser.sub, input);
+    return this.saleService.addItem(companyId, cashActor(currentUser.sub, access.permissionCodes), input);
   }
 
   @Mutation(() => SaleObjectType)
   @RequirePermissions(PermissionCode.SALES_CREATE)
   updateSaleItemQuantity(
     @CurrentCompanyId() companyId: string,
+    @CurrentCompanyAccess() access: CompanyAccess,
     @CurrentUser() currentUser: JwtPayload,
     @Args('input') input: UpdateSaleItemQuantityInput,
   ) {
-    return this.saleService.updateItemQuantity(companyId, currentUser.sub, input);
+    return this.saleService.updateItemQuantity(companyId, cashActor(currentUser.sub, access.permissionCodes), input);
   }
 
   @Mutation(() => SaleObjectType)
   @RequirePermissions(PermissionCode.SALES_CREATE)
   removeSaleItem(
     @CurrentCompanyId() companyId: string,
+    @CurrentCompanyAccess() access: CompanyAccess,
     @CurrentUser() currentUser: JwtPayload,
     @Args('saleId', { type: () => ID }) saleId: string,
     @Args('itemId', { type: () => ID }) itemId: string,
   ) {
-    return this.saleService.removeItem(companyId, currentUser.sub, saleId, itemId);
+    return this.saleService.removeItem(companyId, cashActor(currentUser.sub, access.permissionCodes), saleId, itemId);
   }
 
+  // Anular exige `sales.cancel` (cualquier venta), salvo una excepción: quien creó una venta
+  // puede borrar SU PROPIO borrador (no cobrado) sin ese permiso — es solo deshacer algo que
+  // nunca llegó a ser un cobro, no la operación de auditoría que es anular una venta ajena o ya
+  // en curso.
   @Mutation(() => SaleObjectType)
-  @RequirePermissions(PermissionCode.SALES_CANCEL)
+  @RequireAnyPermission(PermissionCode.SALES_CANCEL, PermissionCode.SALES_CREATE)
   cancelSale(
     @CurrentCompanyId() companyId: string,
+    @CurrentCompanyAccess() access: CompanyAccess,
     @CurrentUser() currentUser: JwtPayload,
     @Args('id', { type: () => ID }) id: string,
     @Args('input') input: CancelSaleInput,
   ) {
-    return this.saleService.cancel(companyId, currentUser.sub, id, input);
+    const canCancelAny = access.permissionCodes.includes(PermissionCode.SALES_CANCEL);
+    return this.saleService.cancel(companyId, { userId: currentUser.sub, canCancelAny }, id, input);
   }
 }

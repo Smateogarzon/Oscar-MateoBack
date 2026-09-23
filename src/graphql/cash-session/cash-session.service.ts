@@ -308,17 +308,19 @@ export class CashSessionService {
   }
 
   // Trae el turno bloqueado hasta que la transacción termine, para que cobre o mueva dinero SU
-  // cajero: el asignado, nadie más (un solo cajero por caja). Exige que siga abierto. Devuelve el
-  // turno con su caja (`cashRegister`) cargada. Es pública porque CashMovementService y
-  // SalePaymentService la usan: todo lo que cambia un turno ocurre con el turno bloqueado, y por eso
-  // un cierre nunca deja pasar un cobro a medias.
+  // cajero: el asignado, nadie más (un solo cajero por caja) — salvo quien abre y cierra turnos
+  // (`canManageShifts`, el administrador), que puede operar cualquier caja de la empresa como si
+  // fuera su cajero. Exige que el turno siga abierto. Devuelve el turno con su caja
+  // (`cashRegister`) cargada. Es pública porque SaleService, CashMovementService y
+  // SalePaymentService la usan: todo lo que cambia un turno ocurre con el turno bloqueado, y por
+  // eso un cierre nunca deja pasar un cobro a medias.
   lockOpen(
     manager: EntityManager,
     companyId: string,
     id: string,
     actor: CashActor,
   ): Promise<CashSession> {
-    return this.lock(manager, companyId, id, actor.userId);
+    return this.lock(manager, companyId, id, actor.canManageShifts ? null : actor.userId);
   }
 
   // Lo mismo, pero para el administrador que cierra el turno o cambia su código: cualquier turno

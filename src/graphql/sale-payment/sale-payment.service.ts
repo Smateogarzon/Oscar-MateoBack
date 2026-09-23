@@ -39,8 +39,7 @@ export class SalePaymentService {
 
   // Completa una venta en borrador: guarda todos sus pagos, la deja COMPLETADA y la ata al turno
   // de caja en que se cobró. Todo o nada, en una transacción. Se exige que:
-  //   - la venta tenga líneas y ninguna solicitud de descuento pendiente (una aprobada ya está
-  //     aplicada en los totales)
+  //   - la venta tenga líneas
   //   - el turno esté abierto, sea de una caja de la misma tienda y lo opere su cajero asignado
   //     (CashSessionService.lockOpen)
   //   - cada medio de pago sea activo y de la empresa, y traiga referencia si la exige
@@ -67,17 +66,21 @@ export class SalePaymentService {
       const sale = await this.sales.lockDraft(manager, companyId, input.saleId);
       // Cobrar es operar en la tienda: hace falta seguir teniendo acceso a ella, no basta con
       // haberlo tenido cuando se abrió la venta.
-      await assertStoreAccess(manager, actor.userId, sale.storeId);
+      await assertStoreAccess(manager, actor.userId, sale.storeId, actor.canManageShifts);
 
-      const hasPendingRequest = await manager.getRepository(DiscountRequest).existsBy({
-        saleId: sale.id,
-        status: DiscountRequestStatus.PENDING,
-      });
-      if (hasPendingRequest) {
-        throw new ConflictException(
-          'La venta tiene una solicitud de descuento pendiente: resuélvela o cancélala antes de cobrar',
-        );
-      }
+      // Cobrar con una solicitud todavía pendiente no espera a que la resuelvan: se cobra al total
+      // de hoy (sin ese descuento, que solo se aplica al aprobarla) y la solicitud se retira sola,
+      // para que no quede pendiente sobre una venta ya cerrada. Una ya aprobada no se toca: su
+      // descuento ya está aplicado en los totales que se cobran abajo.
+      await manager.getRepository(DiscountRequest).update(
+        { saleId: sale.id, status: DiscountRequestStatus.PENDING },
+        {
+          status: DiscountRequestStatus.CANCELLED,
+          resolvedBy: actor.userId,
+          resolvedAt: new Date(),
+          resolutionNotes: 'Retirada automáticamente: la venta se cobró antes de resolverla',
+        },
+      );
 
       const hasLines = await manager.getRepository(SaleItem).existsBy({ saleId: sale.id });
       if (!hasLines) throw new BadRequestException('La venta no tiene líneas para cobrar');

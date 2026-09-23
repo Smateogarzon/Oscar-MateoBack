@@ -76,7 +76,7 @@ export class CashMovementService {
 
       // Mover el efectivo de una gaveta es operar en esa tienda: hace falta seguir teniendo acceso
       // a ella. Va antes del código del día para no gastar un intento en algo que ya está negado.
-      await assertStoreAccess(manager, actor.userId, session.cashRegister.storeId);
+      await assertStoreAccess(manager, actor.userId, session.cashRegister.storeId, actor.canManageShifts);
 
       // Un retiro o un gasto no puede sacar más efectivo del que de verdad hay en la gaveta en
       // este momento del turno. Se calcula con el turno ya bloqueado (lockOpen), así dos salidas

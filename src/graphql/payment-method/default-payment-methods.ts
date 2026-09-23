@@ -6,8 +6,9 @@ import { PaymentMethod } from './entities/payment-method.entity.js';
 
 /**
  * Los medios de pago no se crean a mano: toda empresa nace con estos tres, uno por tipo. Lo que sí
- * se configura es cuáles acepta cada tienda (StorePaymentMethod). La tarjeta y la transferencia
- * exigen referencia (el voucher, el número de la transferencia); el efectivo no.
+ * se configura es cuáles acepta cada tienda (StorePaymentMethod). Ninguno exige referencia por
+ * defecto (el voucher de la tarjeta, el número de la transferencia): cada empresa puede activarlo
+ * por medio desde Configuración → Medios de pago si lo necesita.
  */
 export const DEFAULT_PAYMENT_METHODS: ReadonlyArray<{
   name: string;
@@ -15,8 +16,8 @@ export const DEFAULT_PAYMENT_METHODS: ReadonlyArray<{
   requiresReference: boolean;
 }> = [
   { name: 'Efectivo', type: PaymentMethodType.CASH, requiresReference: false },
-  { name: 'Tarjeta', type: PaymentMethodType.CARD, requiresReference: true },
-  { name: 'Transferencia', type: PaymentMethodType.TRANSFER, requiresReference: true },
+  { name: 'Tarjeta', type: PaymentMethodType.CARD, requiresReference: false },
+  { name: 'Transferencia', type: PaymentMethodType.TRANSFER, requiresReference: false },
 ];
 
 /** Da a la empresa los medios por defecto que le falten (por tipo). Idempotente: una empresa que ya

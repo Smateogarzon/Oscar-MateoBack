@@ -136,8 +136,8 @@ export class SaleService {
       }
 
       // Solo se vende desde las tiendas a las que el usuario tiene acceso (Configuración →
-      // Personal por ubicación).
-      await assertStoreAccess(manager, cashierId, store.id);
+      // Personal por ubicación) — salvo quien abre y cierra turnos, que opera cualquiera.
+      await assertStoreAccess(manager, cashierId, store.id, actor.canManageShifts);
 
       // El turno tiene que estar abierto, ser de una caja de esta tienda y estar asignado a quien
       // crea la venta (lockOpen ya lo exige).
@@ -186,7 +186,7 @@ export class SaleService {
   // Agrega una línea genérica y recalcula los totales de la venta. La línea nace sin descuento:
   // los descuentos solo llegan por una solicitud aprobada. Agregar líneas se puede aunque haya
   // una solicitud activa. Devuelve la venta con sus totales al día.
-  async addItem(companyId: string, userId: string, input: AddSaleItemInput): Promise<Sale> {
+  async addItem(companyId: string, actor: CashActor, input: AddSaleItemInput): Promise<Sale> {
     const description = input.description.trim();
     if (!description) throw new BadRequestException('La descripción de la línea no puede estar vacía');
 
@@ -204,7 +204,7 @@ export class SaleService {
 
     return this.dataSource.transaction(async (manager) => {
       const sale = await this.lockDraft(manager, companyId, input.saleId);
-      await assertStoreAccess(manager, userId, sale.storeId);
+      await assertStoreAccess(manager, actor.userId, sale.storeId, actor.canManageShifts);
 
       const repo = manager.getRepository(SaleItem);
       await repo.save(
@@ -231,7 +231,7 @@ export class SaleService {
   // solicitud y pedir otra. Devuelve la venta con sus totales al día.
   async updateItemQuantity(
     companyId: string,
-    userId: string,
+    actor: CashActor,
     input: UpdateSaleItemQuantityInput,
   ): Promise<Sale> {
     const quantity = new Decimal(input.quantity);
@@ -241,7 +241,7 @@ export class SaleService {
 
     return this.dataSource.transaction(async (manager) => {
       const sale = await this.lockDraft(manager, companyId, input.saleId);
-      await assertStoreAccess(manager, userId, sale.storeId);
+      await assertStoreAccess(manager, actor.userId, sale.storeId, actor.canManageShifts);
       await this.assertNoActiveDiscountRequest(manager, sale.id, 'cambiar cantidades');
 
       const repo = manager.getRepository(SaleItem);
@@ -264,10 +264,10 @@ export class SaleService {
   // Quita una línea y recalcula. Mientras haya una solicitud de descuento activa no se quitan
   // líneas: el monto pedido o aprobado se calculó sobre ellas y quedaría desfasado. Para
   // cambiarlas hay que cancelar la solicitud y pedir otra.
-  async removeItem(companyId: string, userId: string, saleId: string, itemId: string): Promise<Sale> {
+  async removeItem(companyId: string, actor: CashActor, saleId: string, itemId: string): Promise<Sale> {
     return this.dataSource.transaction(async (manager) => {
       const sale = await this.lockDraft(manager, companyId, saleId);
-      await assertStoreAccess(manager, userId, sale.storeId);
+      await assertStoreAccess(manager, actor.userId, sale.storeId, actor.canManageShifts);
       await this.assertNoActiveDiscountRequest(manager, sale.id, 'quitar líneas');
 
       const repo = manager.getRepository(SaleItem);
@@ -284,7 +284,15 @@ export class SaleService {
   // canceló, cuándo y por qué. Una venta ya cancelada no se cancela dos veces. Su solicitud de
   // descuento activa, si la hay, se cancela con ella: si no, quedaría pendiente para siempre en la
   // lista del administrador.
-  async cancel(companyId: string, userId: string, id: string, input: CancelSaleInput): Promise<Sale> {
+  //
+  // Sin `sales.cancel` (actor.canCancelAny en falso) solo se puede cancelar la propia: quien creó
+  // la venta borrando un borrador suyo que no llegó a nada, no anulando una ajena.
+  async cancel(
+    companyId: string,
+    actor: { userId: string; canCancelAny: boolean },
+    id: string,
+    input: CancelSaleInput,
+  ): Promise<Sale> {
     const reason = input.reason.trim();
     if (!reason) throw new BadRequestException('Indica el motivo de la cancelación');
 
@@ -297,6 +305,9 @@ export class SaleService {
         lock: { mode: 'pessimistic_write' },
       });
       if (!sale) throw new NotFoundException(`Venta ${id} no encontrada`);
+      if (!actor.canCancelAny && sale.cashierId !== actor.userId) {
+        throw new ForbiddenException('No tienes permiso para anular esta venta');
+      }
       if (sale.status === SaleStatus.CANCELLED) {
         throw new ConflictException('La venta ya está cancelada');
       }
@@ -308,14 +319,14 @@ export class SaleService {
         { saleId: sale.id, status: In(ACTIVE_DISCOUNT_REQUEST_STATUSES) },
         {
           status: DiscountRequestStatus.CANCELLED,
-          resolvedBy: userId,
+          resolvedBy: actor.userId,
           resolvedAt: new Date(),
           resolutionNotes: 'Venta cancelada',
         },
       );
 
       sale.status = SaleStatus.CANCELLED;
-      sale.cancelledBy = userId;
+      sale.cancelledBy = actor.userId;
       sale.cancelledAt = new Date();
       sale.cancellationReason = reason;
       return repo.save(sale);
