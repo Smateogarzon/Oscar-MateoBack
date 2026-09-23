@@ -6,7 +6,10 @@ import {
   CurrentCompanyId,
 } from '../../common/decorators/current-company.decorator.js';
 import { CurrentUser } from '../../common/decorators/current-user.decorator.js';
-import { RequirePermissions } from '../../common/decorators/permissions.decorator.js';
+import {
+  RequireAnyPermission,
+  RequirePermissions,
+} from '../../common/decorators/permissions.decorator.js';
 import { PermissionCode } from '../../common/enums/permission-code.enum.js';
 import { CsrfGuard } from '../../common/guards/csrf.guard.js';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard.js';
@@ -71,6 +74,48 @@ export class SaleResolver {
   @ResolveField(() => Int)
   itemCount(@Parent() sale: SaleObjectType) {
     return this.saleService.countItems(sale.id);
+  }
+
+  // Las ventas cobradas de un turno, para su recibo de cierre. Autorizado igual que
+  // CashMovementResolver.cashMovements (por el turno, no por sales.view): quien puede ver el
+  // turno ve sus ventas.
+  @Query(() => [SaleObjectType])
+  @RequireAnyPermission(
+    PermissionCode.CASH_OPEN_CLOSE_SHIFT,
+    PermissionCode.CASH_REGISTER_PAYMENT,
+    PermissionCode.CASH_VIEW_ALL,
+  )
+  cashSessionSales(
+    @CurrentCompanyId() companyId: string,
+    @CurrentCompanyAccess() access: CompanyAccess,
+    @CurrentUser() currentUser: JwtPayload,
+    @Args('cashSessionId', { type: () => ID }) cashSessionId: string,
+  ) {
+    return this.saleService.findAllInSession(
+      companyId,
+      cashActor(currentUser.sub, access.permissionCodes),
+      cashSessionId,
+    );
+  }
+
+  // Las líneas de esas ventas, todas en una sola consulta.
+  @Query(() => [SaleItemObjectType])
+  @RequireAnyPermission(
+    PermissionCode.CASH_OPEN_CLOSE_SHIFT,
+    PermissionCode.CASH_REGISTER_PAYMENT,
+    PermissionCode.CASH_VIEW_ALL,
+  )
+  cashSessionSaleItems(
+    @CurrentCompanyId() companyId: string,
+    @CurrentCompanyAccess() access: CompanyAccess,
+    @CurrentUser() currentUser: JwtPayload,
+    @Args('cashSessionId', { type: () => ID }) cashSessionId: string,
+  ) {
+    return this.saleService.findItemsInSession(
+      companyId,
+      cashActor(currentUser.sub, access.permissionCodes),
+      cashSessionId,
+    );
   }
 
   // "Nueva venta" del cajero: el cajero es el usuario de la sesión. Queda atada al turno que

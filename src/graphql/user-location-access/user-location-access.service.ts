@@ -1,8 +1,10 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
 import { RecordStatus } from '../../common/enums/record-status.enum.js';
 import { mapPostgresWriteError } from '../../common/utils/postgres-error.js';
+import { CashSessionStatus } from '../cash-session/entities/cash-session-status.enum.js';
+import { CashSession } from '../cash-session/entities/cash-session.entity.js';
 import { Location } from '../location/entities/location.entity.js';
 import { UserCompanyRole } from '../user-company-role/entities/user-company-role.entity.js';
 import { CreateUserLocationAccessInput } from './dto/create-user-location-access.input.js';
@@ -67,10 +69,27 @@ export class UserLocationAccessService {
     }
   }
 
+  // No se le quita a un cajero el acceso a una sede donde tiene un turno de caja abierto: seguiría
+  // cobrando en él sin que nada lo revalide. Misma regla que ya protege a la caja y a la tienda
+  // (CashRegisterService.deactivate, LocationService.deactivate).
   async deactivate(companyId: string, id: string): Promise<UserLocationAccess> {
     const access = await this.findOne(companyId, id);
-    access.status = RecordStatus.INACTIVE;
-    return this.dataSource.transaction((manager) => manager.getRepository(UserLocationAccess).save(access));
+
+    return this.dataSource.transaction(async (manager) => {
+      const hasOpenShift = await manager.getRepository(CashSession).existsBy({
+        cashierId: access.userId,
+        status: CashSessionStatus.OPEN,
+        cashRegister: { storeId: access.locationId },
+      });
+      if (hasOpenShift) {
+        throw new ConflictException(
+          'Este usuario tiene un turno de caja abierto en esa sede: ciérralo antes de quitarle el acceso',
+        );
+      }
+
+      access.status = RecordStatus.INACTIVE;
+      return manager.getRepository(UserLocationAccess).save(access);
+    });
   }
 
   // A diferencia de User/Location, esto sí necesita reactivar: es un checkbox que

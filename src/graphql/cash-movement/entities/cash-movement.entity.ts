@@ -21,14 +21,27 @@ export class CashMovement extends ImmutableEntity {
   cashSession: CashSession;
 
   @Index()
-  @Column({ type: 'enum', enum: CashMovementType, enumName: 'cash_movement_type' })
+  @Column({
+    type: 'enum',
+    enum: CashMovementType,
+    enumName: 'cash_movement_type',
+  })
   type: CashMovementType;
 
-  @Column({ type: 'enum', enum: CashMovementReason, enumName: 'cash_movement_reason' })
+  @Column({
+    type: 'enum',
+    enum: CashMovementReason,
+    enumName: 'cash_movement_reason',
+  })
   reason: CashMovementReason;
 
   // Siempre positivo: el sentido lo da `type`
-  @Column({ type: 'numeric', precision: 14, scale: 2, transformer: decimalTransformer })
+  @Column({
+    type: 'numeric',
+    precision: 14,
+    scale: 2,
+    transformer: decimalTransformer,
+  })
   amount: Decimal;
 
   @Column({ type: 'varchar', length: 255, nullable: true })

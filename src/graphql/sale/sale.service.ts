@@ -82,6 +82,28 @@ export class SaleService {
     return sale;
   }
 
+  // Las ventas COBRADAS de un turno, para su recibo de cierre: no las canceladas ni las que
+  // quedaron en borrador (nunca se cobraron). Un turno que quien pregunta no puede ver se
+  // responde como si no existiera (misma regla que CashMovementService.findAll): quien cierra o
+  // consulta un turno ve sus ventas aunque no tenga sales.view, porque ya se le confió el turno.
+  async findAllInSession(companyId: string, actor: CashActor, cashSessionId: string): Promise<Sale[]> {
+    await this.cashSessions.findOne(companyId, actor, cashSessionId);
+    return this.saleRepository.find({
+      where: { cashSessionId, status: SaleStatus.COMPLETED },
+      order: { completedAt: 'ASC' },
+    });
+  }
+
+  // Las líneas de todas esas ventas, en una sola consulta (no una por venta): las agrupa por
+  // venta quien arma el recibo, con `saleId`.
+  async findItemsInSession(companyId: string, actor: CashActor, cashSessionId: string): Promise<SaleItem[]> {
+    await this.cashSessions.findOne(companyId, actor, cashSessionId);
+    return this.saleItemRepository.find({
+      where: { sale: { cashSessionId, status: SaleStatus.COMPLETED } },
+      order: { createdAt: 'ASC' },
+    });
+  }
+
   // En el orden en que se agregaron. La empresa se comprueba a través de la venta.
   async findItems(companyId: string, saleId: string): Promise<SaleItem[]> {
     await this.findOne(companyId, saleId);

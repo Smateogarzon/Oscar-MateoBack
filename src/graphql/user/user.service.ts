@@ -125,12 +125,6 @@ export class UserService {
     return this.dataSource.transaction((manager) => manager.getRepository(User).save(user));
   }
 
-  async activate(companyId: string, id: string): Promise<User> {
-    const user = await this.findManageable(companyId, id);
-    user.status = RecordStatus.ACTIVE;
-    return this.dataSource.transaction((manager) => manager.getRepository(User).save(user));
-  }
-
   // Deja la contraseña como al crear el usuario (su documento) y lo obliga a cambiarla
   // en el próximo ingreso. Como JwtAuthGuard revisa `mustChangePassword` en cada petición,
   // una sesión ya abierta queda limitada a cambiar la contraseña desde este momento.

@@ -4,6 +4,7 @@ import {
   ForbiddenException,
   NotFoundException,
 } from '@nestjs/common';
+import { Decimal } from 'decimal.js';
 import type { CashActor } from '../cash-session/cash-actor.js';
 import { CashCodeVerdict } from '../cash-session/cash-code.js';
 import { CashMovementService } from './cash-movement.service.js';
@@ -14,17 +15,26 @@ const COMPANY = 'company-1';
 const cashier: CashActor = { userId: 'cashier-1', canViewAll: false, canManageShifts: false };
 
 // El turno tal como lo entrega CashSessionService.lockOpen
-const lockedSession = { id: 'session-1', cashRegisterId: 'register-1' };
+const lockedSession = {
+  id: 'session-1',
+  cashRegisterId: 'register-1',
+  cashRegister: { storeId: 'store-1' },
+};
 
 function createService() {
   const movementRepo = { find: vi.fn().mockResolvedValue([]) };
   const txMovementRepo = {
     create: vi.fn((value: unknown) => value),
     save: vi.fn(async (value: object) => ({ id: 'movement-1', ...value })),
+    // El mock de manager.getRepository no distingue de qué entidad se pide: este mismo objeto
+    // sirve también para el existsBy de assertStoreAccess (acceso a la tienda del cajero).
+    existsBy: vi.fn().mockResolvedValue(true),
   };
   const cashSessions = {
     findOne: vi.fn().mockResolvedValue({ id: 'session-1' }),
     lockOpen: vi.fn().mockResolvedValue(lockedSession),
+    // Efectivo esperado de sobra por defecto: los tests que no prueban el tope no chocan con él.
+    expectedCashOf: vi.fn().mockResolvedValue(new Decimal(1_000_000)),
     // El código del día: por defecto, el que escribió el cajero es el correcto.
     verifyMovementCode: vi.fn().mockResolvedValue(CashCodeVerdict.OK),
   };
@@ -48,6 +58,7 @@ const expense = {
   type: CashMovementType.CASH_OUT,
   reason: CashMovementReason.EXPENSE,
   amount: '15000',
+  description: 'Compra de bolsas',
 };
 
 describe('CashMovementService', () => {
@@ -135,15 +146,29 @@ describe('CashMovementService', () => {
       },
     );
 
-    it.each([
-      [CashMovementReason.DEPOSIT, CashMovementType.CASH_IN],
-      [CashMovementReason.DEPOSIT, CashMovementType.CASH_OUT],
-    ])('accepts %s as %s', async (reason, type) => {
+    it('accepts a deposit as cash in', async () => {
       const { service, txMovementRepo } = createService();
 
-      await service.register(COMPANY, cashier, { ...expense, reason, type });
+      await service.register(COMPANY, cashier, {
+        ...expense,
+        reason: CashMovementReason.DEPOSIT,
+        type: CashMovementType.CASH_IN,
+      });
 
       expect(txMovementRepo.save).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not let a deposit take cash out: it only ever puts it in', async () => {
+      const { service, dataSource } = createService();
+
+      await expect(
+        service.register(COMPANY, cashier, {
+          ...expense,
+          reason: CashMovementReason.DEPOSIT,
+          type: CashMovementType.CASH_OUT,
+        }),
+      ).rejects.toThrow(BadRequestException);
+      expect(dataSource.transaction).not.toHaveBeenCalled();
     });
 
     it('only registers in a shift that is open and assigned to the cashier', async () => {
@@ -156,6 +181,40 @@ describe('CashMovementService', () => {
       cashSessions.lockOpen.mockRejectedValue(new ForbiddenException('No es tu turno'));
       await expect(service.register(COMPANY, cashier, expense)).rejects.toThrow(ForbiddenException);
       expect(txMovementRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('rejects a cash-out movement that exceeds the cash actually expected in the drawer', async () => {
+      const { service, cashSessions, dataSource } = createService();
+      cashSessions.expectedCashOf.mockResolvedValue(new Decimal('10000'));
+
+      await expect(
+        service.register(COMPANY, cashier, { ...expense, amount: '15000' }),
+      ).rejects.toThrow(BadRequestException);
+      expect(cashSessions.expectedCashOf).toHaveBeenCalledWith(expect.anything(), lockedSession);
+      // La transacción se hace y se deshace (no queda pendiente): el rechazo no es "no se intentó".
+      await expect(dataSource.transaction.mock.results[0].value).rejects.toThrow(BadRequestException);
+    });
+
+    it('accepts a cash-out movement for exactly what is expected in the drawer', async () => {
+      const { service, cashSessions, txMovementRepo } = createService();
+      cashSessions.expectedCashOf.mockResolvedValue(new Decimal('15000'));
+
+      await service.register(COMPANY, cashier, { ...expense, amount: '15000' });
+
+      expect(txMovementRepo.save).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not check the drawer balance for a deposit: it only ever puts cash in', async () => {
+      const { service, cashSessions, txMovementRepo } = createService();
+
+      await service.register(COMPANY, cashier, {
+        ...expense,
+        reason: CashMovementReason.DEPOSIT,
+        type: CashMovementType.CASH_IN,
+      });
+
+      expect(cashSessions.expectedCashOf).not.toHaveBeenCalled();
+      expect(txMovementRepo.save).toHaveBeenCalledTimes(1);
     });
 
     it('checks the code of the day against the locked shift', async () => {
@@ -195,6 +254,16 @@ describe('CashMovementService', () => {
       await expect(service.register(COMPANY, cashier, { ...expense, amount: '0' })).rejects.toThrow(
         BadRequestException,
       );
+      expect(cashSessions.verifyMovementCode).not.toHaveBeenCalled();
+    });
+
+    it('does not check the code of a withdrawal that exceeds the drawer balance', async () => {
+      const { service, cashSessions } = createService();
+      cashSessions.expectedCashOf.mockResolvedValue(new Decimal('10000'));
+
+      await expect(
+        service.register(COMPANY, cashier, { ...expense, amount: '15000' }),
+      ).rejects.toThrow(BadRequestException);
       expect(cashSessions.verifyMovementCode).not.toHaveBeenCalled();
     });
 

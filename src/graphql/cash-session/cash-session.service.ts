@@ -373,6 +373,14 @@ export class CashSessionService {
     };
   }
 
+  // El efectivo que debería haber en la gaveta en este momento del turno (antes de un movimiento
+  // nuevo): apertura + ventas en efectivo + ingresos − egresos − reembolsos en efectivo. Pública
+  // porque CashMovementService la usa para no dejar sacar más de lo que hay; se llama con el
+  // turno ya bloqueado (lockOpen), así dos retiros seguidos no se aprueban contra el mismo saldo.
+  async expectedCashOf(manager: EntityManager, session: CashSession): Promise<Decimal> {
+    return (await this.buildSummary(manager, session)).expectedCash;
+  }
+
   private async buildSummary(
     manager: EntityManager,
     session: CashSession,

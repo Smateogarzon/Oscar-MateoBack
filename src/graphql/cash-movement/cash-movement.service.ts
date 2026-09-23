@@ -11,13 +11,15 @@ import { CashMovementReason } from './entities/cash-movement-reason.enum.js';
 import { CashMovementType } from './entities/cash-movement-type.enum.js';
 import { CashMovement } from './entities/cash-movement.entity.js';
 
-// Motivos que solo tienen un sentido posible. DEPOSIT es el único que puede ir en cualquiera de
-// los dos: un depósito puede llevar efectivo al banco o al cajón.
+// Motivos que solo tienen un sentido posible.
 const CASH_OUT_ONLY_REASONS = [
   CashMovementReason.EXPENSE,
   CashMovementReason.WITHDRAWAL,
   CashMovementReason.REFUND,
 ];
+
+// Un depósito siempre es efectivo que entra al cajón (nunca lo que sale hacia el banco).
+const CASH_IN_ONLY_REASONS = [CashMovementReason.DEPOSIT];
 
 // Lo que devuelve la transacción de register: el movimiento guardado, o el veredicto de un código
 // rechazado, que se lanza como error después de confirmarla (ver CashSessionService.verifyMovementCode).
@@ -76,6 +78,17 @@ export class CashMovementService {
       // a ella. Va antes del código del día para no gastar un intento en algo que ya está negado.
       await assertStoreAccess(manager, actor.userId, session.cashRegister.storeId);
 
+      // Un retiro o un gasto no puede sacar más efectivo del que de verdad hay en la gaveta en
+      // este momento del turno. Se calcula con el turno ya bloqueado (lockOpen), así dos salidas
+      // seguidas no se aprueban las dos contra el mismo saldo. Va antes del código del día por la
+      // misma razón que el acceso a la tienda: no gastar un intento en un movimiento inválido.
+      if (input.type === CashMovementType.CASH_OUT) {
+        const expectedCash = await this.cashSessions.expectedCashOf(manager, session);
+        if (amount.greaterThan(expectedCash)) {
+          throw new BadRequestException('No hay suficiente efectivo en la caja para este movimiento');
+        }
+      }
+
       // El código del día del turno. Un intento equivocado se cuenta aunque el movimiento se
       // rechace, así que se guarda en esta transacción y el error se lanza después de confirmarla
       // (ver CashSessionService.verifyMovementCode). Va después de las demás comprobaciones para no
@@ -105,6 +118,9 @@ export class CashMovementService {
   private assertReasonMatchesType(type: CashMovementType, reason: CashMovementReason): void {
     if (CASH_OUT_ONLY_REASONS.includes(reason) && type !== CashMovementType.CASH_OUT) {
       throw new BadRequestException('Un gasto, un retiro o una devolución tiene que ser una salida de efectivo');
+    }
+    if (CASH_IN_ONLY_REASONS.includes(reason) && type !== CashMovementType.CASH_IN) {
+      throw new BadRequestException('Un depósito tiene que ser una entrada de efectivo');
     }
   }
 }
