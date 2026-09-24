@@ -3,13 +3,15 @@
 # Uso (en Git Bash, desde Oscar-MateoBack):
 #   bash scripts/db-pull-prod.sh                -> abre el túnel a producción, hace el dump, cierra el túnel y restaura en local
 #   bash scripts/db-pull-prod.sh --yes          -> igual, sin pedir confirmación antes de borrar la base local
+#   bash scripts/db-pull-prod.sh --no-keep      -> igual, pero al terminar borra también el dump (solo aplica al bajar de producción)
 #   bash scripts/db-pull-prod.sh --file <dump>  -> no toca producción: restaura en local un dump que ya tienes
 #                                                  (ruta estilo Git Bash: /c/Users/Usuario/prod.dump)
 #
 # Requisitos: AWS CLI v2 + Session Manager plugin, sesión iniciada con `aws login --profile oscarymateo`
 # y el Postgres local arriba (docker compose up -d postgres).
 # Producción solo se lee: el túnel existe únicamente mientras corre pg_dump y se cierra antes de restaurar.
-# El dump queda en backups/ (fuera de git) y trae datos reales: bórralo cuando ya no lo uses.
+# El dump trae datos reales. Queda en backups/ (fuera de git) solo el de la última corrida, para poder
+# volver a dejar la base local como estaba con --file sin reconectar a producción; los anteriores se borran solos.
 set -euo pipefail
 
 # Git Bash convertiría rutas como /oscarymateo/prod/backend-env en rutas de Windows.
@@ -30,6 +32,8 @@ TUNNEL_PORT="${TUNNEL_PORT:-15432}"
 BACKUP_DIR="$BACKEND_DIR/backups"
 
 ASSUME_YES=false
+KEEP_LATEST=true
+PULLED=false
 DUMP_FILE=""
 PARTIAL_FILE=""
 TUNNEL_PID=""
@@ -38,6 +42,7 @@ TUNNEL_LOG=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --yes) ASSUME_YES=true ;;
+    --no-keep) KEEP_LATEST=false ;;
     --file)
       DUMP_FILE="${2:?Falta la ruta del dump después de --file}"
       shift
@@ -183,6 +188,20 @@ verify_dump() {
     || fail "El dump no se puede leer (¿incompleto o de otro formato?): $DUMP_FILE"
 }
 
+# Los dumps traen datos reales y crecen con la base: se conserva solo el de esta corrida (con --no-keep, ninguno).
+# Solo toca los prod-*.dump que hace este script en backups/; nunca un dump que se pasó con --file.
+prune_dumps() {
+  local old removed=0
+  for old in "$BACKUP_DIR"/prod-*.dump; do
+    [ -e "$old" ] || continue
+    if [ "$KEEP_LATEST" != true ] || [ "$old" != "$DUMP_FILE" ]; then
+      rm -f "$old"
+      removed=$((removed + 1))
+    fi
+  done
+  if [ "$removed" -gt 0 ]; then log "Dumps borrados: $removed"; fi
+}
+
 restore_local() {
   log "Recreando la base local..."
   docker compose exec -T postgres sh -c 'psql -U "$POSTGRES_USER" -d postgres -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS \"$POSTGRES_DB\" WITH (FORCE)" -c "CREATE DATABASE \"$POSTGRES_DB\""'
@@ -193,7 +212,12 @@ restore_local() {
 
   local tables
   tables=$(docker compose exec -T postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc "SELECT count(*) FROM pg_tables WHERE schemaname = current_schema()"' | tr -d '\r')
-  log "Listo. Base local '$(local_db_name)' restaurada desde $DUMP_FILE ($tables tablas)."
+  local origin="$DUMP_FILE"
+  if [ "$PULLED" = true ]; then
+    prune_dumps
+    [ "$KEEP_LATEST" = true ] || origin="producción (dump borrado)"
+  fi
+  log "Listo. Base local '$(local_db_name)' restaurada desde $origin ($tables tablas)."
   echo "Siguiente: npm run migration:run   (aplica encima las migraciones que producción aún no tiene)"
 }
 
@@ -208,6 +232,7 @@ if [ -z "$DUMP_FILE" ]; then
   confirm_restore "una copia nueva de producción"
   start_tunnel
   dump_prod
+  PULLED=true
   stop_tunnel
 else
   confirm_restore "$DUMP_FILE"

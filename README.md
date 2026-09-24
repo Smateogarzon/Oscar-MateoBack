@@ -102,7 +102,7 @@ bash scripts/db-pull-prod.sh --file <dump>  # restaurar en local un dump que ya 
 npm run migration:run                       # después, aplica encima las migraciones pendientes
 ```
 
-El dump queda en `backups/` (fuera de git) y trae datos reales: bórralo cuando ya no lo uses. Mientras el túnel está abierto, `localhost:15432` es producción; el backend local siempre va contra el `5432`. Login, paso a paso manual y solución de problemas: [docs/acceso-produccion.md](docs/acceso-produccion.md).
+El dump queda en `backups/` (fuera de git) y trae datos reales: solo se conserva el último (con `--no-keep` no queda ninguno). Mientras el túnel está abierto, `localhost:15432` es producción; el backend local siempre va contra el `5432`. Login, paso a paso manual y solución de problemas: [docs/acceso-produccion.md](docs/acceso-produccion.md).
 
 ## Estructura del proyecto
 

@@ -62,13 +62,14 @@ Desde Git Bash, dentro de `Oscar-MateoBack`:
 bash scripts/db-pull-prod.sh
 ```
 
-Hace todo: comprueba el login, lee los datos de conexión de SSM, te pide confirmar, abre el túnel, hace el dump, **cierra el túnel** y restaura en tu base local. El dump queda en `backups/prod-<fecha>.dump`.
+Hace todo: comprueba el login, lee los datos de conexión de SSM, te pide confirmar, abre el túnel, hace el dump, **cierra el túnel** y restaura en tu base local. El dump queda en `backups/prod-<fecha>.dump`, y los de corridas anteriores se borran solos: **siempre hay un solo dump** (el último). Se conserva para poder dejar la base local como estaba, tras probar cosas, con `--file` y sin reconectar a producción.
 
-| Comando                                                          | Qué hace                                                     |
-| ---------------------------------------------------------------- | ------------------------------------------------------------ |
-| `bash scripts/db-pull-prod.sh`                                   | Dump nuevo de producción y restaurar en local                |
-| `bash scripts/db-pull-prod.sh --yes`                             | Igual, sin pedir confirmación                                |
-| `bash scripts/db-pull-prod.sh --file /c/Users/Usuario/prod.dump` | Restaurar en local un dump que ya tienes; no toca producción |
+| Comando                                                          | Qué hace                                                                                    |
+| ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| `bash scripts/db-pull-prod.sh`                                   | Dump nuevo de producción y restaurar en local                                               |
+| `bash scripts/db-pull-prod.sh --yes`                             | Igual, sin pedir confirmación                                                               |
+| `bash scripts/db-pull-prod.sh --no-keep`                         | Igual, pero al terminar borra también el dump (no queda ningún archivo con datos reales)    |
+| `bash scripts/db-pull-prod.sh --file /c/Users/Usuario/prod.dump` | Restaurar en local un dump que ya tienes; no toca producción y nunca borra ese archivo      |
 
 Variables opcionales (con estos valores por defecto): `PROD_AWS_PROFILE`, `PROD_AWS_REGION`, `PROD_AWS_ACCOUNT_ID`, `PROD_INSTANCE_ID`, `PROD_ENV_PARAM`, `TUNNEL_PORT`.
 
@@ -140,7 +141,7 @@ docker compose exec postgres pg_restore -U ferreyepes -d ferreyepes --no-owner -
 
 - **Solo lectura:** el túnel se usa únicamente para `pg_dump`. Nunca pongas `DB_PORT=15432` en el `.env` del backend local: sería el backend local escribiendo en producción.
 - **Cierra el túnel** al terminar. El script lo cierra solo; si avisa que el puerto `15432` sigue abierto, ciérralo a mano (Administrador de tareas → `session-manager-plugin.exe`). Comprobarlo: `netstat -ano | findstr 15432` no debe mostrar nada.
-- **El dump trae datos reales** (correos, hashes de contraseña y, cuando haya ventas, datos de clientes). Vive en `backups/` (ignorado por git, igual que `*.dump`); no lo subas a ningún lado y bórralo cuando ya no lo uses.
+- **El dump trae datos reales** (correos, hashes de contraseña y, cuando haya ventas, datos de clientes). Vive en `backups/` (ignorado por git, igual que `*.dump`); solo se conserva el último y con `--no-keep` no queda ninguno. No lo subas a ningún lado.
 - Con la copia restaurada, cualquier usuario de producción entra en local con su contraseña real. Además, el `.env` local tiene llaves que suben al bucket de producción; con datos reales, considera apuntar el backend local a otro bucket.
 - Nunca pegues la contraseña de la base en chats, issues ni commits.
 
