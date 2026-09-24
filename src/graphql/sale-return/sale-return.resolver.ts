@@ -113,10 +113,11 @@ export class SaleReturnResolver {
   @RequirePermissions(PermissionCode.SALES_APPROVE_RETURN)
   editSaleReturn(
     @CurrentCompanyId() companyId: string,
+    @CurrentUser() currentUser: JwtPayload,
     @Args('id', { type: () => ID }) id: string,
     @Args('input') input: EditSaleReturnInput,
   ) {
-    return this.saleReturnService.edit(companyId, id, input);
+    return this.saleReturnService.edit(companyId, currentUser.sub, id, input);
   }
 
   @Mutation(() => SaleReturnObjectType)

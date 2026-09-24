@@ -25,7 +25,11 @@ function createService() {
     find: vi.fn(),
     existsBy: vi.fn(),
   };
+  // El usuario que se lee YA bloqueado dentro de la transacción. Por defecto es el mismo que
+  // devuelve `repo.findOneBy` (lo que cada prueba prepara), a menos que una prueba diga que en el
+  // ínterin cambió (`transactionRepo.findOne.mockResolvedValue(...)`).
   const transactionRepo = {
+    findOne: vi.fn(async () => repo.findOneBy({})),
     findOneBy: vi.fn(),
     create: vi.fn((data: object) => data),
     save: vi.fn(async (user: object) => ({ id: 'new-id', ...user })),
@@ -250,6 +254,51 @@ describe('UserService', () => {
       expect(result.firstName).toBe('Ana María');
     });
 
+    it('changes the row it reads under the lock, so it does not undo what somebody else changed meanwhile', async () => {
+      const { service, repo, membershipRepo, transactionRepo } = createService();
+      membership(membershipRepo);
+      // Lo que se leyó al comprobar permisos, y lo que hay cuando la cuenta ya está bloqueada:
+      // mientras tanto otro administrador le restableció la contraseña.
+      repo.findOneBy.mockResolvedValue({
+        id: '1',
+        firstName: 'Ana',
+        passwordHash: 'vieja',
+        mustChangePassword: false,
+      });
+      transactionRepo.findOne.mockResolvedValue({
+        id: '1',
+        firstName: 'Ana',
+        passwordHash: 'restablecida',
+        mustChangePassword: true,
+      });
+
+      const result = await service.update(COMPANY, '1', { firstName: 'Ana María' });
+
+      expect(transactionRepo.findOne).toHaveBeenCalledWith({
+        where: { id: '1' },
+        lock: { mode: 'pessimistic_write' },
+      });
+      expect(transactionRepo.save).toHaveBeenCalledWith({
+        id: '1',
+        firstName: 'Ana María',
+        passwordHash: 'restablecida',
+        mustChangePassword: true,
+      });
+      expect(result.passwordHash).toBe('restablecida');
+    });
+
+    it('answers "not found" when the account disappears before it can be locked', async () => {
+      const { service, repo, membershipRepo, transactionRepo } = createService();
+      membership(membershipRepo);
+      repo.findOneBy.mockResolvedValue({ id: '1', firstName: 'Ana' });
+      transactionRepo.findOne.mockResolvedValue(null);
+
+      await expect(service.update(COMPANY, '1', { firstName: 'X' })).rejects.toThrow(
+        NotFoundException,
+      );
+      expect(transactionRepo.save).not.toHaveBeenCalled();
+    });
+
     it('throws when the user is not a member of the company', async () => {
       const { service, membershipRepo, dataSource } = createService();
       membership(membershipRepo, { member: false });
@@ -296,6 +345,29 @@ describe('UserService', () => {
 
       expect(dataSource.transaction).toHaveBeenCalled();
       expect(result.status).toBe(RecordStatus.INACTIVE);
+    });
+
+    it('locks the account and keeps whatever else was changed meanwhile', async () => {
+      const { service, repo, membershipRepo, transactionRepo } = createService();
+      membership(membershipRepo);
+      repo.findOneBy.mockResolvedValue({ id: '1', status: RecordStatus.ACTIVE, firstName: 'Ana' });
+      transactionRepo.findOne.mockResolvedValue({
+        id: '1',
+        status: RecordStatus.ACTIVE,
+        firstName: 'Ana María',
+      });
+
+      await service.deactivate(COMPANY, '1');
+
+      expect(transactionRepo.findOne).toHaveBeenCalledWith({
+        where: { id: '1' },
+        lock: { mode: 'pessimistic_write' },
+      });
+      expect(transactionRepo.save).toHaveBeenCalledWith({
+        id: '1',
+        status: RecordStatus.INACTIVE,
+        firstName: 'Ana María',
+      });
     });
 
     it('throws when the user is not a member of the company', async () => {
@@ -386,6 +458,26 @@ describe('UserService', () => {
       expect(await bcrypt.compare('123456789', result.passwordHash)).toBe(true);
     });
 
+    it('resets the account it reads under the lock, and keeps what else was changed meanwhile', async () => {
+      const { service, repo, membershipRepo, transactionRepo } = createService();
+      membership(membershipRepo);
+      repo.findOneBy.mockResolvedValue({ id: '1', documentNumber: '123456789', firstName: 'Ana' });
+      transactionRepo.findOne.mockResolvedValue({
+        id: '1',
+        documentNumber: '123456789',
+        firstName: 'Ana María',
+      });
+
+      const result = await service.resetPassword(COMPANY, '1');
+
+      expect(transactionRepo.findOne).toHaveBeenCalledWith({
+        where: { id: '1' },
+        lock: { mode: 'pessimistic_write' },
+      });
+      expect(result.firstName).toBe('Ana María');
+      expect(result.mustChangePassword).toBe(true);
+    });
+
     it('cannot reset the password of a platform user (the super admin)', async () => {
       const { service, membershipRepo, dataSource } = createService();
       membership(membershipRepo, { platform: true });
@@ -429,6 +521,31 @@ describe('UserService', () => {
 
       expect(result.mustChangePassword).toBe(false);
       expect(await bcrypt.compare('una-clave-nueva', result.passwordHash)).toBe(true);
+    });
+
+    it('locks the account before checking the current password', async () => {
+      const { service, repo, transactionRepo } = createService();
+      repo.findOneBy.mockResolvedValue(await storedUser());
+
+      await service.changePassword('1', { currentPassword, newPassword: 'una-clave-nueva' });
+
+      expect(transactionRepo.findOne).toHaveBeenCalledWith({
+        where: { id: '1' },
+        lock: { mode: 'pessimistic_write' },
+      });
+    });
+
+    it('checks the current password against the one there is now: one an administrator just reset no longer works', async () => {
+      const { service, transactionRepo } = createService();
+      transactionRepo.findOne.mockResolvedValue({
+        ...(await storedUser()),
+        passwordHash: await bcrypt.hash('restablecida-por-el-admin', 4),
+      });
+
+      await expect(
+        service.changePassword('1', { currentPassword, newPassword: 'una-clave-nueva' }),
+      ).rejects.toThrow(UnauthorizedException);
+      expect(transactionRepo.save).not.toHaveBeenCalled();
     });
 
     it('rejects a wrong current password', async () => {

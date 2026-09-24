@@ -6,6 +6,9 @@ import {
 } from '@nestjs/common';
 import { Decimal } from 'decimal.js';
 import { In } from 'typeorm';
+import { NotificationChannel } from '../notification/entities/notification-channel.enum.js';
+import { NotificationEntityType } from '../notification/entities/notification-entity-type.enum.js';
+import { NotificationType } from '../notification/entities/notification-type.enum.js';
 import { SaleItem } from '../sale/entities/sale-item.entity.js';
 import { SaleStatus } from '../sale/entities/sale-status.enum.js';
 import { DiscountRequestService } from './discount-request.service.js';
@@ -23,6 +26,8 @@ const d = (value: string) => new Decimal(value);
 const draftSale = (overrides: Record<string, unknown> = {}) => ({
   id: 'sale-1',
   companyId: COMPANY,
+  storeId: 'store-1',
+  saleNumber: 'VTA-000125',
   status: SaleStatus.DRAFT,
   generalDiscount: d('0'),
   ...overrides,
@@ -92,6 +97,13 @@ function createService() {
     lockDraft: vi.fn().mockResolvedValue(draftSale()),
     recalculate: vi.fn(async (_manager: unknown, sale: object) => sale),
   };
+  // Los administradores de la empresa, que son quienes reciben las solicitudes
+  const notifications = {
+    notify: vi.fn().mockResolvedValue(null),
+    findUserIdsWithPermission: vi.fn().mockResolvedValue(['admin-1', 'admin-2']),
+    markEntityRead: vi.fn().mockResolvedValue(0),
+    signalChange: vi.fn(),
+  };
   const dataSource = {
     transaction: vi.fn(async (fn: (manager: unknown) => unknown) =>
       fn({
@@ -112,6 +124,7 @@ function createService() {
     requestItemRepo as never,
     dataSource as never,
     sales as never,
+    notifications as never,
   );
   return {
     service,
@@ -122,6 +135,7 @@ function createService() {
     txItemRepo,
     txSaleRepo,
     sales,
+    notifications,
     dataSource,
   };
 }
@@ -843,6 +857,277 @@ describe('DiscountRequestService', () => {
         ConflictException,
       );
       expect(txRequestRepo.save).not.toHaveBeenCalled();
+    });
+  });
+
+  // Cada paso avisa a la otra parte, dentro de la misma transacción (canal Descuentos).
+  describe('notifications', () => {
+    const aboutRequest = {
+      companyId: COMPANY,
+      entityType: NotificationEntityType.DISCOUNT_REQUEST,
+      entityId: 'req-1',
+      locationId: 'store-1',
+      reference: 'VTA-000125',
+    };
+
+    it('tells the administrators when a cashier asks for a discount', async () => {
+      const { service, txItemRepo, notifications } = createService();
+      txItemRepo.find.mockResolvedValue(twoLines());
+
+      await service.request(COMPANY, 'cashier-1', { saleId: 'sale-1', requestedDiscount: '10000' });
+
+      expect(notifications.findUserIdsWithPermission).toHaveBeenCalledWith(
+        expect.anything(),
+        COMPANY,
+        'sales.approve_discount',
+      );
+      expect(notifications.notify).toHaveBeenCalledTimes(1);
+      expect(notifications.notify).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          ...aboutRequest,
+          type: NotificationType.DISCOUNT_REQUESTED,
+          recipientIds: ['admin-1', 'admin-2'],
+          actorId: 'cashier-1',
+        }),
+      );
+    });
+
+    it('does not tell anyone when the request is not valid', async () => {
+      const { service, txItemRepo, notifications } = createService();
+      txItemRepo.find.mockResolvedValue(twoLines());
+
+      await expect(
+        service.request(COMPANY, 'cashier-1', { saleId: 'sale-1', requestedDiscount: '34500.01' }),
+      ).rejects.toThrow(BadRequestException);
+
+      expect(notifications.notify).not.toHaveBeenCalled();
+    });
+
+    it('tells whoever asked when an administrator approves, and clears the "new request" notices', async () => {
+      const { service, txRequestRepo, txItemRepo, notifications } = createService();
+      txItemRepo.find.mockResolvedValue(twoLines());
+      txRequestRepo.findOneBy.mockResolvedValue(pendingRequest());
+
+      await service.approve(COMPANY, 'admin-1', 'req-1', {});
+
+      expect(notifications.notify).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          ...aboutRequest,
+          type: NotificationType.DISCOUNT_APPROVED,
+          recipientIds: ['cashier-1'],
+          actorId: 'admin-1',
+        }),
+      );
+      expect(notifications.markEntityRead).toHaveBeenCalledWith(
+        expect.anything(),
+        NotificationEntityType.DISCOUNT_REQUEST,
+        'req-1',
+        [NotificationType.DISCOUNT_REQUESTED],
+      );
+    });
+
+    it('does not tell anyone, nor clear anything, when the approval fails', async () => {
+      const { service, txRequestRepo, txItemRepo, notifications } = createService();
+      txItemRepo.find.mockResolvedValue(twoLines());
+      txRequestRepo.findOneBy.mockResolvedValue(pendingRequest());
+
+      await expect(
+        service.approve(COMPANY, 'admin-1', 'req-1', { approvedDiscount: '34500.01' }),
+      ).rejects.toThrow(BadRequestException);
+
+      expect(notifications.notify).not.toHaveBeenCalled();
+      expect(notifications.markEntityRead).not.toHaveBeenCalled();
+    });
+
+    it('tells whoever asked when an administrator changes an approved discount, without clearing anything', async () => {
+      const { service, txRequestRepo, txItemRepo, notifications } = createService();
+      txItemRepo.find.mockResolvedValue(twoLines());
+      txRequestRepo.findOneBy.mockResolvedValue(approvedRequest());
+
+      await service.editApproved(COMPANY, 'admin-2', 'req-1', { approvedDiscount: '15000' });
+
+      expect(notifications.notify).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          ...aboutRequest,
+          type: NotificationType.DISCOUNT_EDITED,
+          recipientIds: ['cashier-1'],
+          actorId: 'admin-2',
+        }),
+      );
+      expect(notifications.markEntityRead).not.toHaveBeenCalled();
+    });
+
+    it('tells whoever asked when an administrator rejects, with the note, and clears the notices', async () => {
+      const { service, txRequestRepo, notifications } = createService();
+      txRequestRepo.findOneBy.mockResolvedValue(pendingRequest());
+
+      await service.reject(COMPANY, 'admin-1', 'req-1', { notes: ' Muy alto ' });
+
+      expect(notifications.notify).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          ...aboutRequest,
+          type: NotificationType.DISCOUNT_REJECTED,
+          recipientIds: ['cashier-1'],
+          actorId: 'admin-1',
+          notes: 'Muy alto',
+        }),
+      );
+      expect(notifications.markEntityRead).toHaveBeenCalledTimes(1);
+    });
+
+    it('tells the administrators when the cashier who asked cancels a pending request, and clears the notices', async () => {
+      const { service, txRequestRepo, notifications } = createService();
+      txRequestRepo.findOneBy.mockResolvedValue(pendingRequest());
+
+      await service.cancel(COMPANY, 'cashier-1', 'req-1', false, { notes: 'Ya no' });
+
+      expect(notifications.findUserIdsWithPermission).toHaveBeenCalledWith(
+        expect.anything(),
+        COMPANY,
+        'sales.approve_discount',
+      );
+      expect(notifications.notify).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          ...aboutRequest,
+          type: NotificationType.DISCOUNT_CANCELLED,
+          recipientIds: ['admin-1', 'admin-2'],
+          actorId: 'cashier-1',
+          notes: 'Ya no',
+        }),
+      );
+      expect(notifications.markEntityRead).toHaveBeenCalledTimes(1);
+    });
+
+    it('tells whoever asked when an administrator cancels their request', async () => {
+      const { service, txRequestRepo, notifications } = createService();
+      txRequestRepo.findOneBy.mockResolvedValue(pendingRequest());
+
+      await service.cancel(COMPANY, 'admin-1', 'req-1', true, {});
+
+      expect(notifications.notify).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          type: NotificationType.DISCOUNT_CANCELLED,
+          recipientIds: ['cashier-1'],
+          actorId: 'admin-1',
+        }),
+      );
+    });
+
+    it('does not clear the "new request" notices when it cancels a request that was already approved', async () => {
+      const { service, txRequestRepo, notifications } = createService();
+      txRequestRepo.findOneBy.mockResolvedValue(approvedRequest());
+
+      await service.cancel(COMPANY, 'cashier-1', 'req-1', false, {});
+
+      expect(notifications.notify).toHaveBeenCalledTimes(1);
+      expect(notifications.markEntityRead).not.toHaveBeenCalled();
+    });
+
+    it('does not tell anyone when a cancellation is not allowed', async () => {
+      const { service, txRequestRepo, notifications } = createService();
+      txRequestRepo.findOneBy.mockResolvedValue(pendingRequest());
+
+      await expect(service.cancel(COMPANY, 'seller-1', 'req-1', false, {})).rejects.toThrow(
+        ForbiddenException,
+      );
+
+      expect(notifications.notify).not.toHaveBeenCalled();
+      expect(notifications.markEntityRead).not.toHaveBeenCalled();
+      expect(notifications.signalChange).not.toHaveBeenCalled();
+    });
+  });
+
+  // Además del aviso, los demás administradores reciben una señal en vivo cuando una solicitud
+  // pendiente deja de estarlo, para que su lista de pendientes se ponga al día sola.
+  describe('live signal to the other administrators', () => {
+    const changedRequest = {
+      companyId: COMPANY,
+      channel: NotificationChannel.DISCOUNTS,
+      entityType: NotificationEntityType.DISCOUNT_REQUEST,
+      entityId: 'req-1',
+      recipientIds: ['admin-1', 'admin-2'],
+    };
+
+    it('signals the administrators, except the one who approved', async () => {
+      const { service, txRequestRepo, txItemRepo, notifications } = createService();
+      txItemRepo.find.mockResolvedValue(twoLines());
+      txRequestRepo.findOneBy.mockResolvedValue(pendingRequest());
+
+      await service.approve(COMPANY, 'admin-1', 'req-1', {});
+
+      expect(notifications.findUserIdsWithPermission).toHaveBeenCalledWith(
+        expect.anything(),
+        COMPANY,
+        'sales.approve_discount',
+      );
+      expect(notifications.signalChange).toHaveBeenCalledTimes(1);
+      expect(notifications.signalChange).toHaveBeenCalledWith(expect.anything(), {
+        ...changedRequest,
+        exceptUserId: 'admin-1',
+      });
+    });
+
+    it('signals them when a request is rejected', async () => {
+      const { service, txRequestRepo, notifications } = createService();
+      txRequestRepo.findOneBy.mockResolvedValue(pendingRequest());
+
+      await service.reject(COMPANY, 'admin-2', 'req-1', {});
+
+      expect(notifications.signalChange).toHaveBeenCalledWith(expect.anything(), {
+        ...changedRequest,
+        exceptUserId: 'admin-2',
+      });
+    });
+
+    it('signals them when a pending request is cancelled, except whoever cancelled it', async () => {
+      const { service, txRequestRepo, notifications } = createService();
+      txRequestRepo.findOneBy.mockResolvedValue(pendingRequest());
+
+      await service.cancel(COMPANY, 'cashier-1', 'req-1', false, {});
+
+      expect(notifications.signalChange).toHaveBeenCalledWith(expect.anything(), {
+        ...changedRequest,
+        exceptUserId: 'cashier-1',
+      });
+    });
+
+    it('does not signal anything when the request was already approved: it was not in the pending list', async () => {
+      const { service, txRequestRepo, notifications } = createService();
+      txRequestRepo.findOneBy.mockResolvedValue(approvedRequest());
+
+      await service.cancel(COMPANY, 'cashier-1', 'req-1', false, {});
+
+      expect(notifications.signalChange).not.toHaveBeenCalled();
+    });
+
+    it('does not signal anything when a new request is made or an approved one is edited', async () => {
+      const { service, txItemRepo, txRequestRepo, notifications } = createService();
+      txItemRepo.find.mockResolvedValue(twoLines());
+
+      await service.request(COMPANY, 'cashier-1', { saleId: 'sale-1', requestedDiscount: '10000' });
+      txRequestRepo.findOneBy.mockResolvedValue(approvedRequest());
+      await service.editApproved(COMPANY, 'admin-2', 'req-1', { approvedDiscount: '15000' });
+
+      // Ya reciben el aviso de la solicitud nueva; y editar un descuento aprobado no cambia la lista
+      expect(notifications.signalChange).not.toHaveBeenCalled();
+    });
+
+    it('does not signal anything when the operation fails', async () => {
+      const { service, txRequestRepo, txItemRepo, notifications } = createService();
+      txItemRepo.find.mockResolvedValue(twoLines());
+      txRequestRepo.findOneBy.mockResolvedValue(pendingRequest());
+
+      await expect(
+        service.approve(COMPANY, 'admin-1', 'req-1', { approvedDiscount: '34500.01' }),
+      ).rejects.toThrow(BadRequestException);
+
+      expect(notifications.signalChange).not.toHaveBeenCalled();
     });
   });
 });

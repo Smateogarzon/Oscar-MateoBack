@@ -5,7 +5,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, Repository } from 'typeorm';
+import { DataSource, EntityManager, Repository } from 'typeorm';
 import { RecordStatus } from '../../common/enums/record-status.enum.js';
 import { mapPostgresWriteError } from '../../common/utils/postgres-error.js';
 import { CashSessionStatus } from '../cash-session/entities/cash-session-status.enum.js';
@@ -94,12 +94,10 @@ export class CashRegisterService {
     }
 
     return this.dataSource.transaction(async (manager) => {
-      const repo = manager.getRepository(CashRegister);
-      const register = await repo.findOne({ where: { id, store: { companyId } } });
-      if (!register) throw new NotFoundException(`Caja ${id} no encontrada`);
+      const register = await this.lockRegister(manager, companyId, id);
 
       if (name !== undefined) register.name = name;
-      return repo.save(register);
+      return manager.getRepository(CashRegister).save(register);
     });
   }
 
@@ -108,12 +106,7 @@ export class CashRegisterService {
   // espera y encuentra la caja ya desactivada.
   async deactivate(companyId: string, id: string): Promise<CashRegister> {
     return this.dataSource.transaction(async (manager) => {
-      const repo = manager.getRepository(CashRegister);
-      const found = await repo.findOne({ where: { id, store: { companyId } } });
-      if (!found) throw new NotFoundException(`Caja ${id} no encontrada`);
-
-      const register = await repo.findOne({ where: { id: found.id }, lock: { mode: 'pessimistic_write' } });
-      if (!register) throw new NotFoundException(`Caja ${id} no encontrada`);
+      const register = await this.lockRegister(manager, companyId, id);
 
       const hasOpenSession = await manager.getRepository(CashSession).existsBy({
         cashRegisterId: register.id,
@@ -124,19 +117,39 @@ export class CashRegisterService {
       }
 
       register.status = RecordStatus.INACTIVE;
-      return repo.save(register);
+      return manager.getRepository(CashRegister).save(register);
     });
   }
 
   async activate(companyId: string, id: string): Promise<CashRegister> {
     return this.dataSource.transaction(async (manager) => {
-      const repo = manager.getRepository(CashRegister);
-      const register = await repo.findOne({ where: { id, store: { companyId } } });
-      if (!register) throw new NotFoundException(`Caja ${id} no encontrada`);
+      const register = await this.lockRegister(manager, companyId, id);
 
       register.status = RecordStatus.ACTIVE;
-      return repo.save(register);
+      return manager.getRepository(CashRegister).save(register);
     });
+  }
+
+  // La caja bloqueada hasta que termine la transacción: renombrarla, desactivarla o reactivarla a la
+  // vez esperan una a la otra, y cada una parte de lo que dejó la anterior (sin esto, un cambio de
+  // nombre con el estado viejo volvería a activar una caja que acaban de desactivar). Se lee dos
+  // veces: la primera comprueba la empresa a través de la tienda, y la segunda la bloquea, porque
+  // Postgres no deja bloquear las filas de una consulta con uniones externas.
+  private async lockRegister(
+    manager: EntityManager,
+    companyId: string,
+    id: string,
+  ): Promise<CashRegister> {
+    const repo = manager.getRepository(CashRegister);
+    const found = await repo.findOne({ where: { id, store: { companyId } } });
+    if (!found) throw new NotFoundException(`Caja ${id} no encontrada`);
+
+    const register = await repo.findOne({
+      where: { id: found.id },
+      lock: { mode: 'pessimistic_write' },
+    });
+    if (!register) throw new NotFoundException(`Caja ${id} no encontrada`);
+    return register;
   }
 
   // Dos cambios a la vez con el mismo código pasan la comprobación de arriba; el índice único

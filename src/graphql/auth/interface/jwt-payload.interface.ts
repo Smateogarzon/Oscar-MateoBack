@@ -4,4 +4,8 @@
 export interface JwtPayload {
   sub: string;
   email: string;
+  // Los agrega el JWT al firmarse (segundos desde 1970): cuándo se emitió y cuándo vence. Solo están
+  // en un payload ya verificado, no al crearlo.
+  iat?: number;
+  exp?: number;
 }

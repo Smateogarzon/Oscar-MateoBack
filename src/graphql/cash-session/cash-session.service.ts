@@ -166,25 +166,28 @@ export class CashSessionService {
         });
         if (!found) throw new NotFoundException(`Caja ${input.cashRegisterId} no encontrada`);
 
-        // El cajero trabaja en la tienda de la caja (Configuración → Personal por ubicación). El
-        // administrador que abre el turno no necesita ese acceso.
-        const cashierHasAccess = await manager.getRepository(UserLocationAccess).existsBy({
-          userId: input.cashierId,
-          locationId: found.storeId,
-          status: RecordStatus.ACTIVE,
-        });
-        if (!cashierHasAccess) {
-          throw new BadRequestException('El cajero no tiene acceso a la tienda de esta caja');
-        }
-
         // La caja se bloquea y se vuelve a leer: dos aperturas a la vez esperan una a la otra, y
-        // una desactivación que llegue justo antes se ve aquí.
+        // una desactivación de la caja, de la tienda o del acceso del cajero que llegue justo antes
+        // se ve aquí (todas pasan por este mismo bloqueo, ver lockStoreRegisters).
         const register = await registerRepo.findOne({
           where: { id: found.id },
           lock: { mode: 'pessimistic_write' },
         });
         if (!register || register.status !== RecordStatus.ACTIVE) {
           throw new ConflictException('La caja está desactivada');
+        }
+
+        // El cajero trabaja en la tienda de la caja (Configuración → Personal por ubicación). El
+        // administrador que abre el turno no necesita ese acceso. Se comprueba con la caja ya
+        // bloqueada: si otro administrador le está quitando el acceso, espera a que termine y ve el
+        // resultado (quitarlo mientras se abre el turno dejaría a un cajero cobrando sin acceso).
+        const cashierHasAccess = await manager.getRepository(UserLocationAccess).existsBy({
+          userId: input.cashierId,
+          locationId: register.storeId,
+          status: RecordStatus.ACTIVE,
+        });
+        if (!cashierHasAccess) {
+          throw new BadRequestException('El cajero no tiene acceso a la tienda de esta caja');
         }
 
         // La tienda también tiene que estar en servicio: una caja activa de una tienda desactivada

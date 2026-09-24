@@ -11,7 +11,6 @@ import { ApolloDriver, type ApolloDriverConfig } from '@nestjs/apollo';
 import { GraphQLModule } from '@nestjs/graphql';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ThrottlerModule, seconds } from '@nestjs/throttler';
-import type { Request, Response } from 'express';
 import { ApolloArmor } from '@escape.tech/graphql-armor';
 import { AppController } from './app.controller.js';
 import { AppService } from './app.service.js';
@@ -37,6 +36,9 @@ import { CashSessionModule } from './graphql/cash-session/cash-session.module.js
 import { CashMovementModule } from './graphql/cash-movement/cash-movement.module.js';
 import { SalePaymentModule } from './graphql/sale-payment/sale-payment.module.js';
 import { SaleReturnModule } from './graphql/sale-return/sale-return.module.js';
+import { NotificationModule } from './graphql/notification/notification.module.js';
+import { RealtimeModule } from './realtime/realtime.module.js';
+import { graphqlContext, wsOnConnect } from './realtime/ws-context.js';
 import { StorageModule } from './common/storage/storage.module.js';
 import { UploadModule } from './uploads/upload.module.js';
 import { PosHardwareModule } from './pos-hardware/pos-hardware.module.js';
@@ -103,10 +105,12 @@ const { validationRules, plugins } = new ApolloArmor().protect();
       introspection: process.env.NODE_ENV !== 'production',
       validationRules,
       plugins: plugins as unknown as ApolloDriverConfig['plugins'],
-      context: ({ req, res }: { req: Request; res: Response }) => ({
-        req,
-        res,
-      }),
+      // Las suscripciones (tiempo real) viajan por WebSocket con el protocolo graphql-ws, por la
+      // misma ruta /graphql. Al abrir la conexión se comprueba que venga del sitio de la app.
+      subscriptions: { 'graphql-ws': { onConnect: wsOnConnect } },
+      // Para una petición HTTP entrega { req, res }; para una suscripción arma un `req` con la
+      // cookie y la empresa de la conexión, así los mismos guards protegen las dos.
+      context: graphqlContext,
     }),
     AuthModule,
     CompanyModule,
@@ -126,6 +130,8 @@ const { validationRules, plugins } = new ApolloArmor().protect();
     CashMovementModule,
     SalePaymentModule,
     SaleReturnModule,
+    NotificationModule,
+    RealtimeModule,
     StorageModule,
     UploadModule,
     PosHardwareModule,

@@ -14,7 +14,11 @@ function createService() {
     find: vi.fn(),
     findOneBy: vi.fn(),
   };
+  // La sede que se lee YA bloqueada dentro de la transacción. Por defecto es la misma que devuelve
+  // `repo.findOneBy` (lo que cada prueba prepara), a menos que una prueba diga que en el ínterin
+  // cambió (`transactionRepo.findOne.mockResolvedValue(...)`).
   const transactionRepo = {
+    findOne: vi.fn(async () => repo.findOneBy({})),
     create: vi.fn((data: object) => data),
     save: vi.fn(async (location: object) => ({ id: '1', ...location })),
   };
@@ -188,14 +192,49 @@ describe('LocationService', () => {
       expect(dataSource.transaction).not.toHaveBeenCalled();
     });
 
+    it('changes the location it reads under the lock, so it does not undo what somebody else changed meanwhile', async () => {
+      const { service, repo, transactionRepo } = createService();
+      // Lo que se leyó al comprobar la empresa, y lo que hay cuando la sede ya está bloqueada:
+      // mientras tanto otro administrador la desactivó.
+      repo.findOneBy.mockResolvedValue({ id: '1', ...input, status: RecordStatus.ACTIVE });
+      transactionRepo.findOne.mockResolvedValue({ id: '1', ...input, status: RecordStatus.INACTIVE });
+
+      const result = await service.update(COMPANY, '1', { name: 'Sede norte' });
+
+      expect(transactionRepo.findOne).toHaveBeenCalledWith({
+        where: { id: '1', companyId: COMPANY },
+        lock: { mode: 'pessimistic_write' },
+      });
+      expect(result.status).toBe(RecordStatus.INACTIVE);
+      expect(result.name).toBe('Sede norte');
+    });
+
+    it('answers "not found" when the location disappears before it can be locked', async () => {
+      const { service, repo, transactionRepo } = createService();
+      repo.findOneBy.mockResolvedValue({ id: '1', ...input, status: RecordStatus.ACTIVE });
+      transactionRepo.findOne.mockResolvedValue(null);
+
+      await expect(service.update(COMPANY, '1', { name: 'X' })).rejects.toThrow(NotFoundException);
+      expect(transactionRepo.save).not.toHaveBeenCalled();
+    });
+
     it('renames the cash register that was born with the store, so both keep the same name', async () => {
       const { service, repo, cashRegisterRepo } = createService();
       repo.findOneBy.mockResolvedValue({ id: '1', ...input, status: RecordStatus.ACTIVE });
-      cashRegisterRepo.findOneBy.mockResolvedValue({ id: 'register-1', name: 'Sede principal', code: 'C1' });
+      cashRegisterRepo.find.mockResolvedValue([
+        { id: 'register-1', name: 'Sede principal', code: 'C1' },
+        { id: 'register-2', name: 'Caja 2', code: 'C2' },
+      ]);
 
       await service.update(COMPANY, '1', { name: 'Sede norte' });
 
-      expect(cashRegisterRepo.findOneBy).toHaveBeenCalledWith({ storeId: '1', code: 'C1' });
+      // Las cajas de la tienda se bloquean, en orden, antes de tocar la que nació con ella
+      expect(cashRegisterRepo.find).toHaveBeenCalledWith({
+        where: { storeId: '1' },
+        order: { id: 'ASC' },
+        lock: { mode: 'pessimistic_write' },
+      });
+      expect(cashRegisterRepo.save).toHaveBeenCalledTimes(1);
       expect(cashRegisterRepo.save).toHaveBeenCalledWith(
         expect.objectContaining({ id: 'register-1', name: 'Sede norte' }),
       );
@@ -204,7 +243,9 @@ describe('LocationService', () => {
     it('does not touch a register someone renamed by hand', async () => {
       const { service, repo, cashRegisterRepo } = createService();
       repo.findOneBy.mockResolvedValue({ id: '1', ...input, status: RecordStatus.ACTIVE });
-      cashRegisterRepo.findOneBy.mockResolvedValue({ id: 'register-1', name: 'Caja de la entrada', code: 'C1' });
+      cashRegisterRepo.find.mockResolvedValue([
+        { id: 'register-1', name: 'Caja de la entrada', code: 'C1' },
+      ]);
 
       await service.update(COMPANY, '1', { name: 'Sede norte' });
 
@@ -216,7 +257,7 @@ describe('LocationService', () => {
       repo.findOneBy.mockResolvedValue({ id: '1', ...input, status: RecordStatus.ACTIVE });
 
       await service.update(COMPANY, '1', { city: 'Bogotá' });
-      expect(cashRegisterRepo.findOneBy).not.toHaveBeenCalled();
+      expect(cashRegisterRepo.find).not.toHaveBeenCalled();
 
       repo.findOneBy.mockResolvedValue({
         id: '1',
@@ -225,7 +266,7 @@ describe('LocationService', () => {
         status: RecordStatus.ACTIVE,
       });
       await service.update(COMPANY, '1', { name: 'Bodega norte' });
-      expect(cashRegisterRepo.findOneBy).not.toHaveBeenCalled();
+      expect(cashRegisterRepo.find).not.toHaveBeenCalled();
     });
   });
 
@@ -273,6 +314,43 @@ describe('LocationService', () => {
       expect(result.status).toBe(RecordStatus.INACTIVE);
     });
 
+    it('locks the location first and then its registers, and only then looks for an open shift', async () => {
+      const { service, repo, transactionRepo, cashRegisterRepo, cashSessionRepo } = createService();
+      repo.findOneBy.mockResolvedValue({ id: '1', ...input, status: RecordStatus.ACTIVE });
+      cashRegisterRepo.find.mockResolvedValue([{ id: 'register-1' }]);
+
+      await service.deactivate(COMPANY, '1');
+
+      expect(transactionRepo.findOne).toHaveBeenCalledWith({
+        where: { id: '1', companyId: COMPANY },
+        lock: { mode: 'pessimistic_write' },
+      });
+      expect(cashRegisterRepo.find).toHaveBeenCalledWith({
+        where: { storeId: '1' },
+        order: { id: 'ASC' },
+        lock: { mode: 'pessimistic_write' },
+      });
+      const order = (mock: { mock: { invocationCallOrder: number[] } }) => mock.mock.invocationCallOrder[0];
+      expect(order(transactionRepo.findOne)).toBeLessThan(order(cashRegisterRepo.find));
+      expect(order(cashRegisterRepo.find)).toBeLessThan(order(cashSessionRepo.existsBy));
+    });
+
+    it('deactivates the location it reads under the lock, and keeps what else was changed meanwhile', async () => {
+      const { service, repo, transactionRepo } = createService();
+      repo.findOneBy.mockResolvedValue({ id: '1', ...input, status: RecordStatus.ACTIVE });
+      transactionRepo.findOne.mockResolvedValue({
+        id: '1',
+        ...input,
+        name: 'Sede norte',
+        status: RecordStatus.ACTIVE,
+      });
+
+      const result = await service.deactivate(COMPANY, '1');
+
+      expect(result.name).toBe('Sede norte');
+      expect(result.status).toBe(RecordStatus.INACTIVE);
+    });
+
     it('does not ask about shifts when the location has no registers (a warehouse)', async () => {
       const { service, repo, cashSessionRepo } = createService();
       repo.findOneBy.mockResolvedValue({ id: '1', ...input, status: RecordStatus.ACTIVE });
@@ -292,6 +370,18 @@ describe('LocationService', () => {
 
       expect(dataSource.transaction).toHaveBeenCalled();
       expect(result.status).toBe(RecordStatus.ACTIVE);
+    });
+
+    it('locks the location before changing it', async () => {
+      const { service, repo, transactionRepo } = createService();
+      repo.findOneBy.mockResolvedValue({ id: '1', ...input, status: RecordStatus.INACTIVE });
+
+      await service.activate(COMPANY, '1');
+
+      expect(transactionRepo.findOne).toHaveBeenCalledWith({
+        where: { id: '1', companyId: COMPANY },
+        lock: { mode: 'pessimistic_write' },
+      });
     });
 
     it('does not create another cash register: the store keeps the ones it had', async () => {

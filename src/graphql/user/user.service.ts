@@ -8,7 +8,7 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import bcrypt from 'bcryptjs';
-import { DataSource, In, Not, Repository } from 'typeorm';
+import { DataSource, EntityManager, In, Not, Repository } from 'typeorm';
 import { isPlatformRole, PLATFORM_ROLE } from '../../common/access/platform-role.js';
 import { RecordStatus } from '../../common/enums/record-status.enum.js';
 import { Role } from '../role/entities/role.entity.js';
@@ -102,10 +102,19 @@ export class UserService {
     });
   }
 
+  // Todo cambio a una cuenta lee al usuario YA bloqueado, dentro de la transacción (lockUser): dos
+  // cambios a la misma cuenta a la vez esperan uno al otro, y cada uno parte de lo que dejó el
+  // anterior. Sin esto, guardar un usuario leído antes pisaría lo que otro cambió mientras tanto (por
+  // ejemplo, un formulario de datos con la contraseña vieja borraría el restablecimiento). Las
+  // comprobaciones de quién puede tocar la cuenta (findManageable) van antes, fuera del bloqueo.
   async update(companyId: string, id: string, input: UpdateUserInput): Promise<User> {
-    const user = await this.findManageable(companyId, id);
-    Object.assign(user, input);
-    return this.dataSource.transaction((manager) => manager.getRepository(User).save(user));
+    await this.findManageable(companyId, id);
+
+    return this.dataSource.transaction(async (manager) => {
+      const user = await this.lockUser(manager, id);
+      Object.assign(user, input);
+      return manager.getRepository(User).save(user);
+    });
   }
 
   async deactivate(companyId: string, id: string): Promise<User> {
@@ -120,49 +129,70 @@ export class UserService {
   }
 
   private async setStatus(companyId: string, id: string, status: RecordStatus): Promise<User> {
-    const user = await this.findManageable(companyId, id);
-    user.status = status;
-    return this.dataSource.transaction((manager) => manager.getRepository(User).save(user));
+    await this.findManageable(companyId, id);
+
+    return this.dataSource.transaction(async (manager) => {
+      const user = await this.lockUser(manager, id);
+      user.status = status;
+      return manager.getRepository(User).save(user);
+    });
   }
 
   // Deja la contraseña como al crear el usuario (su documento) y lo obliga a cambiarla
   // en el próximo ingreso. Como JwtAuthGuard revisa `mustChangePassword` en cada petición,
   // una sesión ya abierta queda limitada a cambiar la contraseña desde este momento.
   async resetPassword(companyId: string, id: string): Promise<User> {
-    const user = await this.findManageable(companyId, id);
-    if (!user.documentNumber) {
-      throw new BadRequestException('El usuario no tiene número de documento registrado');
-    }
+    await this.findManageable(companyId, id);
 
-    user.passwordHash = await bcrypt.hash(user.documentNumber, PASSWORD_SALT_ROUNDS);
-    user.mustChangePassword = true;
-    return this.dataSource.transaction((manager) => manager.getRepository(User).save(user));
+    return this.dataSource.transaction(async (manager) => {
+      const user = await this.lockUser(manager, id);
+      if (!user.documentNumber) {
+        throw new BadRequestException('El usuario no tiene número de documento registrado');
+      }
+
+      user.passwordHash = await bcrypt.hash(user.documentNumber, PASSWORD_SALT_ROUNDS);
+      user.mustChangePassword = true;
+      return manager.getRepository(User).save(user);
+    });
   }
 
-  // El usuario cambia su propia contraseña: el id viene del token, nunca de los argumentos.
+  // El usuario cambia su propia contraseña: el id viene del token, nunca de los argumentos. Se
+  // comprueba la actual contra la contraseña que hay AHORA (con la cuenta bloqueada): si un
+  // administrador la restableció mientras tanto, la que valía antes ya no sirve.
   async changePassword(id: string, input: ChangePasswordInput): Promise<User> {
-    const user = await this.findOne(id);
+    return this.dataSource.transaction(async (manager) => {
+      const user = await this.lockUser(manager, id);
 
-    const currentMatches = await bcrypt.compare(input.currentPassword, user.passwordHash);
-    if (!currentMatches) {
-      throw new UnauthorizedException('La contraseña actual no es correcta');
-    }
+      const currentMatches = await bcrypt.compare(input.currentPassword, user.passwordHash);
+      if (!currentMatches) {
+        throw new UnauthorizedException('La contraseña actual no es correcta');
+      }
 
-    if (input.newPassword === input.currentPassword) {
-      throw new BadRequestException('La nueva contraseña debe ser distinta a la actual');
-    }
+      if (input.newPassword === input.currentPassword) {
+        throw new BadRequestException('La nueva contraseña debe ser distinta a la actual');
+      }
 
-    // La contraseña inicial es la cédula: sin esto el usuario podría "cambiarla" por la misma.
-    if (user.documentNumber && input.newPassword === user.documentNumber) {
-      throw new BadRequestException(
-        'La nueva contraseña no puede ser tu número de documento',
-      );
-    }
+      // La contraseña inicial es la cédula: sin esto el usuario podría "cambiarla" por la misma.
+      if (user.documentNumber && input.newPassword === user.documentNumber) {
+        throw new BadRequestException(
+          'La nueva contraseña no puede ser tu número de documento',
+        );
+      }
 
-    user.passwordHash = await bcrypt.hash(input.newPassword, PASSWORD_SALT_ROUNDS);
-    user.mustChangePassword = false;
+      user.passwordHash = await bcrypt.hash(input.newPassword, PASSWORD_SALT_ROUNDS);
+      user.mustChangePassword = false;
+      return manager.getRepository(User).save(user);
+    });
+  }
 
-    return this.dataSource.transaction((manager) => manager.getRepository(User).save(user));
+  // El usuario bloqueado hasta que termine la transacción. Un usuario que no existe se responde
+  // igual que en `findOne`.
+  private async lockUser(manager: EntityManager, id: string): Promise<User> {
+    const user = await manager
+      .getRepository(User)
+      .findOne({ where: { id }, lock: { mode: 'pessimistic_write' } });
+    if (!user) throw new NotFoundException(`Usuario ${id} no encontrado`);
+    return user;
   }
 
   // Cambiar la cuenta de alguien (datos, contraseña, activación) solo se permite si trabaja

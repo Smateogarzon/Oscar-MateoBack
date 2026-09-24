@@ -3,6 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
 import { RecordStatus } from '../../common/enums/record-status.enum.js';
 import { mapPostgresWriteError } from '../../common/utils/postgres-error.js';
+import { lockStoreRegisters } from '../cash-register/store-registers.js';
 import { CashSessionStatus } from '../cash-session/entities/cash-session-status.enum.js';
 import { CashSession } from '../cash-session/entities/cash-session.entity.js';
 import { Location } from '../location/entities/location.entity.js';
@@ -71,11 +72,16 @@ export class UserLocationAccessService {
 
   // No se le quita a un cajero el acceso a una sede donde tiene un turno de caja abierto: seguiría
   // cobrando en él sin que nada lo revalide. Misma regla que ya protege a la caja y a la tienda
-  // (CashRegisterService.deactivate, LocationService.deactivate).
+  // (CashRegisterService.deactivate, LocationService.deactivate). Las cajas de la sede se bloquean
+  // igual que al abrir un turno (CashSessionService.open) y con ellas bloqueadas se mira si el
+  // cajero tiene uno abierto: una apertura que llegue a la vez espera, y una que llegue después ya
+  // ve el acceso quitado.
   async deactivate(companyId: string, id: string): Promise<UserLocationAccess> {
     const access = await this.findOne(companyId, id);
 
     return this.dataSource.transaction(async (manager) => {
+      await lockStoreRegisters(manager, access.locationId);
+
       const hasOpenShift = await manager.getRepository(CashSession).existsBy({
         cashierId: access.userId,
         status: CashSessionStatus.OPEN,

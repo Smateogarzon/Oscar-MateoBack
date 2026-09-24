@@ -8,6 +8,9 @@ import { Decimal } from 'decimal.js';
 import { In } from 'typeorm';
 import { RecordStatus } from '../../common/enums/record-status.enum.js';
 import type { CashActor } from '../cash-session/cash-actor.js';
+import { NotificationChannel } from '../notification/entities/notification-channel.enum.js';
+import { NotificationEntityType } from '../notification/entities/notification-entity-type.enum.js';
+import { NotificationType } from '../notification/entities/notification-type.enum.js';
 import { PaymentMethodType } from '../payment-method/entities/payment-method-type.enum.js';
 import { PaymentMethod } from '../payment-method/entities/payment-method.entity.js';
 import { SaleItem } from '../sale/entities/sale-item.entity.js';
@@ -124,11 +127,13 @@ function createService() {
   // Lo que ve la transacción
   const txReturnRepo = {
     findOne: vi.fn().mockResolvedValue(saleReturn()),
+    findOneBy: vi.fn().mockResolvedValue(saleReturn()),
     create: vi.fn((value: unknown) => value),
     save: vi.fn(async (value: object) => ({ id: 'return-1', ...value })),
   };
   const txReturnItemRepo = {
     find: vi.fn().mockResolvedValue([]),
+    delete: vi.fn().mockResolvedValue(undefined),
     create: vi.fn((value: unknown) => value),
     save: vi.fn(async (value: unknown) => value),
   };
@@ -166,6 +171,13 @@ function createService() {
     lockOpen: vi.fn().mockResolvedValue({ id: 'session-1' }),
     findOne: vi.fn().mockResolvedValue({ id: 'session-1' }),
   };
+  // Los administradores de la empresa, que son quienes reciben las devoluciones
+  const notifications = {
+    notify: vi.fn().mockResolvedValue(null),
+    findUserIdsWithPermission: vi.fn().mockResolvedValue(['admin-1', 'admin-2']),
+    markEntityRead: vi.fn().mockResolvedValue(0),
+    signalChange: vi.fn(),
+  };
 
   const service = new SaleReturnService(
     returnRepo as never,
@@ -175,6 +187,7 @@ function createService() {
     sales as never,
     sequences as never,
     cashSessions as never,
+    notifications as never,
   );
   return {
     service,
@@ -192,6 +205,7 @@ function createService() {
     sales,
     sequences,
     cashSessions,
+    notifications,
   };
 }
 
@@ -1207,6 +1221,306 @@ describe('SaleReturnService', () => {
       );
 
       expect(exchange.resolution).toBe(SaleReturnResolution.PARTIAL_REFUND);
+    });
+  });
+
+  // Cada paso avisa a la otra parte, dentro de la misma transacción (canal Devoluciones).
+  describe('notifications', () => {
+    const aboutReturn = {
+      companyId: COMPANY,
+      entityType: NotificationEntityType.SALE_RETURN,
+      entityId: 'return-1',
+      locationId: 'store-1',
+      reference: 'DEV-00018',
+    };
+
+    // El servicio ubica el aviso en la tienda de la venta original
+    const withStore = (txSaleRepo: { findOneBy: ReturnType<typeof vi.fn> }) =>
+      txSaleRepo.findOneBy.mockResolvedValue({ id: 'sale-1', storeId: 'store-1' });
+
+    it('tells the administrators when a cashier registers a return', async () => {
+      const { service, txSaleRepo, notifications } = createService();
+      withStore(txSaleRepo);
+
+      await service.request(
+        COMPANY,
+        'cashier-1',
+        requestInput([{ saleItemId: 'line-1', quantity: '1' }]),
+      );
+
+      expect(notifications.findUserIdsWithPermission).toHaveBeenCalledWith(
+        expect.anything(),
+        COMPANY,
+        'sales.approve_return',
+      );
+      expect(notifications.notify).toHaveBeenCalledTimes(1);
+      expect(notifications.notify).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          ...aboutReturn,
+          type: NotificationType.RETURN_REQUESTED,
+          recipientIds: ['admin-1', 'admin-2'],
+          actorId: 'cashier-1',
+        }),
+      );
+    });
+
+    it('does not tell anyone when the return could not be registered', async () => {
+      const { service, notifications } = createService();
+
+      await expect(
+        service.request(COMPANY, 'cashier-1', requestInput([{ saleItemId: 'line-9', quantity: '1' }])),
+      ).rejects.toThrow(BadRequestException);
+
+      expect(notifications.notify).not.toHaveBeenCalled();
+    });
+
+    it('tells whoever registered it when an administrator changes it, without clearing anything', async () => {
+      const { service, txSaleRepo, notifications } = createService();
+      withStore(txSaleRepo);
+
+      await service.edit(COMPANY, 'admin-1', 'return-1', {
+        items: [{ saleItemId: 'line-1', quantity: '1' }],
+      });
+
+      expect(notifications.notify).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          ...aboutReturn,
+          type: NotificationType.RETURN_EDITED,
+          recipientIds: ['cashier-1'],
+          actorId: 'admin-1',
+        }),
+      );
+      expect(notifications.markEntityRead).not.toHaveBeenCalled();
+    });
+
+    it('tells whoever registered it when an administrator approves, and clears the "new return" notices', async () => {
+      const { service, txSaleRepo, notifications } = createService();
+      withStore(txSaleRepo);
+
+      await service.approve(COMPANY, 'admin-1', 'return-1', {});
+
+      expect(notifications.notify).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          ...aboutReturn,
+          type: NotificationType.RETURN_APPROVED,
+          recipientIds: ['cashier-1'],
+          actorId: 'admin-1',
+        }),
+      );
+      expect(notifications.markEntityRead).toHaveBeenCalledWith(
+        expect.anything(),
+        NotificationEntityType.SALE_RETURN,
+        'return-1',
+        [NotificationType.RETURN_REQUESTED],
+      );
+    });
+
+    it('tells whoever registered it when an administrator rejects, with the note, and clears the notices', async () => {
+      const { service, txSaleRepo, notifications } = createService();
+      withStore(txSaleRepo);
+
+      await service.reject(COMPANY, 'admin-1', 'return-1', { notes: ' Zapato usado ' });
+
+      expect(notifications.notify).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          ...aboutReturn,
+          type: NotificationType.RETURN_REJECTED,
+          recipientIds: ['cashier-1'],
+          actorId: 'admin-1',
+          notes: 'Zapato usado',
+        }),
+      );
+      expect(notifications.markEntityRead).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not tell anyone, nor clear anything, when the return was already resolved', async () => {
+      const { service, txReturnRepo, notifications } = createService();
+      txReturnRepo.findOne.mockResolvedValue(approvedReturn());
+
+      await expect(service.approve(COMPANY, 'admin-1', 'return-1', {})).rejects.toThrow(
+        ConflictException,
+      );
+      await expect(service.reject(COMPANY, 'admin-1', 'return-1', {})).rejects.toThrow(
+        ConflictException,
+      );
+
+      expect(notifications.notify).not.toHaveBeenCalled();
+      expect(notifications.markEntityRead).not.toHaveBeenCalled();
+    });
+
+    it('tells the administrators when the cashier who registered it cancels a pending return, and clears the notices', async () => {
+      const { service, txSaleRepo, notifications } = createService();
+      withStore(txSaleRepo);
+
+      await service.cancel(COMPANY, 'cashier-1', 'return-1', false, { notes: 'El cliente se arrepintió' });
+
+      expect(notifications.findUserIdsWithPermission).toHaveBeenCalledWith(
+        expect.anything(),
+        COMPANY,
+        'sales.approve_return',
+      );
+      expect(notifications.notify).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          ...aboutReturn,
+          type: NotificationType.RETURN_CANCELLED,
+          recipientIds: ['admin-1', 'admin-2'],
+          actorId: 'cashier-1',
+          notes: 'El cliente se arrepintió',
+        }),
+      );
+      expect(notifications.markEntityRead).toHaveBeenCalledTimes(1);
+    });
+
+    it('tells whoever registered it when an administrator cancels their return', async () => {
+      const { service, notifications } = createService();
+
+      await service.cancel(COMPANY, 'admin-1', 'return-1', true, {});
+
+      expect(notifications.notify).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          type: NotificationType.RETURN_CANCELLED,
+          recipientIds: ['cashier-1'],
+          actorId: 'admin-1',
+        }),
+      );
+    });
+
+    it('does not clear the "new return" notices when it cancels a return that was already approved', async () => {
+      const { service, txReturnRepo, notifications } = createService();
+      txReturnRepo.findOne.mockResolvedValue(approvedReturn());
+
+      await service.cancel(COMPANY, 'cashier-1', 'return-1', false, {});
+
+      expect(notifications.notify).toHaveBeenCalledTimes(1);
+      expect(notifications.markEntityRead).not.toHaveBeenCalled();
+    });
+
+    it('does not tell anyone when another cashier tries to cancel it', async () => {
+      const { service, notifications } = createService();
+
+      await expect(service.cancel(COMPANY, 'cashier-2', 'return-1', false, {})).rejects.toThrow(
+        ForbiddenException,
+      );
+
+      expect(notifications.notify).not.toHaveBeenCalled();
+      expect(notifications.markEntityRead).not.toHaveBeenCalled();
+      expect(notifications.signalChange).not.toHaveBeenCalled();
+    });
+
+    it('keeps the notice without a store when the original sale cannot be found', async () => {
+      const { service, txSaleRepo, notifications } = createService();
+      txSaleRepo.findOneBy.mockResolvedValue(null);
+
+      await service.approve(COMPANY, 'admin-1', 'return-1', {});
+
+      expect(notifications.notify).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ locationId: null }),
+      );
+    });
+  });
+
+  // Además del aviso, los demás administradores reciben una señal en vivo cuando una devolución
+  // pendiente cambia o deja de estarlo, para que su lista de pendientes se ponga al día sola.
+  describe('live signal to the other administrators', () => {
+    const changedReturn = {
+      companyId: COMPANY,
+      channel: NotificationChannel.RETURNS,
+      entityType: NotificationEntityType.SALE_RETURN,
+      entityId: 'return-1',
+      recipientIds: ['admin-1', 'admin-2'],
+    };
+
+    it('signals the administrators, except the one who approved', async () => {
+      const { service, notifications } = createService();
+
+      await service.approve(COMPANY, 'admin-1', 'return-1', {});
+
+      expect(notifications.findUserIdsWithPermission).toHaveBeenCalledWith(
+        expect.anything(),
+        COMPANY,
+        'sales.approve_return',
+      );
+      expect(notifications.signalChange).toHaveBeenCalledTimes(1);
+      expect(notifications.signalChange).toHaveBeenCalledWith(expect.anything(), {
+        ...changedReturn,
+        exceptUserId: 'admin-1',
+      });
+    });
+
+    it('signals them when a return is rejected', async () => {
+      const { service, notifications } = createService();
+
+      await service.reject(COMPANY, 'admin-2', 'return-1', {});
+
+      expect(notifications.signalChange).toHaveBeenCalledWith(expect.anything(), {
+        ...changedReturn,
+        exceptUserId: 'admin-2',
+      });
+    });
+
+    it('signals them when a pending return is cancelled, except whoever cancelled it', async () => {
+      const { service, notifications } = createService();
+
+      await service.cancel(COMPANY, 'cashier-1', 'return-1', false, {});
+
+      expect(notifications.signalChange).toHaveBeenCalledWith(expect.anything(), {
+        ...changedReturn,
+        exceptUserId: 'cashier-1',
+      });
+    });
+
+    it('signals them when an administrator changes a pending return, because what is returned changed', async () => {
+      const { service, notifications } = createService();
+
+      await service.edit(COMPANY, 'admin-1', 'return-1', {
+        items: [{ saleItemId: 'line-1', quantity: '1' }],
+      });
+
+      expect(notifications.signalChange).toHaveBeenCalledTimes(1);
+      expect(notifications.signalChange).toHaveBeenCalledWith(expect.anything(), {
+        ...changedReturn,
+        exceptUserId: 'admin-1',
+      });
+    });
+
+    it('does not signal anything when the return was already approved: it was not in the pending list', async () => {
+      const { service, txReturnRepo, notifications } = createService();
+      txReturnRepo.findOne.mockResolvedValue(approvedReturn());
+
+      await service.cancel(COMPANY, 'cashier-1', 'return-1', false, {});
+
+      expect(notifications.signalChange).not.toHaveBeenCalled();
+    });
+
+    it('does not signal anything when a new return is registered', async () => {
+      const { service, notifications } = createService();
+
+      await service.request(
+        COMPANY,
+        'cashier-1',
+        requestInput([{ saleItemId: 'line-1', quantity: '1' }]),
+      );
+
+      // Ya reciben el aviso de la devolución nueva
+      expect(notifications.signalChange).not.toHaveBeenCalled();
+    });
+
+    it('does not signal anything when the return was already resolved', async () => {
+      const { service, txReturnRepo, notifications } = createService();
+      txReturnRepo.findOne.mockResolvedValue(approvedReturn());
+
+      await expect(service.approve(COMPANY, 'admin-1', 'return-1', {})).rejects.toThrow(
+        ConflictException,
+      );
+
+      expect(notifications.signalChange).not.toHaveBeenCalled();
     });
   });
 });

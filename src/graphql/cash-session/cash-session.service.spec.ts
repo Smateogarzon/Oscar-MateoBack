@@ -496,6 +496,17 @@ describe('CashSessionService', () => {
       });
     });
 
+    it('checks the access of the cashier with the register already locked, so an access being removed at the same time is seen', async () => {
+      const { service, txRegisterRepo, accessRepo } = createService();
+
+      await service.open(COMPANY, 'admin-1', opening);
+
+      // La segunda lectura de la caja es la que la bloquea
+      expect(txRegisterRepo.findOne.mock.invocationCallOrder[1]).toBeLessThan(
+        accessRepo.existsBy.mock.invocationCallOrder[0],
+      );
+    });
+
     it('does not open a register of another company', async () => {
       const { service, txRegisterRepo, txSessionRepo } = createService();
       txRegisterRepo.findOne.mockResolvedValue(null);

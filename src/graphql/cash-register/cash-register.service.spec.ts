@@ -207,6 +207,24 @@ describe('CashRegisterService', () => {
       expect(register).toMatchObject({ name: 'Caja del fondo', code: 'C1', storeId: 'store-1' });
     });
 
+    it('locks the register before changing it, and changes the one it reads under the lock', async () => {
+      const { service, txRegisterRepo } = createService();
+      // Lo que se leyó al comprobar la empresa, y lo que hay cuando la caja ya está bloqueada:
+      // mientras tanto otro administrador la desactivó.
+      txRegisterRepo.findOne
+        .mockResolvedValueOnce(stored())
+        .mockResolvedValueOnce(stored({ status: RecordStatus.INACTIVE }));
+
+      const register = await service.update(COMPANY, 'register-1', { name: 'Caja del fondo' });
+
+      expect(txRegisterRepo.findOne).toHaveBeenLastCalledWith({
+        where: { id: 'register-1' },
+        lock: { mode: 'pessimistic_write' },
+      });
+      // Cambia el nombre y no la vuelve a activar
+      expect(register).toMatchObject({ name: 'Caja del fondo', status: RecordStatus.INACTIVE });
+    });
+
     it('never looks at the codes of the store: there is nothing to check, it cannot be changed', async () => {
       const { service, txRegisterRepo } = createService();
       txRegisterRepo.findOne.mockResolvedValue(stored());
@@ -290,6 +308,10 @@ describe('CashRegisterService', () => {
       const register = await service.activate(COMPANY, 'register-1');
 
       expect(register.status).toBe(RecordStatus.ACTIVE);
+      expect(txRegisterRepo.findOne).toHaveBeenLastCalledWith({
+        where: { id: 'register-1' },
+        lock: { mode: 'pessimistic_write' },
+      });
     });
 
     it('cannot reach a register of another company', async () => {

@@ -8,6 +8,11 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { Decimal } from 'decimal.js';
 import { DataSource, EntityManager, In, Repository } from 'typeorm';
+import { PermissionCode } from '../../common/enums/permission-code.enum.js';
+import { NotificationChannel } from '../notification/entities/notification-channel.enum.js';
+import { NotificationEntityType } from '../notification/entities/notification-entity-type.enum.js';
+import { NotificationType } from '../notification/entities/notification-type.enum.js';
+import { NotificationService } from '../notification/notification.service.js';
 import { SaleItem } from '../sale/entities/sale-item.entity.js';
 import { Sale } from '../sale/entities/sale.entity.js';
 import { SaleService } from '../sale/sale.service.js';
@@ -35,6 +40,11 @@ import { DiscountRequest } from './entities/discount-request.entity.js';
 // Toda operación bloquea primero la VENTA (SaleService.lockDraft), nunca la solicitud sola: así
 // cualquier cambio a la venta o a sus solicitudes espera al anterior y no hay bloqueos cruzados.
 // La empresa de una solicitud es la de su venta.
+//
+// Cada paso avisa a la otra parte (canal Descuentos, ver NotificationService) dentro de la misma
+// transacción: los administradores reciben la solicitud y lo que la cancele; quien la pidió recibe
+// cómo se resolvió. Quien hace la acción no se avisa a sí mismo. Al resolverse una solicitud, sus
+// avisos de "solicitud nueva" pasan a leídos para todos los administradores.
 @Injectable()
 export class DiscountRequestService {
   constructor(
@@ -44,6 +54,7 @@ export class DiscountRequestService {
     private readonly requestItemRepository: Repository<DiscountRequestItem>,
     private readonly dataSource: DataSource,
     private readonly sales: SaleService,
+    private readonly notifications: NotificationService,
   ) {}
 
   // Las más recientes primero.
@@ -155,6 +166,7 @@ export class DiscountRequestService {
         );
       }
 
+      await this.notifyApprovers(manager, companyId, NotificationType.DISCOUNT_REQUESTED, request, sale, requesterId);
       return request;
     });
   }
@@ -178,7 +190,11 @@ export class DiscountRequestService {
 
       request.status = DiscountRequestStatus.APPROVED;
       this.markResolved(request, resolverId, input.notes);
-      return manager.getRepository(DiscountRequest).save(request);
+      const saved = await manager.getRepository(DiscountRequest).save(request);
+
+      await this.notifyRequester(manager, companyId, NotificationType.DISCOUNT_APPROVED, request, sale, resolverId);
+      await this.clearPendingNotices(manager, companyId, request, resolverId);
+      return saved;
     });
   }
 
@@ -199,7 +215,10 @@ export class DiscountRequestService {
       await this.applyAmounts(manager, request, sale, input, 'edit');
 
       this.markResolved(request, editorId, input.notes);
-      return manager.getRepository(DiscountRequest).save(request);
+      const saved = await manager.getRepository(DiscountRequest).save(request);
+
+      await this.notifyRequester(manager, companyId, NotificationType.DISCOUNT_EDITED, request, sale, editorId);
+      return saved;
     });
   }
 
@@ -211,14 +230,26 @@ export class DiscountRequestService {
     input: DiscountRequestNotesInput,
   ): Promise<DiscountRequest> {
     return this.dataSource.transaction(async (manager) => {
-      const { request } = await this.lockRequestAndSale(manager, companyId, id);
+      const { request, sale } = await this.lockRequestAndSale(manager, companyId, id);
       if (request.status !== DiscountRequestStatus.PENDING) {
         throw new ConflictException('La solicitud ya fue resuelta');
       }
 
       request.status = DiscountRequestStatus.REJECTED;
       this.markResolved(request, resolverId, input.notes);
-      return manager.getRepository(DiscountRequest).save(request);
+      const saved = await manager.getRepository(DiscountRequest).save(request);
+
+      await this.notifyRequester(
+        manager,
+        companyId,
+        NotificationType.DISCOUNT_REJECTED,
+        request,
+        sale,
+        resolverId,
+        request.resolutionNotes,
+      );
+      await this.clearPendingNotices(manager, companyId, request, resolverId);
+      return saved;
     });
   }
 
@@ -241,13 +272,110 @@ export class DiscountRequestService {
         throw new ForbiddenException('Solo quien la pidió o quien aprueba descuentos puede cancelarla');
       }
 
+      const wasPending = request.status === DiscountRequestStatus.PENDING;
       if (request.status === DiscountRequestStatus.APPROVED) {
         await this.removeAppliedDiscount(manager, request, sale);
       }
 
       request.status = DiscountRequestStatus.CANCELLED;
       this.markResolved(request, userId, input.notes);
-      return manager.getRepository(DiscountRequest).save(request);
+      const saved = await manager.getRepository(DiscountRequest).save(request);
+
+      // Si la cancela quien la pidió se avisa a los administradores; si la cancela un administrador,
+      // a quien la pidió.
+      const type = NotificationType.DISCOUNT_CANCELLED;
+      if (userId === request.requestedBy) {
+        await this.notifyApprovers(manager, companyId, type, request, sale, userId, request.resolutionNotes);
+      } else {
+        await this.notifyRequester(manager, companyId, type, request, sale, userId, request.resolutionNotes);
+      }
+      if (wasPending) await this.clearPendingNotices(manager, companyId, request, userId);
+      return saved;
+    });
+  }
+
+  // Avisa a quienes aprueban descuentos en la empresa (menos a quien hizo la acción).
+  private async notifyApprovers(
+    manager: EntityManager,
+    companyId: string,
+    type: NotificationType,
+    request: DiscountRequest,
+    sale: Sale,
+    actorId: string,
+    notes?: string | null,
+  ): Promise<void> {
+    const recipientIds = await this.notifications.findUserIdsWithPermission(
+      manager,
+      companyId,
+      PermissionCode.SALES_APPROVE_DISCOUNT,
+    );
+    await this.notify(manager, companyId, type, request, sale, actorId, recipientIds, notes);
+  }
+
+  // Avisa a quien pidió el descuento (si no es quien hizo la acción).
+  private notifyRequester(
+    manager: EntityManager,
+    companyId: string,
+    type: NotificationType,
+    request: DiscountRequest,
+    sale: Sale,
+    actorId: string,
+    notes?: string | null,
+  ): Promise<void> {
+    return this.notify(manager, companyId, type, request, sale, actorId, [request.requestedBy], notes);
+  }
+
+  private async notify(
+    manager: EntityManager,
+    companyId: string,
+    type: NotificationType,
+    request: DiscountRequest,
+    sale: Sale,
+    actorId: string,
+    recipientIds: string[],
+    notes?: string | null,
+  ): Promise<void> {
+    await this.notifications.notify(manager, {
+      companyId,
+      type,
+      recipientIds,
+      actorId,
+      entityType: NotificationEntityType.DISCOUNT_REQUEST,
+      entityId: request.id,
+      locationId: sale.storeId,
+      reference: sale.saleNumber,
+      notes,
+    });
+  }
+
+  // La solicitud ya no está pendiente: el aviso de "solicitud nueva" deja de esperar respuesta, y a los
+  // demás administradores se les avisa en vivo para que su lista de pendientes se ponga al día sola
+  // (quien la resolvió ya se refresca con su propia operación).
+  private async clearPendingNotices(
+    manager: EntityManager,
+    companyId: string,
+    request: DiscountRequest,
+    actorId: string,
+  ): Promise<void> {
+    await this.notifications.markEntityRead(
+      manager,
+      NotificationEntityType.DISCOUNT_REQUEST,
+      request.id,
+      [NotificationType.DISCOUNT_REQUESTED],
+    );
+
+    const approverIds = await this.notifications.findUserIdsWithPermission(
+      manager,
+      companyId,
+      PermissionCode.SALES_APPROVE_DISCOUNT,
+    );
+    this.notifications.signalChange(manager, {
+      companyId,
+      channel: NotificationChannel.DISCOUNTS,
+      entityType: NotificationEntityType.DISCOUNT_REQUEST,
+      entityId: request.id,
+      recipientIds: approverIds,
+      exceptUserId: actorId,
     });
   }
 

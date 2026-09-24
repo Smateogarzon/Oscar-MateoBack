@@ -8,9 +8,14 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { Decimal } from 'decimal.js';
 import { DataSource, EntityManager, In, Not, Repository } from 'typeorm';
+import { PermissionCode } from '../../common/enums/permission-code.enum.js';
 import { CashActor } from '../cash-session/cash-actor.js';
 import { CashSessionService } from '../cash-session/cash-session.service.js';
 import { DocumentSequenceService } from '../document-sequence/document-sequence.service.js';
+import { NotificationChannel } from '../notification/entities/notification-channel.enum.js';
+import { NotificationEntityType } from '../notification/entities/notification-entity-type.enum.js';
+import { NotificationType } from '../notification/entities/notification-type.enum.js';
+import { NotificationService } from '../notification/notification.service.js';
 import { PaymentMethodType } from '../payment-method/entities/payment-method-type.enum.js';
 import { validatePaymentMethods } from '../payment-method/payment-method-validation.js';
 import { SaleItem } from '../sale/entities/sale-item.entity.js';
@@ -41,6 +46,12 @@ import { formatReturnNumber, RETURN_SERIES } from './sale-return-number.js';
 // Bloqueos, siempre en este orden: venta (la original al pedirla, la nueva al cobrar un cambio) →
 // devolución → turno de caja. Pedir una devolución bloquea la venta original, y así dos pedidos a la
 // vez no devuelven las mismas unidades; lo demás bloquea solo la devolución.
+//
+// Cada paso avisa a la otra parte (canal Devoluciones, ver NotificationService) dentro de la misma
+// transacción: los administradores reciben la devolución nueva y lo que la cancele; quien la
+// registró recibe si se modificó, se aprobó, se rechazó o la canceló un administrador. Quien hace la
+// acción no se avisa a sí mismo. Al resolverse una devolución, sus avisos de "devolución nueva" pasan
+// a leídos para todos los administradores.
 @Injectable()
 export class SaleReturnService {
   constructor(
@@ -54,6 +65,7 @@ export class SaleReturnService {
     private readonly sales: SaleService,
     private readonly sequences: DocumentSequenceService,
     private readonly cashSessions: CashSessionService,
+    private readonly notifications: NotificationService,
   ) {}
 
   // Las más recientes primero.
@@ -151,6 +163,7 @@ export class SaleReturnService {
         items.map((item) => itemRepo.create({ saleReturnId: saleReturn.id, ...item })),
       );
 
+      await this.notifyApprovers(manager, companyId, NotificationType.RETURN_REQUESTED, saleReturn, cashierId);
       return saleReturn;
     });
   }
@@ -161,7 +174,12 @@ export class SaleReturnService {
   // nuevas reemplazan a las anteriores y se vuelven a valorar como al pedirla, contando lo ya
   // devuelto en OTRAS devoluciones vigentes (no la que se está editando). Una vez aprobada,
   // rechazada o cancelada ya no se toca: se cancela y se pide otra.
-  async edit(companyId: string, id: string, input: EditSaleReturnInput): Promise<SaleReturn> {
+  async edit(
+    companyId: string,
+    editorId: string,
+    id: string,
+    input: EditSaleReturnInput,
+  ): Promise<SaleReturn> {
     const wanted = this.parseWanted(input.items);
 
     return this.dataSource.transaction(async (manager) => {
@@ -190,7 +208,12 @@ export class SaleReturnService {
       saleReturn.totalReturned = totalReturned;
       if (input.resolution) saleReturn.resolution = input.resolution;
       if (input.reason !== undefined) saleReturn.reason = input.reason?.trim() || null;
-      return manager.getRepository(SaleReturn).save(saleReturn);
+      const saved = await manager.getRepository(SaleReturn).save(saleReturn);
+
+      await this.notifyRequester(manager, companyId, NotificationType.RETURN_EDITED, saleReturn, editorId);
+      // Sigue pendiente pero cambió lo que se devuelve: los demás administradores ven su lista al día
+      await this.signalApprovers(manager, companyId, saleReturn, editorId);
+      return saved;
     });
   }
 
@@ -209,7 +232,11 @@ export class SaleReturnService {
 
       saleReturn.status = SaleReturnStatus.APPROVED;
       this.markResolved(saleReturn, adminId, input.notes);
-      return manager.getRepository(SaleReturn).save(saleReturn);
+      const saved = await manager.getRepository(SaleReturn).save(saleReturn);
+
+      await this.notifyRequester(manager, companyId, NotificationType.RETURN_APPROVED, saleReturn, adminId);
+      await this.clearPendingNotices(manager, companyId, saleReturn, adminId);
+      return saved;
     });
   }
 
@@ -228,7 +255,18 @@ export class SaleReturnService {
 
       saleReturn.status = SaleReturnStatus.REJECTED;
       this.markResolved(saleReturn, adminId, input.notes);
-      return manager.getRepository(SaleReturn).save(saleReturn);
+      const saved = await manager.getRepository(SaleReturn).save(saleReturn);
+
+      await this.notifyRequester(
+        manager,
+        companyId,
+        NotificationType.RETURN_REJECTED,
+        saleReturn,
+        adminId,
+        saleReturn.resolutionNotes,
+      );
+      await this.clearPendingNotices(manager, companyId, saleReturn, adminId);
+      return saved;
     });
   }
 
@@ -261,9 +299,21 @@ export class SaleReturnService {
         );
       }
 
+      const wasPending = saleReturn.status === SaleReturnStatus.PENDING;
       saleReturn.status = SaleReturnStatus.CANCELLED;
       this.markResolved(saleReturn, userId, input.notes);
-      return manager.getRepository(SaleReturn).save(saleReturn);
+      const saved = await manager.getRepository(SaleReturn).save(saleReturn);
+
+      // Si la cancela quien la registró se avisa a los administradores; si la cancela un
+      // administrador, a quien la registró.
+      const type = NotificationType.RETURN_CANCELLED;
+      if (userId === saleReturn.processedBy) {
+        await this.notifyApprovers(manager, companyId, type, saleReturn, userId, saleReturn.resolutionNotes);
+      } else {
+        await this.notifyRequester(manager, companyId, type, saleReturn, userId, saleReturn.resolutionNotes);
+      }
+      if (wasPending) await this.clearPendingNotices(manager, companyId, saleReturn, userId);
+      return saved;
     });
   }
 
@@ -513,5 +563,99 @@ export class SaleReturnService {
     saleReturn.resolvedBy = userId;
     saleReturn.resolvedAt = new Date();
     saleReturn.resolutionNotes = notes?.trim() || null;
+  }
+
+  // Avisa a quienes aprueban devoluciones en la empresa (menos a quien hizo la acción).
+  private async notifyApprovers(
+    manager: EntityManager,
+    companyId: string,
+    type: NotificationType,
+    saleReturn: SaleReturn,
+    actorId: string,
+    notes?: string | null,
+  ): Promise<void> {
+    const recipientIds = await this.notifications.findUserIdsWithPermission(
+      manager,
+      companyId,
+      PermissionCode.SALES_APPROVE_RETURN,
+    );
+    await this.notify(manager, companyId, type, saleReturn, actorId, recipientIds, notes);
+  }
+
+  // Avisa a quien registró la devolución (si no es quien hizo la acción).
+  private notifyRequester(
+    manager: EntityManager,
+    companyId: string,
+    type: NotificationType,
+    saleReturn: SaleReturn,
+    actorId: string,
+    notes?: string | null,
+  ): Promise<void> {
+    return this.notify(manager, companyId, type, saleReturn, actorId, [saleReturn.processedBy], notes);
+  }
+
+  private async notify(
+    manager: EntityManager,
+    companyId: string,
+    type: NotificationType,
+    saleReturn: SaleReturn,
+    actorId: string,
+    recipientIds: string[],
+    notes?: string | null,
+  ): Promise<void> {
+    // La tienda de la venta original, para que el aviso se pueda ubicar por tienda
+    const sale = await manager.getRepository(Sale).findOneBy({ id: saleReturn.saleId });
+    await this.notifications.notify(manager, {
+      companyId,
+      type,
+      recipientIds,
+      actorId,
+      entityType: NotificationEntityType.SALE_RETURN,
+      entityId: saleReturn.id,
+      locationId: sale?.storeId ?? null,
+      reference: saleReturn.returnNumber,
+      notes,
+    });
+  }
+
+  // La devolución ya no está pendiente: el aviso de "devolución nueva" deja de esperar respuesta, y a
+  // los demás administradores se les avisa en vivo para que su lista de pendientes se ponga al día sola
+  // (quien la resolvió ya se refresca con su propia operación).
+  private async clearPendingNotices(
+    manager: EntityManager,
+    companyId: string,
+    saleReturn: SaleReturn,
+    actorId: string,
+  ): Promise<void> {
+    await this.notifications.markEntityRead(
+      manager,
+      NotificationEntityType.SALE_RETURN,
+      saleReturn.id,
+      [NotificationType.RETURN_REQUESTED],
+    );
+    await this.signalApprovers(manager, companyId, saleReturn, actorId);
+  }
+
+  // Avisa en vivo, sin crear ningún aviso, a los administradores (menos a quien hizo el cambio) de
+  // que esta devolución cambió.
+  private async signalApprovers(
+    manager: EntityManager,
+    companyId: string,
+    saleReturn: SaleReturn,
+    actorId: string,
+  ): Promise<void> {
+    const approverIds = await this.notifications.findUserIdsWithPermission(
+      manager,
+      companyId,
+      PermissionCode.SALES_APPROVE_RETURN,
+    );
+    this.notifications.signalChange(manager, {
+      companyId,
+      channel: NotificationChannel.RETURNS,
+      entityType: NotificationEntityType.SALE_RETURN,
+      entityId: saleReturn.id,
+      recipientIds: approverIds,
+      exceptUserId: actorId,
+    });
   }
 }
