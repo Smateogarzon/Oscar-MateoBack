@@ -7,7 +7,7 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Decimal } from 'decimal.js';
-import { DataSource, EntityManager, In, Repository } from 'typeorm';
+import { DataSource, EntityManager, In, Not, Repository } from 'typeorm';
 import { CashActor } from '../cash-session/cash-actor.js';
 import { CashSessionService } from '../cash-session/cash-session.service.js';
 import { DocumentSequenceService } from '../document-sequence/document-sequence.service.js';
@@ -17,6 +17,7 @@ import { SaleItem } from '../sale/entities/sale-item.entity.js';
 import { Sale } from '../sale/entities/sale.entity.js';
 import { SaleService } from '../sale/sale.service.js';
 import { CompleteReturnRefundInput } from './dto/complete-return-refund.input.js';
+import { EditSaleReturnInput } from './dto/edit-sale-return.input.js';
 import { RequestSaleReturnInput } from './dto/request-sale-return.input.js';
 import { SaleReturnNotesInput } from './dto/sale-return-notes.input.js';
 import { RefundPayment } from './entities/refund-payment.entity.js';
@@ -89,6 +90,27 @@ export class SaleReturnService {
     return this.refundRepository.find({ where: { saleReturnId }, order: { createdAt: 'ASC' } });
   }
 
+  // Los reembolsos que salieron del cajón en un turno (solo los en efectivo se atan a un turno),
+  // en el orden en que se entregaron, cada uno con el número de su devolución. Un turno que quien
+  // pregunta no puede ver se responde como si no existiera (misma regla que las ventas y los
+  // movimientos del turno): quien cierra o consulta un turno ve sus devoluciones aunque no tenga
+  // sales.view, porque ya se le confió el turno.
+  async findRefundsInSession(
+    companyId: string,
+    actor: CashActor,
+    cashSessionId: string,
+  ): Promise<(RefundPayment & { returnNumber: string })[]> {
+    await this.cashSessions.findOne(companyId, actor, cashSessionId);
+    const refunds = await this.refundRepository.find({
+      where: { cashSessionId },
+      relations: { saleReturn: true },
+      order: { createdAt: 'ASC' },
+    });
+    return refunds.map((refund) =>
+      Object.assign(refund, { returnNumber: refund.saleReturn.returnNumber }),
+    );
+  }
+
   // Registra una devolución de una venta ya cobrada. Lo que vale cada línea devuelta lo calcula el
   // servidor: lo que el cliente realmente pagó, con sus descuentos (ver return-values.ts). No se
   // puede devolver más de lo vendido, contando lo que ya se devolvió en otras devoluciones que
@@ -98,75 +120,12 @@ export class SaleReturnService {
     cashierId: string,
     input: RequestSaleReturnInput,
   ): Promise<SaleReturn> {
-    const wanted = input.items.map((item) => ({
-      saleItemId: item.saleItemId,
-      quantity: new Decimal(item.quantity),
-    }));
-    if (new Set(wanted.map((item) => item.saleItemId)).size !== wanted.length) {
-      throw new BadRequestException('Una línea no puede repetirse en la devolución');
-    }
-    if (wanted.some((item) => item.quantity.lessThanOrEqualTo(0))) {
-      throw new BadRequestException('La cantidad a devolver debe ser mayor que cero');
-    }
+    const wanted = this.parseWanted(input.items);
     const reason = input.reason?.trim() || null;
 
     return this.dataSource.transaction(async (manager) => {
       const sale = await this.sales.lockCompleted(manager, companyId, input.saleId);
-
-      // Siempre en el mismo orden: el reparto del descuento general depende de él.
-      const lines = await manager
-        .getRepository(SaleItem)
-        .find({ where: { saleId: sale.id }, order: { createdAt: 'ASC', id: 'ASC' } });
-      const linesById = new Map(lines.map((line) => [line.id, line]));
-      const paid = paidPerLine(lines, sale.generalDiscount);
-
-      // Lo que ya se devolvió de cada línea, en las devoluciones que siguen vigentes
-      const previous = await manager.getRepository(SaleReturnItem).find({
-        where: { saleReturn: { saleId: sale.id, status: In(RESERVING_SALE_RETURN_STATUSES) } },
-      });
-      const returned = new Map<string, { quantity: Decimal; amount: Decimal }>();
-      for (const item of previous) {
-        const before = returned.get(item.saleItemId) ?? {
-          quantity: new Decimal(0),
-          amount: new Decimal(0),
-        };
-        returned.set(item.saleItemId, {
-          quantity: before.quantity.plus(item.quantity),
-          amount: before.amount.plus(item.amount),
-        });
-      }
-
-      const items = wanted.map((item) => {
-        const line = linesById.get(item.saleItemId);
-        if (!line) {
-          throw new BadRequestException('Alguna de las líneas indicadas no pertenece a la venta');
-        }
-
-        const before = returned.get(line.id) ?? { quantity: new Decimal(0), amount: new Decimal(0) };
-        const remaining = line.quantity.minus(before.quantity);
-        if (item.quantity.greaterThan(remaining)) {
-          throw new BadRequestException(
-            `No se puede devolver más de lo vendido: de "${line.description}" quedan ${remaining.toFixed(2)} por devolver`,
-          );
-        }
-
-        return {
-          saleItemId: line.id,
-          quantity: item.quantity,
-          amount: returnValue(
-            paid.get(line.id) as Decimal,
-            line.quantity,
-            before.quantity,
-            before.amount,
-            item.quantity,
-          ),
-        };
-      });
-
-      const totalReturned = items.reduce((sum, item) => sum.plus(item.amount), new Decimal(0));
-      if (totalReturned.lessThanOrEqualTo(0)) {
-        throw new BadRequestException('No hay nada que devolver: el valor de lo devuelto es cero');
-      }
+      const { items, totalReturned } = await this.priceItems(manager, sale, wanted);
 
       // El número se pide al final y dentro de la misma transacción: si algo de arriba falla, no se
       // gasta un consecutivo.
@@ -193,6 +152,45 @@ export class SaleReturnService {
       );
 
       return saleReturn;
+    });
+  }
+
+  // Cambia una devolución que todavía está pendiente: qué líneas y cuántas unidades se devuelven, y
+  // si el cliente se lleva dinero o un cambio. Es lo que hace un administrador al revisarla cuando
+  // solo procede parte de lo que pidió el cajero (por ejemplo, 1 de los 2 productos). Las líneas
+  // nuevas reemplazan a las anteriores y se vuelven a valorar como al pedirla, contando lo ya
+  // devuelto en OTRAS devoluciones vigentes (no la que se está editando). Una vez aprobada,
+  // rechazada o cancelada ya no se toca: se cancela y se pide otra.
+  async edit(companyId: string, id: string, input: EditSaleReturnInput): Promise<SaleReturn> {
+    const wanted = this.parseWanted(input.items);
+
+    return this.dataSource.transaction(async (manager) => {
+      // Se bloquea primero la venta y después la devolución, igual que al pedirla: así una edición y
+      // un pedido a la vez sobre la misma venta no devuelven las mismas unidades. Hay que leer la
+      // devolución (sin bloquear) para saber cuál es su venta.
+      const current = await manager.getRepository(SaleReturn).findOneBy({ id, companyId });
+      if (!current) throw new NotFoundException(`Devolución ${id} no encontrada`);
+      const sale = await this.sales.lockCompleted(manager, companyId, current.saleId);
+
+      const saleReturn = await this.lock(manager, companyId, id);
+      if (saleReturn.status !== SaleReturnStatus.PENDING) {
+        throw new ConflictException(
+          'Solo se puede modificar una devolución pendiente de aprobación',
+        );
+      }
+
+      const { items, totalReturned } = await this.priceItems(manager, sale, wanted, saleReturn.id);
+
+      const itemRepo = manager.getRepository(SaleReturnItem);
+      await itemRepo.delete({ saleReturnId: saleReturn.id });
+      await itemRepo.save(
+        items.map((item) => itemRepo.create({ saleReturnId: saleReturn.id, ...item })),
+      );
+
+      saleReturn.totalReturned = totalReturned;
+      if (input.resolution) saleReturn.resolution = input.resolution;
+      if (input.reason !== undefined) saleReturn.reason = input.reason?.trim() || null;
+      return manager.getRepository(SaleReturn).save(saleReturn);
     });
   }
 
@@ -377,6 +375,99 @@ export class SaleReturnService {
       saleReturn.completedAt = new Date();
     }
     return manager.getRepository(SaleReturn).save(saleReturn);
+  }
+
+  // Las líneas que se piden devolver, ya como números y sin repetidas ni en cero.
+  private parseWanted(
+    items: { saleItemId: string; quantity: string }[],
+  ): { saleItemId: string; quantity: Decimal }[] {
+    const wanted = items.map((item) => ({
+      saleItemId: item.saleItemId,
+      quantity: new Decimal(item.quantity),
+    }));
+    if (new Set(wanted.map((item) => item.saleItemId)).size !== wanted.length) {
+      throw new BadRequestException('Una línea no puede repetirse en la devolución');
+    }
+    if (wanted.some((item) => item.quantity.lessThanOrEqualTo(0))) {
+      throw new BadRequestException('La cantidad a devolver debe ser mayor que cero');
+    }
+    return wanted;
+  }
+
+  // Lo que vale cada línea que se quiere devolver de una venta ya bloqueada: lo que el cliente
+  // realmente pagó, con sus descuentos (ver return-values.ts). No deja devolver más de lo vendido,
+  // contando lo ya devuelto en las devoluciones vigentes de la venta; `ignoreReturnId` deja fuera
+  // una de ellas (la que se está editando, cuyas líneas se van a reemplazar).
+  private async priceItems(
+    manager: EntityManager,
+    sale: Sale,
+    wanted: { saleItemId: string; quantity: Decimal }[],
+    ignoreReturnId?: string,
+  ): Promise<{
+    items: { saleItemId: string; quantity: Decimal; amount: Decimal }[];
+    totalReturned: Decimal;
+  }> {
+    // Siempre en el mismo orden: el reparto del descuento general depende de él.
+    const lines = await manager
+      .getRepository(SaleItem)
+      .find({ where: { saleId: sale.id }, order: { createdAt: 'ASC', id: 'ASC' } });
+    const linesById = new Map(lines.map((line) => [line.id, line]));
+    const paid = paidPerLine(lines, sale.generalDiscount);
+
+    // Lo que ya se devolvió de cada línea, en las devoluciones que siguen vigentes
+    const previous = await manager.getRepository(SaleReturnItem).find({
+      where: {
+        saleReturn: {
+          saleId: sale.id,
+          status: In(RESERVING_SALE_RETURN_STATUSES),
+          ...(ignoreReturnId && { id: Not(ignoreReturnId) }),
+        },
+      },
+    });
+    const returned = new Map<string, { quantity: Decimal; amount: Decimal }>();
+    for (const item of previous) {
+      const before = returned.get(item.saleItemId) ?? {
+        quantity: new Decimal(0),
+        amount: new Decimal(0),
+      };
+      returned.set(item.saleItemId, {
+        quantity: before.quantity.plus(item.quantity),
+        amount: before.amount.plus(item.amount),
+      });
+    }
+
+    const items = wanted.map((item) => {
+      const line = linesById.get(item.saleItemId);
+      if (!line) {
+        throw new BadRequestException('Alguna de las líneas indicadas no pertenece a la venta');
+      }
+
+      const before = returned.get(line.id) ?? { quantity: new Decimal(0), amount: new Decimal(0) };
+      const remaining = line.quantity.minus(before.quantity);
+      if (item.quantity.greaterThan(remaining)) {
+        throw new BadRequestException(
+          `No se puede devolver más de lo vendido: de "${line.description}" quedan ${remaining.toFixed(2)} por devolver`,
+        );
+      }
+
+      return {
+        saleItemId: line.id,
+        quantity: item.quantity,
+        amount: returnValue(
+          paid.get(line.id) as Decimal,
+          line.quantity,
+          before.quantity,
+          before.amount,
+          item.quantity,
+        ),
+      };
+    });
+
+    const totalReturned = items.reduce((sum, item) => sum.plus(item.amount), new Decimal(0));
+    if (totalReturned.lessThanOrEqualTo(0)) {
+      throw new BadRequestException('No hay nada que devolver: el valor de lo devuelto es cero');
+    }
+    return { items, totalReturned };
   }
 
   private async lock(manager: EntityManager, companyId: string, id: string): Promise<SaleReturn> {

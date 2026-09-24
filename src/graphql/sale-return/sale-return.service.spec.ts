@@ -162,7 +162,10 @@ function createService() {
 
   const sales = { lockCompleted: vi.fn().mockResolvedValue(completedSale()) };
   const sequences = { next: vi.fn().mockResolvedValue(18) };
-  const cashSessions = { lockOpen: vi.fn().mockResolvedValue({ id: 'session-1' }) };
+  const cashSessions = {
+    lockOpen: vi.fn().mockResolvedValue({ id: 'session-1' }),
+    findOne: vi.fn().mockResolvedValue({ id: 'session-1' }),
+  };
 
   const service = new SaleReturnService(
     returnRepo as never,
@@ -268,6 +271,35 @@ describe('SaleReturnService', () => {
         where: { saleReturnId: 'return-1' },
         order: { createdAt: 'ASC' },
       });
+    });
+
+    it('lists the refunds paid out of a shift, each with the number of its return', async () => {
+      const { service, cashSessions, refundRepo } = createService();
+      refundRepo.find.mockResolvedValue([
+        { id: 'refund-1', saleReturnId: 'return-1', cashSessionId: 'session-1', saleReturn: { returnNumber: 'DEV-000018' } },
+        { id: 'refund-2', saleReturnId: 'return-2', cashSessionId: 'session-1', saleReturn: { returnNumber: 'DEV-000019' } },
+      ]);
+
+      const refunds = await service.findRefundsInSession(COMPANY, cashier, 'session-1');
+
+      expect(cashSessions.findOne).toHaveBeenCalledWith(COMPANY, cashier, 'session-1');
+      expect(refundRepo.find).toHaveBeenCalledWith({
+        where: { cashSessionId: 'session-1' },
+        relations: { saleReturn: true },
+        order: { createdAt: 'ASC' },
+      });
+      expect(refunds.map((refund) => [refund.id, refund.returnNumber])).toEqual([
+        ['refund-1', 'DEV-000018'],
+        ['refund-2', 'DEV-000019'],
+      ]);
+    });
+
+    it('does not reveal the refunds of a shift the asker cannot see', async () => {
+      const { service, cashSessions, refundRepo } = createService();
+      cashSessions.findOne.mockRejectedValue(new NotFoundException('Turno session-9 no encontrado'));
+
+      await expect(service.findRefundsInSession(COMPANY, cashier, 'session-9')).rejects.toThrow(NotFoundException);
+      expect(refundRepo.find).not.toHaveBeenCalled();
     });
 
     it('does not reveal the lines or the refunds of a return of another company', async () => {

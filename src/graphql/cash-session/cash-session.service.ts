@@ -7,15 +7,19 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Decimal } from 'decimal.js';
-import { DataSource, EntityManager, FindOptionsWhere, Repository } from 'typeorm';
+import { DataSource, EntityManager, FindOptionsWhere, In, Repository } from 'typeorm';
 import { type CompanyAccess, loadCompanyAccess } from '../../common/access/company-access.js';
 import { PermissionCode } from '../../common/enums/permission-code.enum.js';
 import { RecordStatus } from '../../common/enums/record-status.enum.js';
 import { mapPostgresWriteError } from '../../common/utils/postgres-error.js';
 import { CashMovement } from '../cash-movement/entities/cash-movement.entity.js';
 import { CashRegister } from '../cash-register/entities/cash-register.entity.js';
+import { DiscountRequest } from '../discount-request/entities/discount-request.entity.js';
 import { LocationType } from '../location/entities/location-type.enum.js';
 import { Location } from '../location/entities/location.entity.js';
+import { SaleItem } from '../sale/entities/sale-item.entity.js';
+import { SaleStatus } from '../sale/entities/sale-status.enum.js';
+import { Sale } from '../sale/entities/sale.entity.js';
 import { SalePayment } from '../sale-payment/entities/sale-payment.entity.js';
 import { RefundPayment } from '../sale-return/entities/refund-payment.entity.js';
 import { UserLocationAccess } from '../user-location-access/entities/user-location-access.entity.js';
@@ -222,7 +226,9 @@ export class CashSessionService {
 
   // Cierra el turno con el efectivo contado. El servidor calcula lo esperado (y con el turno
   // bloqueado, así ningún cobro ni movimiento entra a medias) y la diferencia; si hay diferencia,
-  // hacen falta las notas. Lo cierra el administrador, cualquiera, no solo quien lo abrió.
+  // hacen falta las notas. Lo cierra el administrador, cualquiera, no solo quien lo abrió. Las
+  // ventas en borrador que queden sin cobrar se borran: solo se cobran en su turno, y este ya no
+  // las puede recibir.
   async close(
     companyId: string,
     actor: CashActor,
@@ -249,8 +255,28 @@ export class CashSessionService {
       session.countedAmount = counted;
       session.differenceAmount = difference;
       session.notes = notes;
+      await this.discardDraftSales(manager, session.id);
       return manager.getRepository(CashSession).save(session);
     });
+  }
+
+  // Borra del todo (no las anula: no dejan rastro ni en el histórico) las ventas que quedaron en
+  // borrador en este turno. Un borrador no movió dinero ni inventario, así que no hay nada que
+  // deshacer; solo se van con él sus líneas y sus solicitudes de descuento.
+  private async discardDraftSales(manager: EntityManager, cashSessionId: string): Promise<void> {
+    const saleRepo = manager.getRepository(Sale);
+    const drafts = await saleRepo.find({
+      where: { cashSessionId, status: SaleStatus.DRAFT },
+      select: { id: true },
+    });
+    if (drafts.length === 0) return;
+
+    const saleIds = drafts.map((sale) => sale.id);
+    // Las líneas primero: las filas de descuento por línea (discount_request_items) se van con
+    // ellas en cascada, y así ya no queda nada que impida borrar las solicitudes.
+    await manager.getRepository(SaleItem).delete({ saleId: In(saleIds) });
+    await manager.getRepository(DiscountRequest).delete({ saleId: In(saleIds) });
+    await saleRepo.delete({ id: In(saleIds) });
   }
 
   // El código del turno, para el administrador que lo tiene que dar al cajero. Solo de un turno

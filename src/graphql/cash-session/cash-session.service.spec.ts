@@ -5,15 +5,19 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { Decimal } from 'decimal.js';
-import { QueryFailedError } from 'typeorm';
+import { In, QueryFailedError } from 'typeorm';
 import { RecordStatus } from '../../common/enums/record-status.enum.js';
 import { CashMovementType } from '../cash-movement/entities/cash-movement-type.enum.js';
 import { CashMovement } from '../cash-movement/entities/cash-movement.entity.js';
 import { CashRegister } from '../cash-register/entities/cash-register.entity.js';
+import { DiscountRequest } from '../discount-request/entities/discount-request.entity.js';
 import { LocationType } from '../location/entities/location-type.enum.js';
 import { Location } from '../location/entities/location.entity.js';
 import { PaymentMethodType } from '../payment-method/entities/payment-method-type.enum.js';
 import { RolePermission } from '../role-permission/entities/role-permission.entity.js';
+import { SaleItem } from '../sale/entities/sale-item.entity.js';
+import { SaleStatus } from '../sale/entities/sale-status.enum.js';
+import { Sale } from '../sale/entities/sale.entity.js';
 import { SalePayment } from '../sale-payment/entities/sale-payment.entity.js';
 import { RefundPayment } from '../sale-return/entities/refund-payment.entity.js';
 import { UserCompanyRole } from '../user-company-role/entities/user-company-role.entity.js';
@@ -82,6 +86,10 @@ function createService() {
   const paymentRepo = { find: vi.fn().mockResolvedValue([]) };
   const movementRepo = { find: vi.fn().mockResolvedValue([]) };
   const refundRepo = { find: vi.fn().mockResolvedValue([]) };
+  // Las ventas en borrador del turno (que se borran al cerrarlo) y lo que cuelga de ellas.
+  const saleRepo = { find: vi.fn().mockResolvedValue([]), delete: vi.fn().mockResolvedValue(undefined) };
+  const saleItemRepo = { delete: vi.fn().mockResolvedValue(undefined) };
+  const discountRequestRepo = { delete: vi.fn().mockResolvedValue(undefined) };
   // Lo que lee loadCompanyAccess para saber si el cajero asignado puede cobrar: por defecto, es un
   // miembro con el rol Caja, que trae cash.register_payment.
   const membershipRepo = {
@@ -112,7 +120,13 @@ function createService() {
                   ? movementRepo
                   : entity === RefundPayment
                     ? refundRepo
-                    : undefined,
+                    : entity === Sale
+                      ? saleRepo
+                      : entity === SaleItem
+                        ? saleItemRepo
+                        : entity === DiscountRequest
+                          ? discountRequestRepo
+                          : undefined,
   };
   const dataSource = {
     manager,
@@ -140,6 +154,9 @@ function createService() {
     paymentRepo,
     movementRepo,
     refundRepo,
+    saleRepo,
+    saleItemRepo,
+    discountRequestRepo,
     membershipRepo,
     rolePermissionRepo,
     dataSource,
@@ -621,6 +638,26 @@ describe('CashSessionService', () => {
       expect(session.notes).toBe('Faltan 10.000 del cambio');
     });
 
+    it('accepts a negative count, with its difference and the notes that explain it', async () => {
+      const { service, txSessionRepo } = createService();
+      txSessionRepo.findOne.mockResolvedValue(openSession());
+
+      await expect(
+        service.close(COMPANY, admin, { cashSessionId: 'session-1', countedAmount: '-5000' }),
+      ).rejects.toThrow(BadRequestException);
+
+      const session = await service.close(COMPANY, admin, {
+        cashSessionId: 'session-1',
+        countedAmount: '-5000',
+        notes: 'La caja quedó debiendo: se pagó un reembolso de más',
+      });
+
+      expect(session.status).toBe(CashSessionStatus.CLOSED);
+      expect(session.countedAmount?.toFixed(2)).toBe('-5000.00');
+      // -5000 − 200000
+      expect(session.differenceAmount?.toFixed(2)).toBe('-205000.00');
+    });
+
     it('needs notes when there is more cash than expected, too', async () => {
       const { service, txSessionRepo } = createService();
       txSessionRepo.findOne.mockResolvedValue(openSession());
@@ -647,6 +684,47 @@ describe('CashSessionService', () => {
 
       expect(session.expectedAmount?.toFixed(2)).toBe('400000.00');
       expect(session.differenceAmount?.toFixed(2)).toBe('0.00');
+    });
+
+    it('deletes the draft sales left in the shift, with their lines and discount requests', async () => {
+      const { service, txSessionRepo, saleRepo, saleItemRepo, discountRequestRepo } = createService();
+      txSessionRepo.findOne.mockResolvedValue(openSession());
+      saleRepo.find.mockResolvedValue([{ id: 'draft-1' }, { id: 'draft-2' }]);
+
+      await service.close(COMPANY, admin, { cashSessionId: 'session-1', countedAmount: '200000' });
+
+      // Solo los borradores de ESTE turno: ni cobradas ni anuladas ni de otro turno.
+      expect(saleRepo.find).toHaveBeenCalledWith({
+        where: { cashSessionId: 'session-1', status: SaleStatus.DRAFT },
+        select: { id: true },
+      });
+      const drafts = ['draft-1', 'draft-2'];
+      expect(saleItemRepo.delete).toHaveBeenCalledWith({ saleId: In(drafts) });
+      expect(discountRequestRepo.delete).toHaveBeenCalledWith({ saleId: In(drafts) });
+      expect(saleRepo.delete).toHaveBeenCalledWith({ id: In(drafts) });
+    });
+
+    it('closes without touching sales when no draft was left', async () => {
+      const { service, txSessionRepo, saleRepo, saleItemRepo, discountRequestRepo } = createService();
+      txSessionRepo.findOne.mockResolvedValue(openSession());
+
+      await service.close(COMPANY, admin, { cashSessionId: 'session-1', countedAmount: '200000' });
+
+      expect(saleItemRepo.delete).not.toHaveBeenCalled();
+      expect(discountRequestRepo.delete).not.toHaveBeenCalled();
+      expect(saleRepo.delete).not.toHaveBeenCalled();
+    });
+
+    it('keeps the drafts when the shift cannot be closed', async () => {
+      const { service, txSessionRepo, saleRepo } = createService();
+      txSessionRepo.findOne.mockResolvedValue(openSession());
+      saleRepo.find.mockResolvedValue([{ id: 'draft-1' }]);
+
+      await expect(
+        service.close(COMPANY, admin, { cashSessionId: 'session-1', countedAmount: '190000' }),
+      ).rejects.toThrow(BadRequestException);
+
+      expect(saleRepo.delete).not.toHaveBeenCalled();
     });
 
     it('does not close a shift twice', async () => {

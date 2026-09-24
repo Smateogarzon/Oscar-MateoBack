@@ -1,6 +1,6 @@
 import { Field, ID, InputType } from '@nestjs/graphql';
 import { IsOptional, IsString, IsUUID, Matches, MaxLength } from 'class-validator';
-import { MONEY_PATTERN } from '../../../common/utils/money.js';
+import { SIGNED_MONEY_PATTERN } from '../../../common/utils/money.js';
 
 // El monto viaja como texto y se convierte a Decimal en el servicio (ver AddSaleItemInput).
 @InputType()
@@ -9,11 +9,11 @@ export class CloseCashSessionInput {
   @IsUUID()
   cashSessionId: string;
 
-  // El efectivo que el cajero contó en la caja, ej: "348500". El servidor calcula lo esperado y
-  // la diferencia.
+  // El efectivo que el cajero contó en la caja, ej: "348500". Puede ser negativo ("-5000"). El
+  // servidor calcula lo esperado y la diferencia.
   @Field()
-  @Matches(MONEY_PATTERN, {
-    message: 'countedAmount debe ser un monto con hasta 2 decimales, por ejemplo 348500',
+  @Matches(SIGNED_MONEY_PATTERN, {
+    message: 'countedAmount debe ser un monto con hasta 2 decimales, por ejemplo 348500 o -5000',
   })
   countedAmount: string;
 
