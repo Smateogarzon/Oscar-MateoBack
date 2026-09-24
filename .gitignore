@@ -24,6 +24,10 @@ npm-debug.log*
 # archivos subidos (avatares, etc.) — almacenamiento local temporal hasta S3
 /uploads
 
+# dumps de la base de producción (scripts/db-pull-prod.sh): traen datos reales
+/backups
+*.dump
+
 # IDE
 .vscode/*
 !.vscode/settings.json
