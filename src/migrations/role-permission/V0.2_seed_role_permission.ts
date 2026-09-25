@@ -1,4 +1,5 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
+import { assertDestructiveDownAllowed } from '../../config/destructive-down.js';
 
 // Asigna a cada rol sus permisos reales. Corre después de los seeds de "role" y
 // "permission" (timestamps 1789598255954 y 1789598255955).
@@ -59,6 +60,7 @@ export class SeedRolePermission1789598255956 implements MigrationInterface {
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
+    assertDestructiveDownAllowed(this.name);
     await queryRunner.query(`DELETE FROM "role_permissions"`);
   }
 }

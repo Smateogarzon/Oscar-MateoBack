@@ -18,7 +18,8 @@
     "migration:run": "typeorm-ts-node-esm migration:run -d ./src/data-source.ts",
     "migration:revert": "typeorm-ts-node-esm migration:revert -d ./src/data-source.ts",
     "migration:run:prod": "typeorm migration:run -d dist/data-source.js",
-    "migration:revert:prod": "typeorm migration:revert -d dist/data-source.js",
+    "migration:revert:prod": "node dist/config/require-destructive-ok.js && typeorm migration:revert -d dist/data-source.js",
+    "check:env:prod": "node dist/config/check-env.js",
     "create:admin": "node --no-warnings=ExperimentalWarning --loader ts-node/esm src/scripts/create-admin.ts",
     "create:admin:prod": "node dist/scripts/create-admin.js",
     "lint": "oxlint src/ test/",
@@ -49,6 +50,7 @@
     "dayjs": "^1.11.23",
     "decimal.js": "^10.6.0",
     "graphql": "^16.14.2",
+    "graphql-ws": "^6.2.2",
     "helmet": "^8.3.0",
     "joi": "^18.2.8",
     "nestjs-pino": "^5.1.0",
@@ -57,7 +59,8 @@
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",
     "sharp": "^0.35.4",
-    "typeorm": "^1.1.1"
+    "typeorm": "^1.1.1",
+    "ws": "^8.21.3"
   },
   "overrides": {
     "multer": "2.3.0"
@@ -71,6 +74,7 @@
     "@types/express": "^5.0.0",
     "@types/node": "^24.0.0",
     "@types/supertest": "^7.0.0",
+    "@types/ws": "^8.18.1",
     "@vitest/coverage-v8": "^4.1.2",
     "oxlint": "^1.58.0",
     "pino-pretty": "^13.1.3",

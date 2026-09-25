@@ -2,6 +2,8 @@ import { UseGuards } from '@nestjs/common';
 import { Args, ID, Mutation, Query, Resolver } from '@nestjs/graphql';
 import { assertActiveCompany } from '../../common/access/assert-active-company.js';
 import { CurrentCompanyId } from '../../common/decorators/current-company.decorator.js';
+import { CurrentUser } from '../../common/decorators/current-user.decorator.js';
+import { IdempotencyKeyHeader } from '../../common/decorators/idempotency-key.decorator.js';
 import {
   RequireCompanyMembership,
   RequirePermissions,
@@ -11,6 +13,7 @@ import { RecordStatus } from '../../common/enums/record-status.enum.js';
 import { CsrfGuard } from '../../common/guards/csrf.guard.js';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard.js';
 import { PermissionsGuard } from '../../common/guards/permissions.guard.js';
+import type { JwtPayload } from '../auth/interface/jwt-payload.interface.js';
 import { CreateLocationInput } from './dto/create-location.input.js';
 import { LocationObjectType } from './dto/location.object-type.js';
 import { UpdateLocationInput } from './dto/update-location.input.js';
@@ -48,9 +51,11 @@ export class LocationResolver {
   @RequirePermissions(PermissionCode.SETTINGS_MANAGE)
   createLocation(
     @CurrentCompanyId() companyId: string,
+    @CurrentUser() currentUser: JwtPayload,
     @Args('input') input: CreateLocationInput,
+    @IdempotencyKeyHeader() idempotencyKey?: string,
   ) {
-    return this.locationService.create(companyId, input);
+    return this.locationService.create(companyId, currentUser.sub, input, idempotencyKey);
   }
 
   @Mutation(() => LocationObjectType)
@@ -70,5 +75,14 @@ export class LocationResolver {
     @Args('id', { type: () => ID }) id: string,
   ) {
     return this.locationService.deactivate(companyId, id);
+  }
+
+  @Mutation(() => LocationObjectType)
+  @RequirePermissions(PermissionCode.SETTINGS_MANAGE)
+  activateLocation(
+    @CurrentCompanyId() companyId: string,
+    @Args('id', { type: () => ID }) id: string,
+  ) {
+    return this.locationService.activate(companyId, id);
   }
 }

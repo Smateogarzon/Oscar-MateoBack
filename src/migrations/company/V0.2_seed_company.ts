@@ -1,4 +1,5 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
+import { assertDestructiveDownAllowed } from '../../config/destructive-down.js';
 
 // Compañías ficticias para poder probar el resto del sistema (incluido trabajar con varias
 // empresas) mientras se arma el flujo real. Los permisos de cada rol por empresa los reparte
@@ -19,6 +20,7 @@ export class SeedCompany1789598255953 implements MigrationInterface {
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
+    assertDestructiveDownAllowed(this.name);
     await queryRunner.query(`
       DELETE FROM "companies" WHERE "id" IN (
         '10000000-0000-4000-8000-000000000001',

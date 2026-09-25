@@ -1,5 +1,6 @@
 import { BadRequestException, Body, Controller, Inject, Post, Req, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
+import { seconds, Throttle } from '@nestjs/throttler';
 import type { Request } from 'express';
 import { CsrfGuard } from '../common/guards/csrf.guard.js';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard.js';
@@ -18,6 +19,8 @@ const ALLOWED_MIME_PREFIX = 'image/';
 export class UploadController {
   constructor(@Inject(STORAGE_SERVICE) private readonly storage: StorageService) {}
 
+  // Subir es caro (decodificar y recomprimir): 20 por minuto por IP alcanza para las fotos de perfil.
+  @Throttle({ default: { limit: 20, ttl: seconds(60) } })
   @Post('image')
   @UseInterceptors(FileInterceptor('file', { limits: { fileSize: MAX_IMAGE_SIZE_BYTES } }))
   async uploadImage(

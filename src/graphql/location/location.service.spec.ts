@@ -1,27 +1,88 @@
-import { ForbiddenException, NotFoundException } from '@nestjs/common';
+import { ConflictException, ForbiddenException, NotFoundException } from '@nestjs/common';
+import { In } from 'typeorm';
 import { RecordStatus } from '../../common/enums/record-status.enum.js';
+import { CashRegister } from '../cash-register/entities/cash-register.entity.js';
+import { CashSessionStatus } from '../cash-session/entities/cash-session-status.enum.js';
+import { CashSession } from '../cash-session/entities/cash-session.entity.js';
+import { IdempotencyKey } from '../idempotency/entities/idempotency-key.entity.js';
+import { fingerprintOf } from '../idempotency/idempotency.js';
+import { PaymentMethod } from '../payment-method/entities/payment-method.entity.js';
+import { StorePaymentMethod } from '../store-payment-method/entities/store-payment-method.entity.js';
 import { LocationType } from './entities/location-type.enum.js';
 import { LocationService } from './location.service.js';
+
+// Reclamar la clave de idempotencia (INSERT ... RETURNING) devuelve la fila reclamada: la clave era
+// nueva. El UPDATE que la enlaza con lo que se creó no devuelve nada.
+const claimKey = (sql: string) =>
+  sql.includes('INSERT INTO "idempotency_keys"') ? [{ id: 'claim-1' }] : [];
 
 function createService() {
   const repo = {
     find: vi.fn(),
     findOneBy: vi.fn(),
   };
+  // La sede que se lee YA bloqueada dentro de la transacción. Por defecto es la misma que devuelve
+  // `repo.findOneBy` (lo que cada prueba prepara), a menos que una prueba diga que en el ínterin
+  // cambió (`transactionRepo.findOne.mockResolvedValue(...)`).
   const transactionRepo = {
+    findOne: vi.fn(async () => repo.findOneBy({})),
+    // Lo que devuelve un reintento con la misma clave de idempotencia: la sede que ya se creó.
+    findOneByOrFail: vi.fn(),
     create: vi.fn((data: object) => data),
     save: vi.fn(async (location: object) => ({ id: '1', ...location })),
   };
+  const cashRegisterRepo = {
+    create: vi.fn((data: object) => data),
+    save: vi.fn(async (register: object) => ({ id: 'register-1', ...register })),
+    // Por defecto la tienda no tiene cajas: cada prueba pone las que necesita.
+    find: vi.fn().mockResolvedValue([]),
+    findOneBy: vi.fn().mockResolvedValue(null),
+  };
+  const cashSessionRepo = { existsBy: vi.fn().mockResolvedValue(false) };
+  // Los medios de pago de la empresa y lo que acepta la tienda nueva (ver allowAllPaymentMethods).
+  const paymentMethodRepo = { find: vi.fn().mockResolvedValue([{ id: 'cash' }, { id: 'card' }]) };
+  const storePaymentMethodRepo = {
+    find: vi.fn().mockResolvedValue([]),
+    create: vi.fn((data: object) => data),
+    save: vi.fn(async (rows: object[]) => rows),
+  };
+  // Las claves de idempotencia ya reclamadas: por defecto, ninguna (la petición es nueva).
+  const idempotencyRepo = { findOneBy: vi.fn().mockResolvedValue(null) };
+  const manager = {
+    getRepository: (entity: unknown) =>
+      entity === CashRegister
+        ? cashRegisterRepo
+        : entity === CashSession
+          ? cashSessionRepo
+          : entity === PaymentMethod
+            ? paymentMethodRepo
+            : entity === StorePaymentMethod
+              ? storePaymentMethodRepo
+              : entity === IdempotencyKey
+                ? idempotencyRepo
+                : transactionRepo,
+    // Solo lo usa la idempotencia (reclamar la clave y enlazarla con lo creado).
+    query: vi.fn(async (sql: string) => claimKey(sql)),
+  };
   const dataSource = {
-    transaction: vi.fn(async (fn: (manager: unknown) => unknown) =>
-      fn({ getRepository: () => transactionRepo }),
-    ),
+    transaction: vi.fn(async (fn: (manager: unknown) => unknown) => fn(manager)),
   };
   const service = new LocationService(repo as never, dataSource as never);
-  return { service, repo, transactionRepo, dataSource };
+  return {
+    service,
+    repo,
+    transactionRepo,
+    cashRegisterRepo,
+    cashSessionRepo,
+    storePaymentMethodRepo,
+    idempotencyRepo,
+    dataSource,
+    manager,
+  };
 }
 
 const COMPANY = 'company-1';
+const USER = 'user-1';
 
 const input = {
   companyId: COMPANY,
@@ -56,19 +117,186 @@ describe('LocationService', () => {
     it('creates a location inside a transaction', async () => {
       const { service, dataSource } = createService();
 
-      const location = await service.create(COMPANY, input);
+      const location = await service.create(COMPANY, USER, input);
 
       expect(dataSource.transaction).toHaveBeenCalled();
       expect(location).toMatchObject(input);
     });
 
+    it('gives a new store its cash register, named after the store, in the same transaction', async () => {
+      const { service, cashRegisterRepo, dataSource } = createService();
+
+      await service.create(COMPANY, USER, input);
+
+      expect(dataSource.transaction).toHaveBeenCalledTimes(1);
+      expect(cashRegisterRepo.create).toHaveBeenCalledWith({
+        storeId: '1',
+        name: 'Sede principal',
+        code: 'C1',
+      });
+      expect(cashRegisterRepo.save).toHaveBeenCalledTimes(1);
+    });
+
+    it('cuts the store name to what a cash register name admits', async () => {
+      const { service, cashRegisterRepo } = createService();
+
+      await service.create(COMPANY, USER, { ...input, name: 'A'.repeat(120) });
+
+      expect(cashRegisterRepo.create.mock.calls[0][0].name).toHaveLength(80);
+    });
+
+    it('does not give a warehouse a cash register', async () => {
+      const { service, cashRegisterRepo } = createService();
+
+      const location = await service.create(COMPANY, USER, {
+        ...input,
+        type: LocationType.WAREHOUSE,
+      });
+
+      expect(location.type).toBe(LocationType.WAREHOUSE);
+      expect(cashRegisterRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('lets a new store accept every payment method of the company', async () => {
+      const { service, storePaymentMethodRepo } = createService();
+
+      await service.create(COMPANY, USER, input);
+
+      expect(storePaymentMethodRepo.save).toHaveBeenCalledWith([
+        { storeId: '1', paymentMethodId: 'cash' },
+        { storeId: '1', paymentMethodId: 'card' },
+      ]);
+    });
+
+    it('a warehouse accepts nothing: it does not sell', async () => {
+      const { service, storePaymentMethodRepo } = createService();
+
+      await service.create(COMPANY, USER, { ...input, type: LocationType.WAREHOUSE });
+
+      expect(storePaymentMethodRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('fails as a whole when the cash register cannot be saved, so the store is not left without one', async () => {
+      const { service, cashRegisterRepo } = createService();
+      cashRegisterRepo.save.mockRejectedValue(new Error('boom'));
+
+      await expect(service.create(COMPANY, USER, input)).rejects.toThrow('boom');
+    });
+
     it('rejects an input that points at another company, before touching the database', async () => {
       const { service, dataSource } = createService();
 
-      await expect(service.create(COMPANY, { ...input, companyId: 'company-2' })).rejects.toThrow(
-        ForbiddenException,
-      );
+      await expect(
+        service.create(COMPANY, USER, { ...input, companyId: 'company-2' }),
+      ).rejects.toThrow(ForbiddenException);
       expect(dataSource.transaction).not.toHaveBeenCalled();
+    });
+
+    describe('with an idempotency key', () => {
+      it('claims the key in the same transaction as the creation, before saving anything, and links it to the new location', async () => {
+        const { service, manager, dataSource, transactionRepo } = createService();
+
+        const location = await service.create(COMPANY, USER, input, 'key-1');
+
+        expect(dataSource.transaction).toHaveBeenCalledTimes(1);
+        expect(manager.query).toHaveBeenNthCalledWith(
+          1,
+          expect.stringContaining('INSERT INTO "idempotency_keys"'),
+          [COMPANY, USER, 'createLocation', 'key-1', fingerprintOf(input)],
+        );
+        expect(manager.query).toHaveBeenNthCalledWith(
+          2,
+          expect.stringContaining('UPDATE "idempotency_keys"'),
+          ['claim-1', 'location', '1'],
+        );
+        expect(manager.query.mock.invocationCallOrder[0]).toBeLessThan(
+          transactionRepo.save.mock.invocationCallOrder[0],
+        );
+        expect(location).toMatchObject(input);
+      });
+
+      it('claims nothing without a key: it works as before', async () => {
+        const { service, manager, idempotencyRepo, transactionRepo, cashRegisterRepo } =
+          createService();
+
+        await service.create(COMPANY, USER, input);
+
+        expect(manager.query).not.toHaveBeenCalled();
+        expect(idempotencyRepo.findOneBy).not.toHaveBeenCalled();
+        expect(transactionRepo.save).toHaveBeenCalledTimes(1);
+        expect(cashRegisterRepo.save).toHaveBeenCalledTimes(1);
+      });
+
+      it('a repeated request (double click on "Create store") gets back the same location, without a second store, cash register or copy of the payment methods', async () => {
+        const {
+          service,
+          manager,
+          idempotencyRepo,
+          transactionRepo,
+          cashRegisterRepo,
+          storePaymentMethodRepo,
+        } = createService();
+        // La clave ya estaba reclamada por la primera petición, que creó la sede '1'
+        manager.query.mockResolvedValue([]);
+        idempotencyRepo.findOneBy.mockResolvedValue({
+          fingerprint: fingerprintOf(input),
+          resourceId: '1',
+        });
+        const first = { id: '1', ...input, status: RecordStatus.ACTIVE };
+        transactionRepo.findOneByOrFail.mockResolvedValue(first);
+
+        const location = await service.create(COMPANY, USER, input, 'key-1');
+
+        expect(idempotencyRepo.findOneBy).toHaveBeenCalledWith({
+          companyId: COMPANY,
+          userId: USER,
+          operation: 'createLocation',
+          key: 'key-1',
+        });
+        expect(transactionRepo.findOneByOrFail).toHaveBeenCalledWith({ id: '1' });
+        expect(location).toBe(first);
+        // Nada de lo que crea una tienda nueva se vuelve a crear: son cosas que además no se pueden borrar
+        expect(transactionRepo.save).not.toHaveBeenCalled();
+        expect(cashRegisterRepo.save).not.toHaveBeenCalled();
+        expect(storePaymentMethodRepo.save).not.toHaveBeenCalled();
+      });
+
+      it('the same key with other data is not a retry: it is refused and nothing is created', async () => {
+        const { service, manager, idempotencyRepo, transactionRepo, cashRegisterRepo } =
+          createService();
+        manager.query.mockResolvedValue([]);
+        idempotencyRepo.findOneBy.mockResolvedValue({
+          fingerprint: fingerprintOf({ ...input, name: 'Otra sede' }),
+          resourceId: '1',
+        });
+
+        await expect(service.create(COMPANY, USER, input, 'key-1')).rejects.toThrow(
+          ConflictException,
+        );
+        expect(transactionRepo.findOneByOrFail).not.toHaveBeenCalled();
+        expect(transactionRepo.save).not.toHaveBeenCalled();
+        expect(cashRegisterRepo.save).not.toHaveBeenCalled();
+      });
+
+      it('a creation that fails does not link the key to anything', async () => {
+        const { service, manager, cashRegisterRepo } = createService();
+        cashRegisterRepo.save.mockRejectedValue(new Error('boom'));
+
+        await expect(service.create(COMPANY, USER, input, 'key-1')).rejects.toThrow('boom');
+
+        // Solo el INSERT que reclama (que se deshace con la transacción); nunca el UPDATE que la enlaza
+        expect(manager.query).toHaveBeenCalledTimes(1);
+      });
+
+      it('rejects an input that points at another company before claiming the key', async () => {
+        const { service, manager, dataSource } = createService();
+
+        await expect(
+          service.create(COMPANY, USER, { ...input, companyId: 'company-2' }, 'key-1'),
+        ).rejects.toThrow(ForbiddenException);
+        expect(dataSource.transaction).not.toHaveBeenCalled();
+        expect(manager.query).not.toHaveBeenCalled();
+      });
     });
   });
 
@@ -90,6 +318,83 @@ describe('LocationService', () => {
       await expect(service.update(COMPANY, '9', { name: 'X' })).rejects.toThrow(NotFoundException);
       expect(dataSource.transaction).not.toHaveBeenCalled();
     });
+
+    it('changes the location it reads under the lock, so it does not undo what somebody else changed meanwhile', async () => {
+      const { service, repo, transactionRepo } = createService();
+      // Lo que se leyó al comprobar la empresa, y lo que hay cuando la sede ya está bloqueada:
+      // mientras tanto otro administrador la desactivó.
+      repo.findOneBy.mockResolvedValue({ id: '1', ...input, status: RecordStatus.ACTIVE });
+      transactionRepo.findOne.mockResolvedValue({ id: '1', ...input, status: RecordStatus.INACTIVE });
+
+      const result = await service.update(COMPANY, '1', { name: 'Sede norte' });
+
+      expect(transactionRepo.findOne).toHaveBeenCalledWith({
+        where: { id: '1', companyId: COMPANY },
+        lock: { mode: 'pessimistic_write' },
+      });
+      expect(result.status).toBe(RecordStatus.INACTIVE);
+      expect(result.name).toBe('Sede norte');
+    });
+
+    it('answers "not found" when the location disappears before it can be locked', async () => {
+      const { service, repo, transactionRepo } = createService();
+      repo.findOneBy.mockResolvedValue({ id: '1', ...input, status: RecordStatus.ACTIVE });
+      transactionRepo.findOne.mockResolvedValue(null);
+
+      await expect(service.update(COMPANY, '1', { name: 'X' })).rejects.toThrow(NotFoundException);
+      expect(transactionRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('renames the cash register that was born with the store, so both keep the same name', async () => {
+      const { service, repo, cashRegisterRepo } = createService();
+      repo.findOneBy.mockResolvedValue({ id: '1', ...input, status: RecordStatus.ACTIVE });
+      cashRegisterRepo.find.mockResolvedValue([
+        { id: 'register-1', name: 'Sede principal', code: 'C1' },
+        { id: 'register-2', name: 'Caja 2', code: 'C2' },
+      ]);
+
+      await service.update(COMPANY, '1', { name: 'Sede norte' });
+
+      // Las cajas de la tienda se bloquean, en orden, antes de tocar la que nació con ella
+      expect(cashRegisterRepo.find).toHaveBeenCalledWith({
+        where: { storeId: '1' },
+        order: { id: 'ASC' },
+        lock: { mode: 'pessimistic_write' },
+      });
+      expect(cashRegisterRepo.save).toHaveBeenCalledTimes(1);
+      expect(cashRegisterRepo.save).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'register-1', name: 'Sede norte' }),
+      );
+    });
+
+    it('does not touch a register someone renamed by hand', async () => {
+      const { service, repo, cashRegisterRepo } = createService();
+      repo.findOneBy.mockResolvedValue({ id: '1', ...input, status: RecordStatus.ACTIVE });
+      cashRegisterRepo.find.mockResolvedValue([
+        { id: 'register-1', name: 'Caja de la entrada', code: 'C1' },
+      ]);
+
+      await service.update(COMPANY, '1', { name: 'Sede norte' });
+
+      expect(cashRegisterRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('does not look for a register when the name did not change, nor for a warehouse', async () => {
+      const { service, repo, cashRegisterRepo } = createService();
+      repo.findOneBy.mockResolvedValue({ id: '1', ...input, status: RecordStatus.ACTIVE });
+
+      await service.update(COMPANY, '1', { city: 'Bogotá' });
+      expect(cashRegisterRepo.find).not.toHaveBeenCalled();
+
+      repo.findOneBy.mockResolvedValue({
+        id: '1',
+        ...input,
+        type: LocationType.WAREHOUSE,
+        status: RecordStatus.ACTIVE,
+      });
+      await service.update(COMPANY, '1', { name: 'Bodega norte' });
+      expect(cashRegisterRepo.find).not.toHaveBeenCalled();
+    });
   });
 
   describe('deactivate', () => {
@@ -108,6 +413,118 @@ describe('LocationService', () => {
       repo.findOneBy.mockResolvedValue(null);
 
       await expect(service.deactivate(COMPANY, '9')).rejects.toThrow(NotFoundException);
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+    });
+
+    it('refuses while one of its registers has an open shift: it has to be closed with its count first', async () => {
+      const { service, repo, cashRegisterRepo, cashSessionRepo, transactionRepo } = createService();
+      repo.findOneBy.mockResolvedValue({ id: '1', ...input, status: RecordStatus.ACTIVE });
+      cashRegisterRepo.find.mockResolvedValue([{ id: 'register-1' }, { id: 'register-2' }]);
+      cashSessionRepo.existsBy.mockResolvedValue(true);
+
+      await expect(service.deactivate(COMPANY, '1')).rejects.toThrow(ConflictException);
+      expect(cashSessionRepo.existsBy).toHaveBeenCalledWith({
+        cashRegisterId: In(['register-1', 'register-2']),
+        status: CashSessionStatus.OPEN,
+      });
+      // La tienda se queda como estaba.
+      expect(transactionRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('goes through when its registers have no open shift', async () => {
+      const { service, repo, cashRegisterRepo } = createService();
+      repo.findOneBy.mockResolvedValue({ id: '1', ...input, status: RecordStatus.ACTIVE });
+      cashRegisterRepo.find.mockResolvedValue([{ id: 'register-1' }]);
+
+      const result = await service.deactivate(COMPANY, '1');
+
+      expect(result.status).toBe(RecordStatus.INACTIVE);
+    });
+
+    it('locks the location first and then its registers, and only then looks for an open shift', async () => {
+      const { service, repo, transactionRepo, cashRegisterRepo, cashSessionRepo } = createService();
+      repo.findOneBy.mockResolvedValue({ id: '1', ...input, status: RecordStatus.ACTIVE });
+      cashRegisterRepo.find.mockResolvedValue([{ id: 'register-1' }]);
+
+      await service.deactivate(COMPANY, '1');
+
+      expect(transactionRepo.findOne).toHaveBeenCalledWith({
+        where: { id: '1', companyId: COMPANY },
+        lock: { mode: 'pessimistic_write' },
+      });
+      expect(cashRegisterRepo.find).toHaveBeenCalledWith({
+        where: { storeId: '1' },
+        order: { id: 'ASC' },
+        lock: { mode: 'pessimistic_write' },
+      });
+      const order = (mock: { mock: { invocationCallOrder: number[] } }) => mock.mock.invocationCallOrder[0];
+      expect(order(transactionRepo.findOne)).toBeLessThan(order(cashRegisterRepo.find));
+      expect(order(cashRegisterRepo.find)).toBeLessThan(order(cashSessionRepo.existsBy));
+    });
+
+    it('deactivates the location it reads under the lock, and keeps what else was changed meanwhile', async () => {
+      const { service, repo, transactionRepo } = createService();
+      repo.findOneBy.mockResolvedValue({ id: '1', ...input, status: RecordStatus.ACTIVE });
+      transactionRepo.findOne.mockResolvedValue({
+        id: '1',
+        ...input,
+        name: 'Sede norte',
+        status: RecordStatus.ACTIVE,
+      });
+
+      const result = await service.deactivate(COMPANY, '1');
+
+      expect(result.name).toBe('Sede norte');
+      expect(result.status).toBe(RecordStatus.INACTIVE);
+    });
+
+    it('does not ask about shifts when the location has no registers (a warehouse)', async () => {
+      const { service, repo, cashSessionRepo } = createService();
+      repo.findOneBy.mockResolvedValue({ id: '1', ...input, status: RecordStatus.ACTIVE });
+
+      await service.deactivate(COMPANY, '1');
+
+      expect(cashSessionRepo.existsBy).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('activate', () => {
+    it('puts a location back in service inside a transaction', async () => {
+      const { service, repo, dataSource } = createService();
+      repo.findOneBy.mockResolvedValue({ id: '1', ...input, status: RecordStatus.INACTIVE });
+
+      const result = await service.activate(COMPANY, '1');
+
+      expect(dataSource.transaction).toHaveBeenCalled();
+      expect(result.status).toBe(RecordStatus.ACTIVE);
+    });
+
+    it('locks the location before changing it', async () => {
+      const { service, repo, transactionRepo } = createService();
+      repo.findOneBy.mockResolvedValue({ id: '1', ...input, status: RecordStatus.INACTIVE });
+
+      await service.activate(COMPANY, '1');
+
+      expect(transactionRepo.findOne).toHaveBeenCalledWith({
+        where: { id: '1', companyId: COMPANY },
+        lock: { mode: 'pessimistic_write' },
+      });
+    });
+
+    it('does not create another cash register: the store keeps the ones it had', async () => {
+      const { service, repo, cashRegisterRepo } = createService();
+      repo.findOneBy.mockResolvedValue({ id: '1', ...input, status: RecordStatus.INACTIVE });
+
+      await service.activate(COMPANY, '1');
+
+      expect(cashRegisterRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('cannot reach a location of another company by id', async () => {
+      const { service, repo, dataSource } = createService();
+      repo.findOneBy.mockResolvedValue(null);
+
+      await expect(service.activate(COMPANY, '9')).rejects.toThrow(NotFoundException);
       expect(dataSource.transaction).not.toHaveBeenCalled();
     });
   });

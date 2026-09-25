@@ -1,4 +1,5 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
+import { assertDestructiveDownAllowed } from '../../config/destructive-down.js';
 
 // Los permisos de cada rol pasan de ser globales a ser por empresa. Escrita a mano (no
 // generada) porque producción ya tiene filas en role_permissions: hay que copiarlas a cada
@@ -31,6 +32,7 @@ export class AddCompanyToRolePermission1789684655960 implements MigrationInterfa
   // Al volver a permisos globales se pierde lo que cada empresa haya personalizado: queda
   // una sola fila por (rol, permiso).
   public async down(queryRunner: QueryRunner): Promise<void> {
+    assertDestructiveDownAllowed(this.name);
     await queryRunner.query(`ALTER TABLE "role_permissions" DROP CONSTRAINT "FK_role_permissions_company"`);
     await queryRunner.query(`DROP INDEX "public"."IDX_role_permissions_company_role_permission"`);
     await queryRunner.query(`

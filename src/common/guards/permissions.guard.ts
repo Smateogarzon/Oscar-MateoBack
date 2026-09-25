@@ -11,7 +11,11 @@ import { isUUID } from 'class-validator';
 import { DataSource } from 'typeorm';
 import { COMPANY_HEADER } from '../../graphql/auth/auth-cookie.constants.js';
 import { loadCompanyAccess } from '../access/company-access.js';
-import { ACCESS_RULE_KEY, type AccessRule } from '../decorators/permissions.decorator.js';
+import {
+  ACCESS_RULE_KEY,
+  AUTH_ONLY_KEY,
+  type AccessRule,
+} from '../decorators/permissions.decorator.js';
 import { getRequestFromContext } from '../utils/request-from-context.util.js';
 
 // Deja pasar solo si el usuario cumple la regla de acceso de la operación (ver
@@ -26,11 +30,13 @@ export class PermissionsGuard implements CanActivate {
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
-    const rule = this.reflector.getAllAndOverride<AccessRule | undefined>(ACCESS_RULE_KEY, [
-      context.getHandler(),
-      context.getClass(),
-    ]);
-    if (!rule) return true;
+    const targets = [context.getHandler(), context.getClass()];
+    const rule = this.reflector.getAllAndOverride<AccessRule | undefined>(ACCESS_RULE_KEY, targets);
+    if (!rule) {
+      // Cerrado por defecto: sin regla, solo pasa lo que se marcó a propósito como "solo sesión".
+      if (this.reflector.getAllAndOverride<boolean | undefined>(AUTH_ONLY_KEY, targets)) return true;
+      throw new ForbiddenException('Esta operación no tiene una regla de acceso definida');
+    }
 
     const req = getRequestFromContext(context);
     const user = req.user;

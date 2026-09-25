@@ -5,10 +5,33 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Una dependencia puede volverse vulnerable sin que cambie el código: el audit corre también
+  # cada lunes (solo el job audit; el resto de jobs se salta con este disparador).
+  schedule:
+    - cron: '0 12 * * 1'
+
+permissions:
+  contents: read
 
 jobs:
   build-and-test:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
+    # Postgres vacío para comprobar que las migraciones se aplican de cero (ver el último paso).
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: ci_migrations
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ci -d ci_migrations"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
 
@@ -29,8 +52,32 @@ jobs:
       - name: Test
         run: npm test
 
+      # Un fallo de migraciones se ve aquí, antes del deploy, y no al reemplazar el servidor. Las
+      # variables DB_* solo existen en este paso: `npm test` no se conecta a este Postgres.
+      - name: Migrations on empty database
+        run: npm run migration:run
+        env:
+          DB_HOST: localhost
+          DB_PORT: '5432'
+          DB_USER: ci
+          DB_PASSWORD: ci
+          DB_NAME: ci_migrations
+
+  # Vulnerabilidades de las dependencias que llegan a producción. No detiene nada (las
+  # advisories nuevas no deben bloquear un despliegue): se revisa el resultado a mano.
+  audit:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # npm audit lee package-lock.json: no hace falta instalar.
       - name: Audit (high/critical only)
-        run: npm audit --audit-level=high
+        run: npm audit --omit=dev --audit-level=high
 
   # Solo en push a main y solo si build-and-test pasó. Los PR nunca despliegan.
   deploy:
@@ -38,7 +85,9 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: production
-    # Un despliegue a la vez: si llega otro merge mientras tanto, espera en vez de cancelar.
+    # Un despliegue a la vez (también frente al workflow Rollback, que usa el mismo grupo): si
+    # llega otro merge mientras tanto, espera en vez de cancelar. Va aquí y no a nivel de workflow
+    # porque ese grupo también serializaría el CI de los PR.
     concurrency:
       group: deploy-production
       cancel-in-progress: false
@@ -53,18 +102,39 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: aws-actions/configure-aws-credentials@v4
+      # Si mientras este job esperaba turno llegó otro commit a main, este ya no es el último: no
+      # se despliega (el commit nuevo tiene su propio despliegue) para no dejar una versión vieja
+      # arriba. Tampoco se despliega un commit viejo al re-ejecutar un run antiguo.
+      - name: Check this commit is still the tip of main
+        id: tip
+        run: |
+          latest=$(git ls-remote origin refs/heads/main | cut -f1)
+          if [ -z "$latest" ]; then
+            echo "No pude consultar la punta de main en el repositorio." >&2
+            exit 1
+          fi
+          if [ "$latest" = "$GITHUB_SHA" ]; then
+            echo "stale=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Hay un commit más nuevo en main ($latest): no se despliega $GITHUB_SHA."
+            echo "stale=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - if: steps.tip.outputs.stale == 'false'
+        uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::384078510350:role/github-deploy-role
           aws-region: ${{ env.AWS_REGION }}
 
       - id: ecr
+        if: steps.tip.outputs.stale == 'false'
         uses: aws-actions/amazon-ecr-login@v2
 
       # Las etiquetas en ECR son inmutables: si se re-ejecuta el despliegue de un commit,
       # la imagen ya existe y se salta el build en vez de fallar al subirla.
       - name: Check if image already exists
         id: image
+        if: steps.tip.outputs.stale == 'false'
         run: |
           if aws ecr describe-images --repository-name "$ECR_REPOSITORY" --image-ids imageTag="$IMAGE_TAG" > /dev/null 2>&1; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
@@ -72,11 +142,11 @@ jobs:
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - if: steps.image.outputs.exists == 'false'
+      - if: steps.tip.outputs.stale == 'false' && steps.image.outputs.exists == 'false'
         uses: docker/setup-buildx-action@v3
 
       - name: Build and push image
-        if: steps.image.outputs.exists == 'false'
+        if: steps.tip.outputs.stale == 'false' && steps.image.outputs.exists == 'false'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -88,6 +158,7 @@ jobs:
 
       # Copia al servidor la versión actual de docker-compose.yml y deploy.sh, y despliega.
       - name: Deploy on server
+        if: steps.tip.outputs.stale == 'false'
         run: |
           {
             echo "set -e"

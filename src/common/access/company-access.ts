@@ -1,7 +1,10 @@
 import { In, type DataSource } from 'typeorm';
+import { CompanyStatus } from '../../graphql/company/entities/company-status.enum.js';
+import { Company } from '../../graphql/company/entities/company.entity.js';
 import { RolePermission } from '../../graphql/role-permission/entities/role-permission.entity.js';
 import { UserCompanyRole } from '../../graphql/user-company-role/entities/user-company-role.entity.js';
 import { RecordStatus } from '../enums/record-status.enum.js';
+import { isPlatformRole } from './platform-role.js';
 
 // Lo que un usuario puede hacer dentro de UNA empresa.
 export interface CompanyAccess {
@@ -24,6 +27,17 @@ export async function loadCompanyAccess(
     relations: { role: true },
   });
   if (memberships.length === 0) return null;
+
+  // Una empresa suspendida o inactiva no opera: sin esto, "suspender" una empresa solo la ocultaba del
+  // selector y quienes ya tenían sesión (o mandaban la cabecera x-company-id) seguían vendiendo. El rol
+  // de plataforma sí pasa: es quien la administra.
+  const isPlatformMember = memberships.some((membership) => isPlatformRole(membership.role));
+  if (!isPlatformMember) {
+    const companyActive = await dataSource
+      .getRepository(Company)
+      .existsBy({ id: companyId, status: CompanyStatus.ACTIVE });
+    if (!companyActive) return null;
+  }
 
   const roles = memberships
     .map((membership) => membership.role)

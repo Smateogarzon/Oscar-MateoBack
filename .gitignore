@@ -10,6 +10,11 @@
 .env.*
 !.env.example
 
+# llaves y certificados (p. ej. la llave privada de QZ Tray): nunca al repositorio
+*.pem
+*.key
+*.p12
+
 # logs
 logs
 *.log
@@ -23,6 +28,10 @@ npm-debug.log*
 
 # archivos subidos (avatares, etc.) — almacenamiento local temporal hasta S3
 /uploads
+
+# dumps de la base de producción (scripts/db-pull-prod.sh): traen datos reales
+/backups
+*.dump
 
 # IDE
 .vscode/*

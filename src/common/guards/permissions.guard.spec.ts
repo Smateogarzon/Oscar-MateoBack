@@ -1,8 +1,9 @@
 import { BadRequestException, ForbiddenException, UnauthorizedException } from '@nestjs/common';
 import { GqlExecutionContext } from '@nestjs/graphql';
+import { Company } from '../../graphql/company/entities/company.entity.js';
 import { RolePermission } from '../../graphql/role-permission/entities/role-permission.entity.js';
 import { UserCompanyRole } from '../../graphql/user-company-role/entities/user-company-role.entity.js';
-import type { AccessRule } from '../decorators/permissions.decorator.js';
+import { AUTH_ONLY_KEY, type AccessRule } from '../decorators/permissions.decorator.js';
 import { PermissionCode } from '../enums/permission-code.enum.js';
 import { RecordStatus } from '../enums/record-status.enum.js';
 import { PermissionsGuard } from './permissions.guard.js';
@@ -15,16 +16,22 @@ const requireAny = (...permissions: PermissionCode[]): AccessRule => ({ mode: 'a
 interface GuardOptions {
   // null = la operación no tiene regla de acceso
   rule?: AccessRule | null;
+  // La operación se marcó a propósito como "solo sesión" (@AuthOnly)
+  authOnly?: boolean;
   memberships?: unknown[];
   granted?: string[];
 }
 
 function createGuard({
   rule = requireAll(PermissionCode.USERS_MANAGE),
+  authOnly = false,
   memberships,
   granted = [],
 }: GuardOptions = {}) {
-  const reflector = { getAllAndOverride: vi.fn(() => rule ?? undefined) };
+  // El guard pregunta por la regla y, si no hay, por la marca "solo sesión": dos claves distintas.
+  const reflector = {
+    getAllAndOverride: vi.fn((key: string) => (key === AUTH_ONLY_KEY ? authOnly : (rule ?? undefined))),
+  };
   const membershipRepo = {
     find: vi.fn(async () =>
       memberships ?? [{ role: { id: 'role-1', code: 'SELLER', status: RecordStatus.ACTIVE } }],
@@ -35,9 +42,17 @@ function createGuard({
       granted.map((code) => ({ permission: { code, status: RecordStatus.ACTIVE } })),
     ),
   };
+  // La empresa está activa (loadCompanyAccess lo comprueba)
+  const companyRepo = { existsBy: vi.fn(async () => true) };
   const dataSource = {
     getRepository: vi.fn((entity: unknown) =>
-      entity === UserCompanyRole ? membershipRepo : entity === RolePermission ? rolePermissionRepo : undefined,
+      entity === UserCompanyRole
+        ? membershipRepo
+        : entity === RolePermission
+          ? rolePermissionRepo
+          : entity === Company
+            ? companyRepo
+            : undefined,
     ),
   };
 
@@ -76,11 +91,19 @@ describe('PermissionsGuard', () => {
     vi.restoreAllMocks();
   });
 
-  it('lets through an operation without an access rule, without touching the database', async () => {
-    const { guard, membershipRepo } = createGuard({ rule: null });
+  it('lets through an operation marked as session-only, without touching the database', async () => {
+    const { guard, membershipRepo } = createGuard({ rule: null, authOnly: true });
     const { context } = contextWith({});
 
     await expect(guard.canActivate(context)).resolves.toBe(true);
+    expect(membershipRepo.find).not.toHaveBeenCalled();
+  });
+
+  it('is closed by default: an operation with neither an access rule nor the session-only mark is rejected', async () => {
+    const { guard, membershipRepo } = createGuard({ rule: null });
+    const { context } = contextWith({});
+
+    await expect(guard.canActivate(context)).rejects.toThrow(ForbiddenException);
     expect(membershipRepo.find).not.toHaveBeenCalled();
   });
 

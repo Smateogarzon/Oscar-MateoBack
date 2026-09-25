@@ -90,6 +90,20 @@ npm run migration:generate
 npm run migration:run
 ```
 
+## Copiar producción a la base local
+
+`scripts/db-pull-prod.sh` abre un túnel SSM hacia el RDS de producción, hace un `pg_dump` (solo lectura), cierra el túnel y reemplaza la base local con esa copia. Sirve para probar migraciones con datos reales antes de desplegarlas.
+
+Requisitos: AWS CLI v2, el Session Manager plugin y una sesión iniciada con un perfil propio (`aws login --profile oscarymateo`, para no mezclarla con la de otros proyectos). Se corre en Git Bash, con el Postgres local arriba:
+
+```bash
+bash scripts/db-pull-prod.sh                # dump nuevo de producción + restaurar en local
+bash scripts/db-pull-prod.sh --file <dump>  # restaurar en local un dump que ya tienes (no toca producción)
+npm run migration:run                       # después, aplica encima las migraciones pendientes
+```
+
+El dump queda en `backups/` (fuera de git) y trae datos reales: solo se conserva el último (con `--no-keep` no queda ninguno). Mientras el túnel está abierto, `localhost:15432` es producción; el backend local siempre va contra el `5432`. Login, paso a paso manual y solución de problemas: [docs/acceso-produccion.md](docs/acceso-produccion.md).
+
 ## Estructura del proyecto
 
 ```

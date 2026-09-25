@@ -1,43 +1,35 @@
 import type { ExecutionContext } from '@nestjs/common';
-import { GqlExecutionContext } from '@nestjs/graphql';
 import { GqlThrottlerGuard } from './gql-throttler.guard.js';
 
-function createGuard() {
-  return new GqlThrottlerGuard({} as never, {} as never, {} as never);
-}
+// Un contexto de GraphQL con la operación indicada: root, args, context e info, en ese orden.
+const graphqlContext = (operation: string) =>
+  ({
+    getType: () => 'graphql',
+    getArgs: () => [{}, {}, {}, { operation: { operation } }],
+    getClass: () => GqlThrottlerGuard,
+    getHandler: () => () => undefined,
+  }) as unknown as ExecutionContext;
 
-describe('GqlThrottlerGuard', () => {
-  afterEach(() => {
-    vi.restoreAllMocks();
+// El guard se crea sin su constructor: shouldSkip no usa nada de lo que ese recibe.
+const shouldSkip = (context: ExecutionContext): Promise<boolean> => {
+  const guard = Object.create(GqlThrottlerGuard.prototype) as {
+    shouldSkip(context: ExecutionContext): Promise<boolean>;
+  };
+  return guard.shouldSkip(context);
+};
+
+describe('GqlThrottlerGuard.shouldSkip', () => {
+  it('does not count a subscription: it opens a connection that stays open, and it has no HTTP response to write to', async () => {
+    expect(await shouldSkip(graphqlContext('subscription'))).toBe(true);
   });
 
-  it('extracts req and res from the GraphQL context for GraphQL requests', () => {
-    const req = { ip: '127.0.0.1' };
-    const res = { header: vi.fn() };
-
-    vi.spyOn(GqlExecutionContext, 'create').mockReturnValue({
-      getContext: () => ({ req, res }),
-    } as unknown as GqlExecutionContext);
-
-    const context = { getType: () => 'graphql' } as unknown as ExecutionContext;
-
-    // getRequestResponse es protected; se accede directo para probarlo aislado.
-    const result = (createGuard() as any).getRequestResponse(context);
-
-    expect(result).toEqual({ req, res });
+  it.each(['query', 'mutation'])('still counts a %s', async (operation) => {
+    expect(await shouldSkip(graphqlContext(operation))).toBe(false);
   });
 
-  it('extracts req and res from the HTTP context for REST requests', () => {
-    const req = { ip: '127.0.0.1' };
-    const res = { header: vi.fn() };
+  it('still counts what is not GraphQL, like the upload endpoint', async () => {
+    const http = { getType: () => 'http' } as unknown as ExecutionContext;
 
-    const context = {
-      getType: () => 'http',
-      switchToHttp: () => ({ getRequest: () => req, getResponse: () => res }),
-    } as unknown as ExecutionContext;
-
-    const result = (createGuard() as any).getRequestResponse(context);
-
-    expect(result).toEqual({ req, res });
+    expect(await shouldSkip(http)).toBe(false);
   });
 });

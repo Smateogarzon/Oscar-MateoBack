@@ -53,6 +53,16 @@ export class JwtAuthGuard implements CanActivate {
       throw new UnauthorizedException('La cuenta no está activa');
     }
 
+    // Una sesión abierta antes del último cambio de contraseña ya no vale (el token trae la fecha de
+    // emisión en segundos; se compara por segundos para que la sesión que se renueva justo al cambiar la
+    // clave, en el mismo segundo, siga valiendo).
+    if (
+      user.passwordChangedAt &&
+      (payload.iat ?? 0) < Math.floor(user.passwordChangedAt.getTime() / 1000)
+    ) {
+      throw new UnauthorizedException('Tu contraseña cambió: vuelve a iniciar sesión');
+    }
+
     const skipsPasswordCheck = this.reflector.getAllAndOverride<boolean>(
       SKIP_MUST_CHANGE_PASSWORD_KEY,
       [context.getHandler(), context.getClass()],

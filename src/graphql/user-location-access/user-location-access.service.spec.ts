@@ -1,5 +1,8 @@
-import { NotFoundException } from '@nestjs/common';
+import { ConflictException, NotFoundException } from '@nestjs/common';
 import { RecordStatus } from '../../common/enums/record-status.enum.js';
+import { CashRegister } from '../cash-register/entities/cash-register.entity.js';
+import { CashSessionStatus } from '../cash-session/entities/cash-session-status.enum.js';
+import { CashSession } from '../cash-session/entities/cash-session.entity.js';
 import { Location } from '../location/entities/location.entity.js';
 import { UserCompanyRole } from '../user-company-role/entities/user-company-role.entity.js';
 import { UserLocationAccessService } from './user-location-access.service.js';
@@ -8,6 +11,9 @@ function createService() {
   const repo = { find: vi.fn().mockResolvedValue([]), findOneBy: vi.fn() };
   const locationRepo = { findOneBy: vi.fn() };
   const membershipRepo = { existsBy: vi.fn() };
+  const cashSessionRepo = { existsBy: vi.fn().mockResolvedValue(false) };
+  // Las cajas de la sede, que se bloquean antes de mirar si hay un turno abierto
+  const cashRegisterRepo = { find: vi.fn().mockResolvedValue([{ id: 'register-1' }]) };
   const accessRepo = {
     create: vi.fn((data: object) => data),
     save: vi.fn(async (access: object) => ({ id: 'access-1', ...access })),
@@ -16,12 +22,29 @@ function createService() {
     transaction: vi.fn(async (fn: (manager: unknown) => unknown) =>
       fn({
         getRepository: (entity: unknown) =>
-          entity === Location ? locationRepo : entity === UserCompanyRole ? membershipRepo : accessRepo,
+          entity === Location
+            ? locationRepo
+            : entity === UserCompanyRole
+              ? membershipRepo
+              : entity === CashSession
+                ? cashSessionRepo
+                : entity === CashRegister
+                  ? cashRegisterRepo
+                  : accessRepo,
       }),
     ),
   };
   const service = new UserLocationAccessService(repo as never, dataSource as never);
-  return { service, repo, locationRepo, membershipRepo, accessRepo, dataSource };
+  return {
+    service,
+    repo,
+    locationRepo,
+    membershipRepo,
+    cashSessionRepo,
+    cashRegisterRepo,
+    accessRepo,
+    dataSource,
+  };
 }
 
 const COMPANY = 'company-1';
@@ -105,11 +128,66 @@ describe('UserLocationAccessService', () => {
   describe('activate and deactivate', () => {
     it('deactivates an access of the company', async () => {
       const { service, repo, dataSource } = createService();
-      repo.findOneBy.mockResolvedValue({ id: 'access-1', status: RecordStatus.ACTIVE });
+      repo.findOneBy.mockResolvedValue({ id: 'access-1', userId: 'user-1', locationId: 'location-1', status: RecordStatus.ACTIVE });
 
       const result = await service.deactivate(COMPANY, 'access-1');
 
       expect(dataSource.transaction).toHaveBeenCalled();
+      expect(result.status).toBe(RecordStatus.INACTIVE);
+    });
+
+    it('does not take away a cashier’s access to a location where they have an open shift', async () => {
+      const { service, repo, cashSessionRepo, accessRepo } = createService();
+      repo.findOneBy.mockResolvedValue({
+        id: 'access-1',
+        userId: 'user-1',
+        locationId: 'location-1',
+        status: RecordStatus.ACTIVE,
+      });
+      cashSessionRepo.existsBy.mockResolvedValue(true);
+
+      await expect(service.deactivate(COMPANY, 'access-1')).rejects.toThrow(ConflictException);
+      expect(cashSessionRepo.existsBy).toHaveBeenCalledWith({
+        cashierId: 'user-1',
+        status: CashSessionStatus.OPEN,
+        cashRegister: { storeId: 'location-1' },
+      });
+      expect(accessRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('locks the registers of the location, in order, before looking for an open shift', async () => {
+      const { service, repo, cashRegisterRepo, cashSessionRepo } = createService();
+      repo.findOneBy.mockResolvedValue({
+        id: 'access-1',
+        userId: 'user-1',
+        locationId: 'location-1',
+        status: RecordStatus.ACTIVE,
+      });
+
+      await service.deactivate(COMPANY, 'access-1');
+
+      expect(cashRegisterRepo.find).toHaveBeenCalledWith({
+        where: { storeId: 'location-1' },
+        order: { id: 'ASC' },
+        lock: { mode: 'pessimistic_write' },
+      });
+      expect(cashRegisterRepo.find.mock.invocationCallOrder[0]).toBeLessThan(
+        cashSessionRepo.existsBy.mock.invocationCallOrder[0],
+      );
+    });
+
+    it('lets the access go when the open shift is somewhere else, or is someone else’s', async () => {
+      const { service, repo, cashSessionRepo } = createService();
+      repo.findOneBy.mockResolvedValue({
+        id: 'access-1',
+        userId: 'user-1',
+        locationId: 'location-1',
+        status: RecordStatus.ACTIVE,
+      });
+      cashSessionRepo.existsBy.mockResolvedValue(false);
+
+      const result = await service.deactivate(COMPANY, 'access-1');
+
       expect(result.status).toBe(RecordStatus.INACTIVE);
     });
 
