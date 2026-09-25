@@ -910,13 +910,28 @@ describe('CashSessionService', () => {
       expect(txSessionRepo.findOne).toHaveBeenCalledTimes(1);
     });
 
-    it('does not let the administrator who opened it charge in it: one cashier per register', async () => {
+    it('lets whoever opens and closes shifts operate any shift of the company, as if they were its cashier', async () => {
       const { service, manager, txSessionRepo } = createService();
       txSessionRepo.findOne.mockResolvedValue(openSession());
 
-      await expect(service.lockOpen(manager as never, COMPANY, 'session-1', admin)).rejects.toThrow(
+      await expect(
+        service.lockOpen(manager as never, COMPANY, 'session-1', admin),
+      ).resolves.toMatchObject({ id: 'session-1', cashierId: 'cashier-1' });
+      // La sesión se sigue trayendo bloqueada, igual que para el cajero asignado
+      expect(txSessionRepo.findOne).toHaveBeenLastCalledWith({
+        where: { id: 'session-1' },
+        lock: { mode: 'pessimistic_write' },
+      });
+    });
+
+    it('does not let someone who can only see every shift operate it: that takes the assigned cashier or shift management', async () => {
+      const { service, manager, txSessionRepo } = createService();
+      txSessionRepo.findOne.mockResolvedValue(openSession());
+
+      await expect(service.lockOpen(manager as never, COMPANY, 'session-1', auditor)).rejects.toThrow(
         ForbiddenException,
       );
+      expect(txSessionRepo.findOne).toHaveBeenCalledTimes(1);
     });
 
     it('only works on an open shift', async () => {

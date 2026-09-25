@@ -109,6 +109,7 @@ const d = (value: string) => new Decimal(value);
 const draft = (overrides: Record<string, unknown> = {}) => ({
   id: 'sale-1',
   companyId: COMPANY,
+  storeId: 'store-1',
   status: SaleStatus.DRAFT,
   subtotal: d('0'),
   discountTotal: d('0'),
@@ -363,7 +364,7 @@ describe('SaleService', () => {
       // Al recalcular, la base ya devuelve la línea recién guardada.
       txItemRepo.find.mockResolvedValue([line('100000')]);
 
-      const sale = await service.addItem(COMPANY, newItem);
+      const sale = await service.addItem(COMPANY, CASHIER_ACTOR,newItem);
 
       const created = txItemRepo.create.mock.calls[0][0];
       expect(created).toMatchObject({
@@ -388,7 +389,7 @@ describe('SaleService', () => {
       txSaleRepo.findOne.mockResolvedValue(draft());
 
       // 1.5 × 9999.99 = 14999.985
-      await service.addItem(COMPANY, { ...newItem, quantity: '1.5', unitPrice: '9999.99' });
+      await service.addItem(COMPANY, CASHIER_ACTOR,{ ...newItem, quantity: '1.5', unitPrice: '9999.99' });
 
       expect(txItemRepo.create.mock.calls[0][0].total.toFixed(2)).toBe('14999.99');
     });
@@ -397,7 +398,7 @@ describe('SaleService', () => {
       const { service, txSaleRepo, txItemRepo } = createService();
       txSaleRepo.findOne.mockResolvedValue(draft());
 
-      await service.addItem(COMPANY, { ...newItem, description: '  Flete  ', sku: '   ' });
+      await service.addItem(COMPANY, CASHIER_ACTOR,{ ...newItem, description: '  Flete  ', sku: '   ' });
 
       expect(txItemRepo.create.mock.calls[0][0]).toMatchObject({ description: 'Flete', sku: null });
     });
@@ -406,7 +407,7 @@ describe('SaleService', () => {
       const { service, txSaleRepo, txItemRepo } = createService();
       txSaleRepo.findOne.mockResolvedValue(draft());
 
-      await service.addItem(COMPANY, { ...newItem, sku: ' FLT-01 ' });
+      await service.addItem(COMPANY, CASHIER_ACTOR,{ ...newItem, sku: ' FLT-01 ' });
 
       expect(txItemRepo.create.mock.calls[0][0]).toMatchObject({ sku: 'FLT-01' });
     });
@@ -414,7 +415,7 @@ describe('SaleService', () => {
     it('rejects a blank description, before touching the database', async () => {
       const { service, dataSource } = createService();
 
-      await expect(service.addItem(COMPANY, { ...newItem, description: '   ' })).rejects.toThrow(
+      await expect(service.addItem(COMPANY, CASHIER_ACTOR,{ ...newItem, description: '   ' })).rejects.toThrow(
         BadRequestException,
       );
       expect(dataSource.transaction).not.toHaveBeenCalled();
@@ -423,7 +424,7 @@ describe('SaleService', () => {
     it('rejects a quantity of zero', async () => {
       const { service, dataSource } = createService();
 
-      await expect(service.addItem(COMPANY, { ...newItem, quantity: '0.00' })).rejects.toThrow(
+      await expect(service.addItem(COMPANY, CASHIER_ACTOR,{ ...newItem, quantity: '0.00' })).rejects.toThrow(
         BadRequestException,
       );
       expect(dataSource.transaction).not.toHaveBeenCalled();
@@ -434,7 +435,7 @@ describe('SaleService', () => {
 
       // 10000000 × 100000 = 1e12, el primer valor que ya no cabe en numeric(14,2)
       await expect(
-        service.addItem(COMPANY, { ...newItem, quantity: '10000000', unitPrice: '100000' }),
+        service.addItem(COMPANY, CASHIER_ACTOR,{ ...newItem, quantity: '10000000', unitPrice: '100000' }),
       ).rejects.toThrow(BadRequestException);
       expect(dataSource.transaction).not.toHaveBeenCalled();
     });
@@ -445,14 +446,14 @@ describe('SaleService', () => {
       txRequestRepo.existsBy.mockResolvedValue(true);
       txItemRepo.find.mockResolvedValue([line('100000')]);
 
-      await expect(service.addItem(COMPANY, newItem)).resolves.toMatchObject({ id: 'sale-1' });
+      await expect(service.addItem(COMPANY, CASHIER_ACTOR,newItem)).resolves.toMatchObject({ id: 'sale-1' });
     });
 
     it('locks the sale and only changes a draft', async () => {
       const { service, txSaleRepo, txItemRepo } = createService();
       txSaleRepo.findOne.mockResolvedValue(draft({ status: SaleStatus.COMPLETED }));
 
-      await expect(service.addItem(COMPANY, newItem)).rejects.toThrow(ConflictException);
+      await expect(service.addItem(COMPANY, CASHIER_ACTOR,newItem)).rejects.toThrow(ConflictException);
       expect(txSaleRepo.findOne).toHaveBeenCalledWith({
         where: { id: 'sale-1', companyId: COMPANY },
         lock: { mode: 'pessimistic_write' },
@@ -464,7 +465,7 @@ describe('SaleService', () => {
       const { service, txSaleRepo, txItemRepo } = createService();
       txSaleRepo.findOne.mockResolvedValue(null);
 
-      await expect(service.addItem(COMPANY, newItem)).rejects.toThrow(NotFoundException);
+      await expect(service.addItem(COMPANY, CASHIER_ACTOR,newItem)).rejects.toThrow(NotFoundException);
       expect(txItemRepo.save).not.toHaveBeenCalled();
     });
   });
@@ -489,7 +490,7 @@ describe('SaleService', () => {
       // Al recalcular, la base ya devuelve la línea con su nueva cantidad.
       txItemRepo.find.mockResolvedValue([line('150000')]);
 
-      const sale = await service.updateItemQuantity(COMPANY, change);
+      const sale = await service.updateItemQuantity(COMPANY, CASHIER_ACTOR,change);
 
       expect(txItemRepo.findOneBy).toHaveBeenCalledWith({ id: 'item-1', saleId: 'sale-1' });
       const saved = txItemRepo.save.mock.calls[0][0];
@@ -507,7 +508,7 @@ describe('SaleService', () => {
       txItemRepo.findOneBy.mockResolvedValue(storedItem({ unitPrice: d('9999.99') }));
 
       // 1.5 × 9999.99 = 14999.985
-      await service.updateItemQuantity(COMPANY, { ...change, quantity: '1.5' });
+      await service.updateItemQuantity(COMPANY, CASHIER_ACTOR,{ ...change, quantity: '1.5' });
 
       expect(txItemRepo.save.mock.calls[0][0].total.toFixed(2)).toBe('14999.99');
     });
@@ -517,7 +518,7 @@ describe('SaleService', () => {
       txSaleRepo.findOne.mockResolvedValue(draft());
       txRequestRepo.existsBy.mockResolvedValue(true);
 
-      await expect(service.updateItemQuantity(COMPANY, change)).rejects.toThrow(ConflictException);
+      await expect(service.updateItemQuantity(COMPANY, CASHIER_ACTOR,change)).rejects.toThrow(ConflictException);
       expect(txRequestRepo.existsBy).toHaveBeenCalledWith({
         saleId: 'sale-1',
         status: In(ACTIVE_DISCOUNT_REQUEST_STATUSES),
@@ -529,7 +530,7 @@ describe('SaleService', () => {
       const { service, dataSource } = createService();
 
       await expect(
-        service.updateItemQuantity(COMPANY, { ...change, quantity: '0.00' }),
+        service.updateItemQuantity(COMPANY, CASHIER_ACTOR,{ ...change, quantity: '0.00' }),
       ).rejects.toThrow(BadRequestException);
       expect(dataSource.transaction).not.toHaveBeenCalled();
     });
@@ -541,7 +542,7 @@ describe('SaleService', () => {
 
       // 10000000 × 100000 = 1e12, el primer valor que ya no cabe en numeric(14,2)
       await expect(
-        service.updateItemQuantity(COMPANY, { ...change, quantity: '10000000' }),
+        service.updateItemQuantity(COMPANY, CASHIER_ACTOR,{ ...change, quantity: '10000000' }),
       ).rejects.toThrow(BadRequestException);
       expect(txItemRepo.save).not.toHaveBeenCalled();
     });
@@ -552,7 +553,7 @@ describe('SaleService', () => {
       txItemRepo.findOneBy.mockResolvedValue(null);
 
       await expect(
-        service.updateItemQuantity(COMPANY, { ...change, itemId: 'item-9' }),
+        service.updateItemQuantity(COMPANY, CASHIER_ACTOR,{ ...change, itemId: 'item-9' }),
       ).rejects.toThrow(NotFoundException);
       expect(txItemRepo.save).not.toHaveBeenCalled();
     });
@@ -561,7 +562,7 @@ describe('SaleService', () => {
       const { service, txSaleRepo, txItemRepo } = createService();
       txSaleRepo.findOne.mockResolvedValue(draft({ status: SaleStatus.COMPLETED }));
 
-      await expect(service.updateItemQuantity(COMPANY, change)).rejects.toThrow(ConflictException);
+      await expect(service.updateItemQuantity(COMPANY, CASHIER_ACTOR,change)).rejects.toThrow(ConflictException);
       expect(txSaleRepo.findOne).toHaveBeenCalledWith({
         where: { id: 'sale-1', companyId: COMPANY },
         lock: { mode: 'pessimistic_write' },
@@ -573,7 +574,7 @@ describe('SaleService', () => {
       const { service, txSaleRepo, txItemRepo } = createService();
       txSaleRepo.findOne.mockResolvedValue(null);
 
-      await expect(service.updateItemQuantity(COMPANY, change)).rejects.toThrow(NotFoundException);
+      await expect(service.updateItemQuantity(COMPANY, CASHIER_ACTOR,change)).rejects.toThrow(NotFoundException);
       expect(txItemRepo.save).not.toHaveBeenCalled();
     });
   });
@@ -587,7 +588,7 @@ describe('SaleService', () => {
       txItemRepo.findOneBy.mockResolvedValue({ id: 'item-1', saleId: 'sale-1' });
       txItemRepo.find.mockResolvedValue([]);
 
-      const sale = await service.removeItem(COMPANY, 'sale-1', 'item-1');
+      const sale = await service.removeItem(COMPANY, CASHIER_ACTOR,'sale-1', 'item-1');
 
       expect(txItemRepo.findOneBy).toHaveBeenCalledWith({ id: 'item-1', saleId: 'sale-1' });
       expect(txItemRepo.delete).toHaveBeenCalledWith('item-1');
@@ -600,7 +601,7 @@ describe('SaleService', () => {
       txSaleRepo.findOne.mockResolvedValue(draft());
       txRequestRepo.existsBy.mockResolvedValue(true);
 
-      await expect(service.removeItem(COMPANY, 'sale-1', 'item-1')).rejects.toThrow(
+      await expect(service.removeItem(COMPANY, CASHIER_ACTOR,'sale-1', 'item-1')).rejects.toThrow(
         ConflictException,
       );
       expect(txRequestRepo.existsBy).toHaveBeenCalledWith({
@@ -615,7 +616,7 @@ describe('SaleService', () => {
       txSaleRepo.findOne.mockResolvedValue(draft());
       txItemRepo.findOneBy.mockResolvedValue(null);
 
-      await expect(service.removeItem(COMPANY, 'sale-1', 'item-9')).rejects.toThrow(
+      await expect(service.removeItem(COMPANY, CASHIER_ACTOR,'sale-1', 'item-9')).rejects.toThrow(
         NotFoundException,
       );
       expect(txItemRepo.delete).not.toHaveBeenCalled();
@@ -625,11 +626,63 @@ describe('SaleService', () => {
       const { service, txSaleRepo, txItemRepo } = createService();
       txSaleRepo.findOne.mockResolvedValue(draft({ status: SaleStatus.CANCELLED }));
 
-      await expect(service.removeItem(COMPANY, 'sale-1', 'item-1')).rejects.toThrow(
+      await expect(service.removeItem(COMPANY, CASHIER_ACTOR,'sale-1', 'item-1')).rejects.toThrow(
         ConflictException,
       );
       expect(txItemRepo.delete).not.toHaveBeenCalled();
     });
+  });
+
+  // Cambiar las líneas de una venta es operar en su tienda: hace falta seguir teniendo acceso a ella
+  // (no basta con haberlo tenido al crear la venta), y quien abre y cierra turnos opera cualquiera.
+  describe('access to the store of the sale when its lines change', () => {
+    const ADMIN_ACTOR: CashActor = { userId: 'admin-1', canViewAll: true, canManageShifts: true };
+    const storedItem = {
+      id: 'item-1',
+      saleId: 'sale-1',
+      quantity: d('2'),
+      unitPrice: d('50000'),
+      discountAmount: d('0'),
+      total: d('100000'),
+    };
+
+    const changes: [string, (service: SaleService, actor: CashActor) => Promise<unknown>][] = [
+      ['add a line', (service, actor) => service.addItem(COMPANY, actor, newItem)],
+      [
+        'change the quantity of a line',
+        (service, actor) =>
+          service.updateItemQuantity(COMPANY, actor, { saleId: 'sale-1', itemId: 'item-1', quantity: '3' }),
+      ],
+      ['remove a line', (service, actor) => service.removeItem(COMPANY, actor, 'sale-1', 'item-1')],
+    ];
+
+    it.each(changes)('does not let a cashier without access to the store %s', async (_name, change) => {
+      const { service, txSaleRepo, txItemRepo, accessRepo } = createService();
+      txSaleRepo.findOne.mockResolvedValue(draft());
+      accessRepo.existsBy.mockResolvedValue(false);
+
+      await expect(change(service, CASHIER_ACTOR)).rejects.toThrow(ForbiddenException);
+      expect(accessRepo.existsBy).toHaveBeenCalledWith({
+        userId: CASHIER,
+        locationId: 'store-1',
+        status: RecordStatus.ACTIVE,
+      });
+      expect(txItemRepo.save).not.toHaveBeenCalled();
+      expect(txItemRepo.delete).not.toHaveBeenCalled();
+    });
+
+    it.each(changes)(
+      'lets whoever opens and closes shifts %s in any store, even one they are not assigned to',
+      async (_name, change) => {
+        const { service, txSaleRepo, txItemRepo, accessRepo } = createService();
+        txSaleRepo.findOne.mockResolvedValue(draft());
+        txItemRepo.findOneBy.mockResolvedValue(storedItem);
+        accessRepo.existsBy.mockResolvedValue(false);
+
+        await expect(change(service, ADMIN_ACTOR)).resolves.toMatchObject({ id: 'sale-1' });
+        expect(accessRepo.existsBy).not.toHaveBeenCalled();
+      },
+    );
   });
 
   describe('lockCompleted', () => {

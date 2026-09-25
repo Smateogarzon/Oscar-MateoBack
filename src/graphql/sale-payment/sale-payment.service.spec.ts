@@ -14,21 +14,25 @@ import { PaymentMethod } from '../payment-method/entities/payment-method.entity.
 import { SaleItem } from '../sale/entities/sale-item.entity.js';
 import { SaleStatus } from '../sale/entities/sale-status.enum.js';
 import { Sale } from '../sale/entities/sale.entity.js';
+import { StorePaymentMethod } from '../store-payment-method/entities/store-payment-method.entity.js';
+import { UserLocationAccess } from '../user-location-access/entities/user-location-access.entity.js';
 import { SalePayment } from './entities/sale-payment.entity.js';
 import { SalePaymentService } from './sale-payment.service.js';
 
 const COMPANY = 'company-1';
 const d = (value: string) => new Decimal(value);
 const cashier: CashActor = { userId: 'cashier-1', canViewAll: false, canManageShifts: false };
+const admin: CashActor = { userId: 'admin-1', canViewAll: true, canManageShifts: true };
 
-// Una venta en borrador tal como la entrega SaleService.lockDraft: vale 100000.
+// Una venta en borrador tal como la entrega SaleService.lockDraft: vale 100000 y ya trae el turno
+// en que se creó (SaleService.create), que es donde se cobra.
 const draftSale = (overrides: Record<string, unknown> = {}) => ({
   id: 'sale-1',
   storeId: 'store-1',
   status: SaleStatus.DRAFT,
   total: d('100000'),
   completedAt: null,
-  cashSessionId: null,
+  cashSessionId: 'session-1',
   ...overrides,
 });
 
@@ -51,7 +55,6 @@ const card = (amount: string, reference?: string) => ({
 
 const charge = (payments: { paymentMethodId: string; amount: string; reference?: string }[]) => ({
   saleId: 'sale-1',
-  cashSessionId: 'session-1',
   payments,
 });
 
@@ -64,6 +67,11 @@ function createService() {
   const txRequestRepo = { update: vi.fn().mockResolvedValue(undefined) };
   const txItemRepo = { existsBy: vi.fn().mockResolvedValue(true) };
   const txMethodRepo = { find: vi.fn().mockResolvedValue([cashMethod, cardMethod]) };
+  // Los medios que la tienda acepta (por defecto, los dos) y el acceso del usuario a la tienda
+  const txStoreMethodRepo = {
+    find: vi.fn().mockResolvedValue([{ paymentMethodId: 'method-cash' }, { paymentMethodId: 'method-card' }]),
+  };
+  const accessRepo = { existsBy: vi.fn().mockResolvedValue(true) };
   const txSaleRepo = { save: vi.fn(async (value: object) => ({ ...value })) };
   const sales = {
     findOne: vi.fn().mockResolvedValue(draftSale()),
@@ -88,9 +96,13 @@ function createService() {
                 ? txItemRepo
                 : entity === PaymentMethod
                   ? txMethodRepo
-                  : entity === Sale
-                    ? txSaleRepo
-                    : undefined,
+                  : entity === StorePaymentMethod
+                    ? txStoreMethodRepo
+                    : entity === UserLocationAccess
+                      ? accessRepo
+                      : entity === Sale
+                        ? txSaleRepo
+                        : undefined,
       }),
     ),
   };
@@ -109,6 +121,8 @@ function createService() {
     txRequestRepo,
     txItemRepo,
     txMethodRepo,
+    txStoreMethodRepo,
+    accessRepo,
     txSaleRepo,
     sales,
     cashSessions,
@@ -356,6 +370,83 @@ describe('SalePaymentService', () => {
       expect(returns.lockForExchange).not.toHaveBeenCalled();
       expect(returns.applyExchange).not.toHaveBeenCalled();
     });
+
+    it('charges on the shift the sale was created in', async () => {
+      const { service, sales, cashSessions } = createService();
+      sales.lockDraft.mockResolvedValue(draftSale({ cashSessionId: 'session-7' }));
+      cashSessions.lockOpen.mockResolvedValue(openSession({ id: 'session-7' }));
+
+      const completed = await service.complete(COMPANY, cashier, charge([cash('100000')]));
+
+      expect(cashSessions.lockOpen).toHaveBeenCalledWith(expect.anything(), COMPANY, 'session-7', cashier);
+      expect(completed.cashSessionId).toBe('session-7');
+    });
+
+    it('does not charge a sale that has no shift, and does not even try to lock one', async () => {
+      const { service, sales, cashSessions, txPaymentRepo, txSaleRepo } = createService();
+      sales.lockDraft.mockResolvedValue(draftSale({ cashSessionId: null }));
+
+      await expect(service.complete(COMPANY, cashier, charge([cash('100000')]))).rejects.toThrow(
+        'La venta no tiene un turno asociado',
+      );
+      expect(cashSessions.lockOpen).not.toHaveBeenCalled();
+      expect(txPaymentRepo.save).not.toHaveBeenCalled();
+      expect(txSaleRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('does not let a cashier charge in a store they have no access to', async () => {
+      const { service, accessRepo, cashSessions, txPaymentRepo, txSaleRepo } = createService();
+      accessRepo.existsBy.mockResolvedValue(false);
+
+      await expect(service.complete(COMPANY, cashier, charge([cash('100000')]))).rejects.toThrow(
+        ForbiddenException,
+      );
+      expect(accessRepo.existsBy).toHaveBeenCalledWith({
+        userId: 'cashier-1',
+        locationId: 'store-1',
+        status: RecordStatus.ACTIVE,
+      });
+      expect(cashSessions.lockOpen).not.toHaveBeenCalled();
+      expect(txPaymentRepo.save).not.toHaveBeenCalled();
+      expect(txSaleRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('lets whoever opens and closes shifts charge in any store, even one they are not assigned to', async () => {
+      const { service, accessRepo } = createService();
+      accessRepo.existsBy.mockResolvedValue(false);
+
+      await expect(service.complete(COMPANY, admin, charge([cash('100000')]))).resolves.toMatchObject({
+        status: SaleStatus.COMPLETED,
+      });
+      expect(accessRepo.existsBy).not.toHaveBeenCalled();
+    });
+
+    it('looks up which of the payment methods the store accepts, only the active ones', async () => {
+      const { service, txStoreMethodRepo } = createService();
+
+      await service.complete(COMPANY, cashier, charge([cash('70000'), card('30000', 'A')]));
+
+      expect(txStoreMethodRepo.find).toHaveBeenCalledWith({
+        where: {
+          storeId: 'store-1',
+          paymentMethodId: In(['method-cash', 'method-card']),
+          status: RecordStatus.ACTIVE,
+        },
+        select: { paymentMethodId: true },
+      });
+    });
+
+    it('does not charge with a payment method the store does not accept', async () => {
+      const { service, txStoreMethodRepo, txPaymentRepo, txSaleRepo } = createService();
+      // La tienda solo acepta efectivo
+      txStoreMethodRepo.find.mockResolvedValue([{ paymentMethodId: 'method-cash' }]);
+
+      await expect(
+        service.complete(COMPANY, cashier, charge([cash('70000'), card('30000', 'A')])),
+      ).rejects.toThrow('Esta tienda no acepta Tarjeta: elige otro medio de pago');
+      expect(txPaymentRepo.save).not.toHaveBeenCalled();
+      expect(txSaleRepo.save).not.toHaveBeenCalled();
+    });
   });
 
   // La venta nueva de un cambio: el crédito de la devolución aprobada paga hasta lo que valió lo
@@ -384,7 +475,7 @@ describe('SalePaymentService', () => {
     });
 
     it('needs no payment at all when the credit covers the whole exchange of the same value', async () => {
-      const { service, sales, returns, txPaymentRepo } = createService();
+      const { service, sales, returns, txPaymentRepo, txStoreMethodRepo } = createService();
       const sale = draftSale({ total: d('100000') });
       sales.lockDraft.mockResolvedValue(sale);
       returns.lockForExchange.mockResolvedValue(returned('100000'));
@@ -392,6 +483,8 @@ describe('SalePaymentService', () => {
       const completed = await service.complete(COMPANY, cashier, exchangeCharge([]));
 
       expect(sale.returnCredit.toFixed(2)).toBe('100000.00');
+      // Sin pagos no hay medio que la tienda tenga que aceptar
+      expect(txStoreMethodRepo.find).not.toHaveBeenCalled();
       expect(txPaymentRepo.save).not.toHaveBeenCalled();
       expect(completed.status).toBe(SaleStatus.COMPLETED);
     });

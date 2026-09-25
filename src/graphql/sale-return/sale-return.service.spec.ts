@@ -143,7 +143,7 @@ function createService() {
     save: vi.fn(async (value: unknown) => value),
   };
   const txMethodRepo = { find: vi.fn().mockResolvedValue([cashMethod, transferMethod]) };
-  const txSaleRepo = { findOneBy: vi.fn() };
+  const txSaleRepo = { findOneBy: vi.fn(), save: vi.fn(), update: vi.fn() };
 
   const manager = {
     getRepository: (entity: unknown) =>
@@ -647,7 +647,7 @@ describe('SaleReturnService', () => {
       expect(sequences.next).not.toHaveBeenCalled();
     });
 
-    it('does not touch the original sale', async () => {
+    it('does not change the original sale: it only reads it, to know the store the notice belongs to', async () => {
       const { service, txSaleRepo } = createService();
 
       await service.request(
@@ -656,7 +656,9 @@ describe('SaleReturnService', () => {
         requestInput([{ saleItemId: 'line-1', quantity: '1' }]),
       );
 
-      expect(txSaleRepo.findOneBy).not.toHaveBeenCalled();
+      expect(txSaleRepo.findOneBy).toHaveBeenCalledWith({ id: 'sale-1' });
+      expect(txSaleRepo.save).not.toHaveBeenCalled();
+      expect(txSaleRepo.update).not.toHaveBeenCalled();
     });
   });
 
