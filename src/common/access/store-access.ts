@@ -24,19 +24,18 @@ export async function hasStoreAccess(
   });
 }
 
-/** Igual, pero rechaza en vez de responder. El mensaje no dice qué tienda es: quien no tiene acceso
+/**
+ * Igual, pero rechaza en vez de responder. El mensaje no dice qué tienda es: quien no tiene acceso
  * tampoco tiene por qué enterarse de cuáles existen.
  *
- * `skipCheck` lo usa quien abre y cierra turnos (el administrador): opera cualquier tienda de la
- * empresa aunque Personal por ubicación no se lo haya asignado (ver `CashActor.canManageShifts`).
+ * Nadie está exento: ni el administrador que abre y cierra turnos opera una tienda que no tiene
+ * asignada. Si tiene que cobrar, se asigna como cajero de esa tienda como cualquier otro.
  */
 export async function assertStoreAccess(
   manager: EntityManager,
   userId: string,
   storeId: string,
-  skipCheck = false,
 ): Promise<void> {
-  if (skipCheck) return;
   if (!(await hasStoreAccess(manager, userId, storeId))) {
     throw new ForbiddenException('No tienes acceso a esta tienda');
   }

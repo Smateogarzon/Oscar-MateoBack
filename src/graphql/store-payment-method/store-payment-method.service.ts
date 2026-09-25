@@ -78,11 +78,20 @@ export class StorePaymentMethodService {
     id: string,
     status: RecordStatus,
   ): Promise<StorePaymentMethod> {
-    const row = await this.findOne(companyId, id);
-    row.status = status;
-    return this.dataSource.transaction((manager) =>
-      manager.getRepository(StorePaymentMethod).save(row),
-    );
+    // La empresa se comprueba a través de la tienda (lectura con unión), y la fila se relee ya
+    // bloqueada: dos cambios a la vez (activar y desactivar el mismo medio) esperan uno al otro y
+    // el último manda, en vez de pisarse con una copia leída antes.
+    const found = await this.findOne(companyId, id);
+    return this.dataSource.transaction(async (manager) => {
+      const repo = manager.getRepository(StorePaymentMethod);
+      const row = await repo.findOne({
+        where: { id: found.id },
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (!row) throw new NotFoundException(`Medio de pago de tienda ${id} no encontrado`);
+      row.status = status;
+      return repo.save(row);
+    });
   }
 
   private mapWriteError(error: unknown): Error {

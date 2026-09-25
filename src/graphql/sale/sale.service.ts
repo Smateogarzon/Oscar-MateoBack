@@ -10,30 +10,45 @@ import { Decimal } from 'decimal.js';
 import { DataSource, EntityManager, In, Repository } from 'typeorm';
 import { assertStoreAccess } from '../../common/access/store-access.js';
 import { RecordStatus } from '../../common/enums/record-status.enum.js';
+import { runIdempotent } from '../idempotency/idempotency.js';
 import { CashActor } from '../cash-session/cash-actor.js';
 import { CashSessionService } from '../cash-session/cash-session.service.js';
-import {
-  ACTIVE_DISCOUNT_REQUEST_STATUSES,
-  DiscountRequestStatus,
-} from '../discount-request/entities/discount-request-status.enum.js';
+import { withdrawDiscountRequests } from '../discount-request/discount-request-cleanup.js';
+import { ACTIVE_DISCOUNT_REQUEST_STATUSES } from '../discount-request/entities/discount-request-status.enum.js';
 import { DiscountRequest } from '../discount-request/entities/discount-request.entity.js';
 import { DocumentSequenceService } from '../document-sequence/document-sequence.service.js';
 import { LocationType } from '../location/entities/location-type.enum.js';
 import { Location } from '../location/entities/location.entity.js';
+import { NotificationService } from '../notification/notification.service.js';
 import { User } from '../user/entities/user.entity.js';
 import { UserCompanyRole } from '../user-company-role/entities/user-company-role.entity.js';
-import { UserLocationAccess } from '../user-location-access/entities/user-location-access.entity.js';
 import { AddSaleItemInput } from './dto/add-sale-item.input.js';
 import { CancelSaleInput } from './dto/cancel-sale.input.js';
 import { CreateSaleInput } from './dto/create-sale.input.js';
 import { UpdateSaleItemQuantityInput } from './dto/update-sale-item-quantity.input.js';
-import { SaleActor } from './sale-actor.js';
+import { canReadSale, SaleActor } from './sale-actor.js';
 import { SaleItemType } from './entities/sale-item-type.enum.js';
 import { SaleItem } from './entities/sale-item.entity.js';
 import { SaleStatus } from './entities/sale-status.enum.js';
 import { Sale } from './entities/sale.entity.js';
 import { formatSaleNumber, SALE_SERIES } from './sale-number.js';
 import { calculateLine, calculateSaleTotals, MAX_AMOUNT } from './sale-totals.js';
+
+// Cuántas ventas devuelve el histórico de una vez: por defecto y como máximo.
+export const DEFAULT_SALES_LIMIT = 200;
+export const MAX_SALES_LIMIT = 500;
+
+// Lo que se puede pedir del histórico de ventas. `from`/`to` son fechas de la venta (cuando se cobró; si
+// es un borrador, cuando se creó).
+export interface SaleFilters {
+  status?: SaleStatus;
+  storeId?: string;
+  cashierId?: string;
+  from?: Date;
+  to?: Date;
+  limit?: number;
+  offset?: number;
+}
 
 // Todo se hace dentro de la empresa activa: una venta de otra empresa se responde igual que
 // una que no existe. Los totales de la venta nunca los manda el cliente: salen de sus líneas y
@@ -50,35 +65,67 @@ export class SaleService {
     private readonly dataSource: DataSource,
     private readonly sequences: DocumentSequenceService,
     private readonly cashSessions: CashSessionService,
+    private readonly notifications: NotificationService,
   ) {}
 
-  // Las más recientes primero. Para el histórico de ventas: sin sales.view_all (CashActor.canViewAll)
-  // cada quien ve solo las suyas, sea porque las cobró o porque las vendió; con él, ve todas y puede
-  // además filtrar por un cajero concreto (`cashierId`).
-  findAll(
+  // Las más recientes primero, por la fecha de la venta (cuando se cobró; si es un borrador, cuando se
+  // creó). Para el histórico de ventas: sin sales.view_all (SaleActor.canViewAll) cada quien ve solo
+  // las suyas, sea porque las cobró o porque las vendió; con él, ve todas y puede además filtrar por un
+  // cajero concreto (`cashierId`). Va acotado: `from`/`to` por fecha y `limit` (por defecto 200, máximo
+  // 500) con `offset`, así el histórico no baja años de ventas de una vez. Cada venta trae ya su número
+  // de líneas (un solo query, no uno por venta).
+  async findAll(
     companyId: string,
     actor: SaleActor,
-    filters: { status?: SaleStatus; storeId?: string; cashierId?: string } = {},
+    filters: SaleFilters = {},
   ): Promise<Sale[]> {
-    const { status, storeId, cashierId } = filters;
-    const base = { companyId, ...(status && { status }), ...(storeId && { storeId }) };
-    const order = { createdAt: 'DESC' as const };
+    const { status, storeId, cashierId, from, to } = filters;
+    const limit = Math.min(Math.max(filters.limit ?? DEFAULT_SALES_LIMIT, 1), MAX_SALES_LIMIT);
+    const offset = Math.max(filters.offset ?? 0, 0);
+    const saleDate = 'COALESCE(sale.completedAt, sale.createdAt)';
 
+    const query = this.saleRepository
+      .createQueryBuilder('sale')
+      .where('sale.companyId = :companyId', { companyId });
+    if (status) query.andWhere('sale.status = :status', { status });
+    if (storeId) query.andWhere('sale.storeId = :storeId', { storeId });
     if (actor.canViewAll) {
-      return this.saleRepository.find({ where: { ...base, ...(cashierId && { cashierId }) }, order });
+      if (cashierId) query.andWhere('sale.cashierId = :cashierId', { cashierId });
+    } else {
+      query.andWhere('(sale.cashierId = :me OR sale.sellerId = :me)', { me: actor.userId });
     }
-    return this.saleRepository.find({
-      where: [
-        { ...base, cashierId: actor.userId },
-        { ...base, sellerId: actor.userId },
-      ],
-      order,
+    if (from) query.andWhere(`${saleDate} >= :from`, { from });
+    if (to) query.andWhere(`${saleDate} <= :to`, { to });
+
+    const { entities, raw } = await query
+      .addSelect('(SELECT COUNT(*)::int FROM "sale_items" si WHERE si."saleId" = sale."id")', 'itemCount')
+      .orderBy(saleDate, 'DESC')
+      .addOrderBy('sale.id', 'DESC')
+      .limit(limit)
+      .offset(offset)
+      .getRawAndEntities<{ itemCount: number | string }>();
+
+    // Sin uniones, las filas crudas y las entidades salen en el mismo orden.
+    entities.forEach((sale, index) => {
+      Object.assign(sale, { itemCount: Number(raw[index]?.itemCount ?? 0) });
     });
+    return entities;
   }
 
+  // Sin comprobar quién pregunta: para los demás servicios, que ya tienen su propia regla (bloquear la
+  // venta, leerla al cobrar). Lo que se le ofrece a un usuario pasa por `findVisible`.
   async findOne(companyId: string, id: string): Promise<Sale> {
     const sale = await this.saleRepository.findOneBy({ id, companyId });
     if (!sale) throw new NotFoundException(`Venta ${id} no encontrada`);
+    return sale;
+  }
+
+  // Una venta que quien pregunta puede leer: la suya (la cobró o la vendió), o cualquiera si ve todo o
+  // aprueba descuentos o devoluciones. Una que no puede ver se responde como si no existiera: no se le
+  // dice ni que está.
+  async findVisible(companyId: string, actor: SaleActor, id: string): Promise<Sale> {
+    const sale = await this.findOne(companyId, id);
+    if (!canReadSale(actor, sale)) throw new NotFoundException(`Venta ${id} no encontrada`);
     return sale;
   }
 
@@ -104,9 +151,9 @@ export class SaleService {
     });
   }
 
-  // En el orden en que se agregaron. La empresa se comprueba a través de la venta.
-  async findItems(companyId: string, saleId: string): Promise<SaleItem[]> {
-    await this.findOne(companyId, saleId);
+  // En el orden en que se agregaron. La empresa y quién puede verlas se comprueban a través de la venta.
+  async findItems(companyId: string, actor: SaleActor, saleId: string): Promise<SaleItem[]> {
+    await this.findVisible(companyId, actor, saleId);
     return this.saleItemRepository.find({ where: { saleId }, order: { createdAt: 'ASC' } });
   }
 
@@ -118,75 +165,101 @@ export class SaleService {
 
   // Crea una venta en borrador: el cajero es quien da "nueva venta". Los totales arrancan en
   // cero y cambian a medida que se agregan líneas. Queda atada al turno indicado desde ya (no
-  // solo al cobrarla): así el turno la ve entre sus borradores desde el principio.
-  async create(companyId: string, actor: CashActor, input: CreateSaleInput): Promise<Sale> {
+  // solo al cobrarla): así el turno la ve entre sus borradores desde el principio. El borrador NO tiene
+  // número: el consecutivo VTA-000123 se asigna al cobrar (`assignNumber`), así los borradores que se
+  // abandonan o se borran al cerrar el turno no dejan huecos en la numeración. Con `idempotencyKey`,
+  // repetir la misma petición devuelve la venta ya creada en vez de abrir otro borrador.
+  async create(
+    companyId: string,
+    actor: CashActor,
+    input: CreateSaleInput,
+    idempotencyKey?: string,
+  ): Promise<Sale> {
     const cashierId = actor.userId;
-    return this.dataSource.transaction(async (manager) => {
-      // La tienda se busca sin filtrar por estado, a propósito: una desactivada sí existe, y
-      // responder "no encontrada" mandaría a buscar el problema donde no está. Una de otra
-      // empresa sigue respondiéndose como inexistente (el filtro por `companyId` no se toca).
-      const store = await manager.getRepository(Location).findOneBy({
-        id: input.storeId,
-        companyId,
-        type: LocationType.STORE,
-      });
-      if (!store) throw new NotFoundException(`Tienda ${input.storeId} no encontrada`);
-      if (store.status !== RecordStatus.ACTIVE) {
-        throw new ConflictException(`La tienda ${store.name} está desactivada: no se puede vender en ella`);
-      }
+    return this.dataSource.transaction((manager) =>
+      runIdempotent(
+        manager,
+        { companyId, userId: cashierId, operation: 'createSale', key: idempotencyKey, input, resourceType: 'sale' },
+        async () => {
+          // La tienda se busca sin filtrar por estado, a propósito: una desactivada sí existe, y
+          // responder "no encontrada" mandaría a buscar el problema donde no está. Una de otra
+          // empresa sigue respondiéndose como inexistente (el filtro por `companyId` no se toca).
+          const store = await manager.getRepository(Location).findOneBy({
+            id: input.storeId,
+            companyId,
+            type: LocationType.STORE,
+          });
+          if (!store) throw new NotFoundException(`Tienda ${input.storeId} no encontrada`);
+          if (store.status !== RecordStatus.ACTIVE) {
+            throw new ConflictException(`La tienda ${store.name} está desactivada: no se puede vender en ella`);
+          }
 
-      // Solo se vende desde las tiendas a las que el usuario tiene acceso (Configuración →
-      // Personal por ubicación) — salvo quien abre y cierra turnos, que opera cualquiera.
-      await assertStoreAccess(manager, cashierId, store.id, actor.canManageShifts);
+          // Solo se vende desde las tiendas a las que el usuario tiene acceso (Configuración →
+          // Personal por ubicación), también el administrador: si tiene que vender, se asigna.
+          await assertStoreAccess(manager, cashierId, store.id);
 
-      // El turno tiene que estar abierto, ser de una caja de esta tienda y estar asignado a quien
-      // crea la venta (lockOpen ya lo exige).
-      const session = await this.cashSessions.lockOpen(manager, companyId, input.cashSessionId, actor);
-      if (session.cashRegister.storeId !== store.id) {
-        throw new ConflictException('El turno es de una caja de otra tienda');
-      }
+          // El turno tiene que estar abierto, ser de una caja de esta tienda y estar asignado a quien
+          // crea la venta (lockOpen ya lo exige).
+          const session = await this.cashSessions.lockOpen(manager, companyId, input.cashSessionId, actor);
+          if (session.cashRegister.storeId !== store.id) {
+            throw new ConflictException('El turno es de una caja de otra tienda');
+          }
 
-      if (input.sellerId) {
-        const sellerIsMember = await manager.getRepository(UserCompanyRole).existsBy({
-          userId: input.sellerId,
-          companyId,
-          status: RecordStatus.ACTIVE,
-        });
-        // Una membresía activa no basta: la cuenta misma pudo desactivarse sin que se le
-        // quitaran sus roles.
-        const sellerAccountActive =
-          sellerIsMember &&
-          (await manager.getRepository(User).existsBy({ id: input.sellerId, status: RecordStatus.ACTIVE }));
-        if (!sellerAccountActive) throw new NotFoundException(`Vendedor ${input.sellerId} no encontrado`);
-      }
+          if (input.sellerId) {
+            const sellerIsMember = await manager.getRepository(UserCompanyRole).existsBy({
+              userId: input.sellerId,
+              companyId,
+              status: RecordStatus.ACTIVE,
+            });
+            // Una membresía activa no basta: la cuenta misma pudo desactivarse sin que se le
+            // quitaran sus roles.
+            const sellerAccountActive =
+              sellerIsMember &&
+              (await manager.getRepository(User).existsBy({ id: input.sellerId, status: RecordStatus.ACTIVE }));
+            if (!sellerAccountActive) throw new NotFoundException(`Vendedor ${input.sellerId} no encontrado`);
+          }
 
-      // El número se pide al final y dentro de la misma transacción: si algo de arriba falla,
-      // no se gasta un consecutivo.
-      const number = await this.sequences.next(manager, companyId, SALE_SERIES);
+          const repo = manager.getRepository(Sale);
+          return repo.save(
+            repo.create({
+              companyId,
+              storeId: store.id,
+              sellerId: input.sellerId ?? null,
+              cashierId,
+              cashSessionId: session.id,
+              saleNumber: null,
+              subtotal: new Decimal(0),
+              discountTotal: new Decimal(0),
+              generalDiscount: new Decimal(0),
+              total: new Decimal(0),
+              status: SaleStatus.DRAFT,
+            }),
+          );
+        },
+        (id) => manager.getRepository(Sale).findOneByOrFail({ id }),
+      ),
+    );
+  }
 
-      const repo = manager.getRepository(Sale);
-      return repo.save(
-        repo.create({
-          companyId,
-          storeId: store.id,
-          sellerId: input.sellerId ?? null,
-          cashierId,
-          cashSessionId: session.id,
-          saleNumber: formatSaleNumber(number),
-          subtotal: new Decimal(0),
-          discountTotal: new Decimal(0),
-          generalDiscount: new Decimal(0),
-          total: new Decimal(0),
-          status: SaleStatus.DRAFT,
-        }),
-      );
-    });
+  // Le da a la venta su consecutivo (VTA-000123) si todavía no lo tiene: se llama al cobrarla, con el
+  // manager de esa transacción, y siempre al final, después de todas las comprobaciones, para que un
+  // cobro que falla no gaste un número. Una venta de antes de este cambio ya lo trae y se respeta.
+  // Pública porque SalePaymentService la usa.
+  async assignNumber(manager: EntityManager, companyId: string, sale: Sale): Promise<void> {
+    if (sale.saleNumber) return;
+    sale.saleNumber = formatSaleNumber(await this.sequences.next(manager, companyId, SALE_SERIES));
   }
 
   // Agrega una línea genérica y recalcula los totales de la venta. La línea nace sin descuento:
   // los descuentos solo llegan por una solicitud aprobada. Agregar líneas se puede aunque haya
-  // una solicitud activa. Devuelve la venta con sus totales al día.
-  async addItem(companyId: string, actor: CashActor, input: AddSaleItemInput): Promise<Sale> {
+  // una solicitud activa. Devuelve la venta con sus totales al día. Con `idempotencyKey`, repetir la
+  // misma petición (doble clic, reintento tras perder la respuesta) no duplica la línea.
+  async addItem(
+    companyId: string,
+    actor: CashActor,
+    input: AddSaleItemInput,
+    idempotencyKey?: string,
+  ): Promise<Sale> {
     const description = input.description.trim();
     if (!description) throw new BadRequestException('La descripción de la línea no puede estar vacía');
 
@@ -202,27 +275,43 @@ export class SaleService {
       throw new BadRequestException('El valor de la línea supera el máximo permitido');
     }
 
-    return this.dataSource.transaction(async (manager) => {
-      const sale = await this.lockDraft(manager, companyId, input.saleId);
-      await assertStoreAccess(manager, actor.userId, sale.storeId, actor.canManageShifts);
+    return this.dataSource.transaction((manager) =>
+      runIdempotent(
+        manager,
+        { companyId, userId: actor.userId, operation: 'addSaleItem', key: idempotencyKey, input, resourceType: 'sale' },
+        async () => {
+          const sale = await this.lockDraft(manager, companyId, input.saleId);
+          this.assertOwnDraft(sale, actor);
+          await assertStoreAccess(manager, actor.userId, sale.storeId);
 
-      const repo = manager.getRepository(SaleItem);
-      await repo.save(
-        repo.create({
-          saleId: sale.id,
-          type: SaleItemType.GENERIC,
-          productVariantId: null,
-          description,
-          sku: input.sku?.trim() || null,
-          quantity,
-          unitPrice,
-          discountAmount,
-          total,
-        }),
-      );
+          const repo = manager.getRepository(SaleItem);
+          await repo.save(
+            repo.create({
+              saleId: sale.id,
+              type: SaleItemType.GENERIC,
+              productVariantId: null,
+              description,
+              sku: input.sku?.trim() || null,
+              quantity,
+              unitPrice,
+              discountAmount,
+              total,
+            }),
+          );
 
-      return this.recalculate(manager, sale);
-    });
+          return this.recalculate(manager, sale);
+        },
+        (id) => manager.getRepository(Sale).findOneByOrFail({ id }),
+      ),
+    );
+  }
+
+  // Armar la venta es del cajero de la venta: el administrador que no es ese cajero tampoco la toca (si
+  // hace falta cambiarla, la anula o la cobra su cajero). Se llama con la venta ya bloqueada.
+  private assertOwnDraft(sale: Sale, actor: { userId: string }): void {
+    if (sale.cashierId !== actor.userId) {
+      throw new ForbiddenException('Solo el cajero de la venta puede modificarla');
+    }
   }
 
   // Cambia la cantidad de una línea (no su precio) y recalcula. Igual que al quitar líneas, no se
@@ -241,7 +330,8 @@ export class SaleService {
 
     return this.dataSource.transaction(async (manager) => {
       const sale = await this.lockDraft(manager, companyId, input.saleId);
-      await assertStoreAccess(manager, actor.userId, sale.storeId, actor.canManageShifts);
+      this.assertOwnDraft(sale, actor);
+      await assertStoreAccess(manager, actor.userId, sale.storeId);
       await this.assertNoActiveDiscountRequest(manager, sale.id, 'cambiar cantidades');
 
       const repo = manager.getRepository(SaleItem);
@@ -267,7 +357,8 @@ export class SaleService {
   async removeItem(companyId: string, actor: CashActor, saleId: string, itemId: string): Promise<Sale> {
     return this.dataSource.transaction(async (manager) => {
       const sale = await this.lockDraft(manager, companyId, saleId);
-      await assertStoreAccess(manager, actor.userId, sale.storeId, actor.canManageShifts);
+      this.assertOwnDraft(sale, actor);
+      await assertStoreAccess(manager, actor.userId, sale.storeId);
       await this.assertNoActiveDiscountRequest(manager, sale.id, 'quitar líneas');
 
       const repo = manager.getRepository(SaleItem);
@@ -315,15 +406,13 @@ export class SaleService {
         throw new ConflictException('Una venta completada no se puede cancelar: ya se cobró');
       }
 
-      await manager.getRepository(DiscountRequest).update(
-        { saleId: sale.id, status: In(ACTIVE_DISCOUNT_REQUEST_STATUSES) },
-        {
-          status: DiscountRequestStatus.CANCELLED,
-          resolvedBy: actor.userId,
-          resolvedAt: new Date(),
-          resolutionNotes: 'Venta cancelada',
-        },
-      );
+      await withdrawDiscountRequests(manager, this.notifications, {
+        companyId,
+        saleIds: [sale.id],
+        statuses: ACTIVE_DISCOUNT_REQUEST_STATUSES,
+        actorId: actor.userId,
+        note: 'Venta cancelada',
+      });
 
       sale.status = SaleStatus.CANCELLED;
       sale.cancelledBy = actor.userId;
@@ -364,6 +453,17 @@ export class SaleService {
     if (sale.status !== SaleStatus.DRAFT) {
       throw new ConflictException('Solo se puede modificar una venta en borrador');
     }
+    return sale;
+  }
+
+  // Trae la venta bloqueada sea cual sea su estado: para cobrar, que tiene que distinguir un reintento
+  // ("ya se cobró") de una venta cancelada. Pública porque SalePaymentService la usa.
+  async lockAnyStatus(manager: EntityManager, companyId: string, id: string): Promise<Sale> {
+    const sale = await manager.getRepository(Sale).findOne({
+      where: { id, companyId },
+      lock: { mode: 'pessimistic_write' },
+    });
+    if (!sale) throw new NotFoundException(`Venta ${id} no encontrada`);
     return sale;
   }
 

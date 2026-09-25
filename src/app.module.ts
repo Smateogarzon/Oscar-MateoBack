@@ -37,8 +37,9 @@ import { CashMovementModule } from './graphql/cash-movement/cash-movement.module
 import { SalePaymentModule } from './graphql/sale-payment/sale-payment.module.js';
 import { SaleReturnModule } from './graphql/sale-return/sale-return.module.js';
 import { NotificationModule } from './graphql/notification/notification.module.js';
+import { IdempotencyModule } from './graphql/idempotency/idempotency.module.js';
 import { RealtimeModule } from './realtime/realtime.module.js';
-import { graphqlContext, wsOnConnect } from './realtime/ws-context.js';
+import { graphqlContext, wsOnClose, wsOnConnect, wsOnSubscribe } from './realtime/ws-context.js';
 import { StorageModule } from './common/storage/storage.module.js';
 import { UploadModule } from './uploads/upload.module.js';
 import { PosHardwareModule } from './pos-hardware/pos-hardware.module.js';
@@ -66,10 +67,14 @@ const { validationRules, plugins } = new ApolloArmor().protect();
         },
       }),
     }),
+    // El límite es por IP y por operación. Las terminales de una tienda salen por la misma IP pública,
+    // así que 100 por minuto se alcanzaba con unos pocos equipos y pantallas pesadas (y el 429 lo
+    // pagaban todos). 600 sigue frenando un abuso; el inicio de sesión tiene un límite propio, más
+    // estricto (AuthResolver.login).
     ThrottlerModule.forRoot([
       {
         ttl: seconds(60),
-        limit: 100,
+        limit: 600,
       },
     ]),
     TypeOrmModule.forRootAsync({
@@ -107,7 +112,15 @@ const { validationRules, plugins } = new ApolloArmor().protect();
       plugins: plugins as unknown as ApolloDriverConfig['plugins'],
       // Las suscripciones (tiempo real) viajan por WebSocket con el protocolo graphql-ws, por la
       // misma ruta /graphql. Al abrir la conexión se comprueba que venga del sitio de la app.
-      subscriptions: { 'graphql-ws': { onConnect: wsOnConnect } },
+      // wsOnConnect rechaza sin sesión y por encima de los topes de conexiones; wsOnSubscribe solo deja pasar
+      // la suscripción notificationEvents (el WebSocket no hereda las defensas del canal HTTP).
+      subscriptions: {
+        'graphql-ws': {
+          onConnect: wsOnConnect,
+          onClose: wsOnClose,
+          onSubscribe: wsOnSubscribe,
+        },
+      },
       // Para una petición HTTP entrega { req, res }; para una suscripción arma un `req` con la
       // cookie y la empresa de la conexión, así los mismos guards protegen las dos.
       context: graphqlContext,
@@ -131,6 +144,7 @@ const { validationRules, plugins } = new ApolloArmor().protect();
     SalePaymentModule,
     SaleReturnModule,
     NotificationModule,
+    IdempotencyModule,
     RealtimeModule,
     StorageModule,
     UploadModule,

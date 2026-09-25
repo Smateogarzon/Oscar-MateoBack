@@ -1,4 +1,5 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
+import { assertDestructiveDownAllowed } from '../../config/destructive-down.js';
 
 // Qué medios de pago acepta cada tienda (ver StorePaymentMethod). Escrita a mano, con los nombres
 // de índice y de clave foránea legibles.
@@ -13,6 +14,7 @@ export class AddStorePaymentMethod1789940000000 implements MigrationInterface {
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
+    assertDestructiveDownAllowed(this.name);
     await queryRunner.query(`ALTER TABLE "store_payment_methods" DROP CONSTRAINT "FK_store_payment_methods_payment_method"`);
     await queryRunner.query(`ALTER TABLE "store_payment_methods" DROP CONSTRAINT "FK_store_payment_methods_store"`);
     await queryRunner.query(`DROP INDEX "public"."IDX_store_payment_methods_store_method"`);

@@ -1,4 +1,5 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
+import { assertDestructiveDownAllowed } from '../../config/destructive-down.js';
 
 export class AddPermission1789511284025 implements MigrationInterface {
   name = 'AddPermission1789511284025';
@@ -9,6 +10,7 @@ export class AddPermission1789511284025 implements MigrationInterface {
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
+    assertDestructiveDownAllowed(this.name);
     await queryRunner.query(`DROP TABLE "permissions"`);
     await queryRunner.query(`DROP TYPE "public"."permission_module"`);
   }

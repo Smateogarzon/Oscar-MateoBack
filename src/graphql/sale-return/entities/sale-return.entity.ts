@@ -95,6 +95,30 @@ export class SaleReturn extends BaseEntity {
   @Column({ type: 'varchar', length: 255, nullable: true })
   resolutionNotes: string | null;
 
+  // Quién la aprobó y cuándo: se escribe UNA vez, al aprobarla, y nadie lo pisa. resolvedBy/resolvedAt
+  // son de la última acción (aprobar, rechazar o cancelar), así que sin esto, cancelar una devolución
+  // aprobada borraba quién la había aprobado.
+  @Column({ type: 'uuid', nullable: true })
+  approvedBy: string | null;
+
+  @Column({ type: 'timestamptz', nullable: true })
+  approvedAt: Date | null;
+
+  // El último administrador que cambió las líneas mientras estaba pendiente (las líneas anteriores se
+  // reemplazan: queda al menos quién y cuándo)
+  @Column({ type: 'uuid', nullable: true })
+  lastEditedBy: string | null;
+
+  @Column({ type: 'timestamptz', nullable: true })
+  lastEditedAt: Date | null;
+
+  // Quién la canceló y cuándo
+  @Column({ type: 'uuid', nullable: true })
+  cancelledBy: string | null;
+
+  @Column({ type: 'timestamptz', nullable: true })
+  cancelledAt: Date | null;
+
   @Column({ type: 'timestamptz', nullable: true })
   completedAt: Date | null;
 }

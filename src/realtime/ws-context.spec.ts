@@ -4,7 +4,10 @@ import {
   graphqlContext,
   isAllowedOrigin,
   parseCookies,
+  resetWsConnectionCounters,
+  wsOnClose,
   wsOnConnect,
+  wsOnSubscribe,
   type WsServerContext,
 } from './ws-context.js';
 
@@ -100,23 +103,120 @@ describe('allowedOrigins', () => {
 });
 
 describe('wsOnConnect', () => {
-  it('lets a connection open from an allowed site', () => {
+  const session = { cookie: 'access_token=jwt' };
+
+  beforeEach(() => {
+    resetWsConnectionCounters();
+  });
+
+  it('lets a connection open from an allowed site that brings a session', () => {
     vi.stubEnv('CORS_ORIGIN', 'https://app.example.com');
 
-    expect(wsOnConnect(wsContext({ origin: 'https://app.example.com' }))).toBe(true);
+    expect(wsOnConnect(wsContext({ origin: 'https://app.example.com', ...session }))).toBe(true);
   });
 
   it('closes a connection that comes from another site', () => {
     vi.stubEnv('CORS_ORIGIN', 'https://app.example.com');
 
-    expect(wsOnConnect(wsContext({ origin: 'https://evil.example.net' }))).toBe(false);
+    expect(wsOnConnect(wsContext({ origin: 'https://evil.example.net', ...session }))).toBe(false);
   });
 
-  it('lets a client without origin in', () => {
+  it('lets a client without origin in, as long as it brings a session', () => {
     vi.stubEnv('CORS_ORIGIN', 'https://app.example.com');
 
-    expect(wsOnConnect(wsContext({}))).toBe(true);
-    expect(wsOnConnect({ extra: {} })).toBe(true);
+    expect(wsOnConnect(wsContext({ ...session }))).toBe(true);
+  });
+
+  it('closes a connection that brings no credentials at all', () => {
+    vi.stubEnv('CORS_ORIGIN', 'https://app.example.com');
+
+    expect(wsOnConnect(wsContext({ origin: 'https://app.example.com' }))).toBe(false);
+    expect(wsOnConnect({ extra: {} })).toBe(false);
+  });
+
+  it('accepts an authorization token from the connection params instead of the cookie', () => {
+    vi.stubEnv('CORS_ORIGIN', 'https://app.example.com');
+
+    expect(wsOnConnect(wsContext({}, { authorization: 'Bearer abc' }))).toBe(true);
+  });
+
+  it('refuses more open connections from the same IP than the limit, and frees the slot on close', () => {
+    vi.stubEnv('CORS_ORIGIN', 'https://app.example.com');
+    const fromIp = () => wsContext({ ...session, 'x-forwarded-for': '203.0.113.7' });
+
+    const opened = Array.from({ length: 30 }, () => {
+      const context = fromIp();
+      return { context, ok: wsOnConnect(context) };
+    });
+    expect(opened.every((connection) => connection.ok)).toBe(true);
+    expect(wsOnConnect(fromIp())).toBe(false);
+
+    // Otra IP no se ve afectada
+    expect(wsOnConnect(wsContext({ ...session, 'x-forwarded-for': '198.51.100.9' }))).toBe(true);
+
+    wsOnClose(opened[0].context);
+    expect(wsOnConnect(fromIp())).toBe(true);
+  });
+
+  it('does not free a slot for a connection that was never counted', () => {
+    vi.stubEnv('CORS_ORIGIN', 'https://app.example.com');
+    const counted = wsContext({ ...session, 'x-forwarded-for': '203.0.113.7' });
+    wsOnConnect(counted);
+
+    // Un socket que se cierra sin haber pasado por onConnect no descuenta nada
+    wsOnClose(wsContext({ 'x-forwarded-for': '203.0.113.7' }));
+    wsOnClose(counted);
+    wsOnClose(counted);
+
+    // Todo quedó en cero: 30 conexiones nuevas de esa IP caben otra vez
+    const again = Array.from({ length: 30 }, () =>
+      wsOnConnect(wsContext({ ...session, 'x-forwarded-for': '203.0.113.7' })),
+    );
+    expect(again.every(Boolean)).toBe(true);
+  });
+});
+
+describe('wsOnSubscribe', () => {
+  const subscribe = (query: unknown) => wsOnSubscribe({}, 'id-1', { query });
+
+  it('lets the notificationEvents subscription through', () => {
+    expect(
+      subscribe('subscription NotificationEvents { notificationEvents { kind channel entityId } }'),
+    ).toBeUndefined();
+  });
+
+  it('rejects a query or a mutation: the WebSocket is only for the subscription', () => {
+    expect(subscribe('query { me { id } }')).toHaveLength(1);
+    expect(subscribe('mutation { logout }')).toHaveLength(1);
+  });
+
+  it('rejects an introspection query', () => {
+    expect(subscribe('{ __schema { types { name } } }')).toHaveLength(1);
+  });
+
+  it('rejects a subscription to anything else', () => {
+    expect(subscribe('subscription { somethingElse { id } }')).toHaveLength(1);
+  });
+
+  it('rejects a document with more than one operation or definition', () => {
+    expect(
+      subscribe(
+        'subscription A { notificationEvents { kind } } subscription B { notificationEvents { kind } }',
+      ),
+    ).toHaveLength(1);
+  });
+
+  it('rejects a huge query without even parsing it', () => {
+    const hostile = `subscription { notificationEvents { ${'__typename '.repeat(500)} } }`;
+
+    expect(hostile.length).toBeGreaterThan(2000);
+    expect(subscribe(hostile)).toHaveLength(1);
+  });
+
+  it('rejects an empty payload and an invalid document', () => {
+    expect(subscribe(undefined)).toHaveLength(1);
+    expect(subscribe('')).toHaveLength(1);
+    expect(subscribe('subscription {')).toHaveLength(1);
   });
 });
 

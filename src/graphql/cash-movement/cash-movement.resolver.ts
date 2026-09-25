@@ -6,6 +6,7 @@ import {
   CurrentCompanyId,
 } from '../../common/decorators/current-company.decorator.js';
 import { CurrentUser } from '../../common/decorators/current-user.decorator.js';
+import { IdempotencyKeyHeader } from '../../common/decorators/idempotency-key.decorator.js';
 import {
   RequireAnyPermission,
   RequirePermissions,
@@ -55,11 +56,13 @@ export class CashMovementResolver {
     @CurrentCompanyAccess() access: CompanyAccess,
     @CurrentUser() currentUser: JwtPayload,
     @Args('input') input: RegisterCashMovementInput,
+    @IdempotencyKeyHeader() idempotencyKey?: string,
   ) {
     return this.cashMovementService.register(
       companyId,
       cashActor(currentUser.sub, access.permissionCodes),
       input,
+      idempotencyKey,
     );
   }
 }

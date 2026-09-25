@@ -28,6 +28,11 @@
 // safe to do because the suite below probes the DB connection first and skips cleanly (not a
 // failure) when Postgres isn't reachable — so `npm test` stays green for anyone without a local
 // Postgres running.
+//
+// SAFETY: this file INSERTs and DELETEs rows, so it must never touch production (for example
+// through the SSM tunnel of scripts/db-pull-prod.sh, which is also "localhost" but on port 15432).
+// It only runs when DB_HOST is localhost/127.0.0.1 AND (DB_PORT is 5432 OR ALLOW_DB_WRITES=1);
+// otherwise it is skipped with a warning and no connection is even attempted.
 import 'dotenv/config';
 import pg from 'pg';
 
@@ -39,20 +44,35 @@ const { Pool } = pg;
 // latter with a 2-char "-A"/"-B"/"-C" suffix on top).
 const RUN_TOKEN = `TEST-CONC-${Date.now().toString(36)}`;
 
+const dbPort = process.env.DB_PORT || '5432';
+const writesAllowed =
+  (process.env.DB_HOST === 'localhost' || process.env.DB_HOST === '127.0.0.1') &&
+  (dbPort === '5432' || process.env.ALLOW_DB_WRITES === '1');
+
 const pool = new Pool({
   host: process.env.DB_HOST,
-  port: Number(process.env.DB_PORT),
+  port: Number(dbPort),
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME,
   max: 5,
 });
 
-let dbAvailable = true;
-try {
-  await pool.query('SELECT 1');
-} catch {
-  dbAvailable = false;
+let dbAvailable = false;
+if (writesAllowed) {
+  try {
+    await pool.query('SELECT 1');
+    dbAvailable = true;
+  } catch {
+    await pool.end().catch(() => {});
+  }
+} else {
+  if (process.env.DB_HOST) {
+    console.warn(
+      `[cash-session integration] Skipped: DB_HOST=${process.env.DB_HOST} DB_PORT=${dbPort} is not the local Postgres ` +
+        '(needs DB_HOST=localhost|127.0.0.1 and DB_PORT=5432, or ALLOW_DB_WRITES=1). This test writes data: it never runs against production.',
+    );
+  }
   await pool.end().catch(() => {});
 }
 

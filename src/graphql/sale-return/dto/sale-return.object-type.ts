@@ -27,6 +27,12 @@ export class SaleReturnObjectType extends BaseObjectType {
   @Field()
   returnNumber: string;
 
+  // El número de la venta original (VTA-000123), para no tener que pedir las ventas solo para
+  // mostrarlo; lo resuelve SaleReturnResolver. Nulo si la venta no tiene número (una venta anterior al
+  // cambio que numera al cobrar nunca lo es, pero el tipo lo admite).
+  @Field(() => String, { nullable: true })
+  saleNumber: string | null;
+
   @Field(() => SaleReturnResolution)
   resolution: SaleReturnResolution;
 

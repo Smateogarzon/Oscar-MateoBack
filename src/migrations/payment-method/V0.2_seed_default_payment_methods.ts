@@ -1,4 +1,5 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
+import { assertDestructiveDownAllowed } from '../../config/destructive-down.js';
 
 // Los medios de pago dejan de crearse a mano: toda empresa tiene los tres por defecto (ver
 // default-payment-methods.ts) y cada tienda elige cuáles acepta. Esta semilla pone al día lo que ya
@@ -42,6 +43,7 @@ export class SeedDefaultPaymentMethods1789940000001 implements MigrationInterfac
   // Al volver atrás se quitan las relaciones tienda-medio. Los medios de pago se dejan: no se
   // puede distinguir los que puso esta semilla de los que alguien creó a mano antes.
   public async down(queryRunner: QueryRunner): Promise<void> {
+    assertDestructiveDownAllowed(this.name);
     await queryRunner.query(`DELETE FROM "store_payment_methods"`);
   }
 }

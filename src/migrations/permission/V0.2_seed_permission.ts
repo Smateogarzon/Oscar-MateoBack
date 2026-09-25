@@ -1,4 +1,5 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
+import { assertDestructiveDownAllowed } from '../../config/destructive-down.js';
 
 // Catálogo real de permisos por módulo (código en forma "modulo.accion").
 // Timestamp +1 día: debe correr después de la migración de esquema de "permission" (V0.1).
@@ -33,8 +34,10 @@ export class SeedPermission1789598255955 implements MigrationInterface {
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
+    assertDestructiveDownAllowed(this.name);
+    // "id" es uuid: LIKE solo funciona sobre texto.
     await queryRunner.query(`
-      DELETE FROM "permissions" WHERE "id" LIKE '30000000-0000-4000-8000-%'
+      DELETE FROM "permissions" WHERE "id"::text LIKE '30000000-0000-4000-8000-%'
     `);
   }
 }

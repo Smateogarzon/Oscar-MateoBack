@@ -1,6 +1,8 @@
 import { Field, ID, InputType } from '@nestjs/graphql';
 import { IsEnum, IsNotEmpty, IsOptional, IsString, IsUUID, Matches, MaxLength } from 'class-validator';
+import { Trim } from '../../../common/decorators/trim.decorator.js';
 import { MONEY_PATTERN } from '../../../common/utils/money.js';
+import { SAFE_TEXT_MESSAGE, SAFE_TEXT_PATTERN } from '../../../common/utils/text.js';
 import { CASH_CODE_PATTERN } from '../../cash-session/cash-code.js';
 import { CashMovementReason } from '../entities/cash-movement-reason.enum.js';
 import { CashMovementType } from '../entities/cash-movement-type.enum.js';
@@ -34,11 +36,14 @@ export class RegisterCashMovementInput {
   })
   amount: string;
 
-  // Por qué se movió el efectivo: obligatorio, para que el arqueo se pueda explicar después.
+  // Por qué se movió el efectivo: obligatorio, para que el arqueo se pueda explicar después. Un texto
+  // solo con espacios no cuenta (se recorta antes de validar).
   @Field()
+  @Trim()
   @IsNotEmpty()
   @IsString()
   @MaxLength(255)
+  @Matches(SAFE_TEXT_PATTERN, { message: SAFE_TEXT_MESSAGE })
   description: string;
 
   // Número de un comprobante externo (recibo, consignación...)
@@ -46,5 +51,6 @@ export class RegisterCashMovementInput {
   @IsOptional()
   @IsString()
   @MaxLength(100)
+  @Matches(SAFE_TEXT_PATTERN, { message: SAFE_TEXT_MESSAGE })
   referenceNumber?: string;
 }

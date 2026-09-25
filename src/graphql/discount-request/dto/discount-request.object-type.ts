@@ -17,6 +17,12 @@ export class DiscountRequestObjectType {
   @Field()
   saleId: string;
 
+  // El número de la venta (VTA-000123), para no tener que pedir todas las ventas solo para mostrarlo.
+  // Nulo mientras la venta es un borrador: el número se asigna al cobrarla. Lo resuelve
+  // DiscountRequestResolver.
+  @Field(() => String, { nullable: true })
+  saleNumber: string | null;
+
   @Field()
   requestedBy: string;
 

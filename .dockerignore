@@ -8,3 +8,7 @@ uploads
 .git
 .github
 deploy
+# Volcados de la base de producción (scripts/db-pull-prod.sh): traen datos reales y no deben
+# terminar dentro de la imagen.
+backups
+**/*.dump

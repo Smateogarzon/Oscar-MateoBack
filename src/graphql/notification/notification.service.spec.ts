@@ -68,8 +68,17 @@ function createService() {
   };
   const txRolePermissionRepo = { find: vi.fn().mockResolvedValue([]) };
   const txMembershipRepo = { find: vi.fn().mockResolvedValue([]) };
+  // El UPDATE de "marcar todo como leído" es un solo query builder, no fila por fila
+  const updateBuilder = {
+    update: vi.fn().mockReturnThis(),
+    set: vi.fn().mockReturnThis(),
+    where: vi.fn().mockReturnThis(),
+    andWhere: vi.fn().mockReturnThis(),
+    execute: vi.fn().mockResolvedValue({ affected: 0 }),
+  };
 
   const manager = {
+    createQueryBuilder: () => updateBuilder,
     getRepository: (entity: unknown) =>
       entity === UserNotification
         ? txUserNotificationRepo
@@ -103,6 +112,7 @@ function createService() {
     txUserRepo,
     txRolePermissionRepo,
     txMembershipRepo,
+    updateBuilder,
     manager,
     dataSource,
   };
@@ -252,6 +262,71 @@ describe('NotificationService', () => {
       );
 
       expect(txNotificationRepo.create.mock.calls[0][0].message).toContain('Nota: Muy alto');
+    });
+
+    it('talks about "una venta en curso" when the sale is a draft and has no number yet', async () => {
+      const { service, txNotificationRepo, manager } = createService();
+
+      await service.notify(manager as never, notifyInput({ reference: null }));
+
+      expect(txNotificationRepo.create.mock.calls[0][0].message).toBe(
+        'Camila Rojas pidió un descuento en una venta en curso.',
+      );
+    });
+  });
+
+  // De vez en cuando se aprovecha un aviso nuevo para borrar los de más de 180 días, sin esperar y por
+  // otra conexión del pool (la de la transacción no se entera).
+  describe('purge of old notices', () => {
+    // Deja correr el borrado, que nadie espera
+    const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+    it('deletes the notices of more than 180 days, the recipients first and then the notices left without any', async () => {
+      const { service, manager } = createService();
+      const query = vi.fn().mockResolvedValue(undefined);
+      const random = vi.spyOn(Math, 'random').mockReturnValue(0);
+
+      try {
+        await service.notify({ ...manager, connection: { query } } as never, notifyInput());
+        await flush();
+      } finally {
+        random.mockRestore();
+      }
+
+      expect(query).toHaveBeenCalledTimes(2);
+      expect(query.mock.calls[0][0]).toContain('DELETE FROM "user_notifications"');
+      expect(query.mock.calls[0][0]).toContain("interval '180 days'");
+      expect(query.mock.calls[1][0]).toContain('DELETE FROM "notifications"');
+      expect(query.mock.calls[1][0]).toContain("interval '180 days'");
+    });
+
+    it('does not purge on most notices', async () => {
+      const { service, manager } = createService();
+      const query = vi.fn().mockResolvedValue(undefined);
+      const random = vi.spyOn(Math, 'random').mockReturnValue(0.5);
+
+      try {
+        await service.notify({ ...manager, connection: { query } } as never, notifyInput());
+        await flush();
+      } finally {
+        random.mockRestore();
+      }
+
+      expect(query).not.toHaveBeenCalled();
+    });
+
+    it('does not fail the notice when the purge fails: the next one tries again', async () => {
+      const { service, manager } = createService();
+      const query = vi.fn().mockRejectedValue(new Error('conexión perdida'));
+      const random = vi.spyOn(Math, 'random').mockReturnValue(0);
+
+      try {
+        const result = await service.notify({ ...manager, connection: { query } } as never, notifyInput());
+        await flush();
+        expect(result?.notification.id).toBe('notification-1');
+      } finally {
+        random.mockRestore();
+      }
     });
   });
 
@@ -523,42 +598,45 @@ describe('NotificationService', () => {
   });
 
   describe('markAllRead', () => {
-    it('marks all my unread notices as read and says how many', async () => {
-      const { service, txUserNotificationRepo } = createService();
-      const rows = [userNotification({ id: 'un-1' }), userNotification({ id: 'un-2' })];
-      txUserNotificationRepo.find.mockResolvedValue(rows);
+    it('marks all my unread notices as read with ONE update and says how many', async () => {
+      const { service, updateBuilder, txUserNotificationRepo } = createService();
+      updateBuilder.execute.mockResolvedValue({ affected: 2 });
 
       const marked = await service.markAllRead(COMPANY, 'user-1');
 
-      expect(txUserNotificationRepo.find).toHaveBeenCalledWith({
-        where: { userId: 'user-1', readAt: IsNull(), notification: { companyId: COMPANY } },
-      });
-      expect(rows.every((row) => row.readAt instanceof Date)).toBe(true);
-      expect(txUserNotificationRepo.save).toHaveBeenCalledWith(rows);
+      expect(updateBuilder.update).toHaveBeenCalledWith(UserNotification);
+      // La fecha de lectura la pone la base de datos, en el mismo UPDATE
+      const [{ readAt }] = updateBuilder.set.mock.calls[0];
+      expect(readAt()).toBe('now()');
+      expect(updateBuilder.where).toHaveBeenCalledWith('"userId" = :userId', { userId: 'user-1' });
+      expect(updateBuilder.andWhere).toHaveBeenCalledWith('"readAt" IS NULL');
+      expect(updateBuilder.andWhere).toHaveBeenCalledWith(
+        expect.stringContaining('n."companyId" = :companyId'),
+        { companyId: COMPANY },
+      );
+      // Ya no se cargan ni se guardan las filas una por una
+      expect(txUserNotificationRepo.find).not.toHaveBeenCalled();
+      expect(txUserNotificationRepo.save).not.toHaveBeenCalled();
       expect(marked).toBe(2);
     });
 
     it('can mark only one channel', async () => {
-      const { service, txUserNotificationRepo } = createService();
+      const { service, updateBuilder } = createService();
 
       await service.markAllRead(COMPANY, 'user-1', NotificationChannel.RETURNS);
 
-      expect(txUserNotificationRepo.find).toHaveBeenCalledWith({
-        where: {
-          userId: 'user-1',
-          readAt: IsNull(),
-          notification: { companyId: COMPANY, channel: NotificationChannel.RETURNS },
-        },
-      });
+      expect(updateBuilder.andWhere).toHaveBeenCalledWith(
+        expect.stringContaining('n."channel" = :channel'),
+        { companyId: COMPANY, channel: NotificationChannel.RETURNS },
+      );
     });
 
     it('does nothing when there is nothing unread', async () => {
-      const { service, txUserNotificationRepo } = createService();
+      const { service } = createService();
 
       const marked = await service.markAllRead(COMPANY, 'user-1');
 
       expect(marked).toBe(0);
-      expect(txUserNotificationRepo.save).not.toHaveBeenCalled();
     });
   });
 });

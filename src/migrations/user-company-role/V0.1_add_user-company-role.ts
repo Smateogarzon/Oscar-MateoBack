@@ -1,4 +1,5 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
+import { assertDestructiveDownAllowed } from '../../config/destructive-down.js';
 
 export class AddUserCompanyRole1789511284028 implements MigrationInterface {
   name = 'AddUserCompanyRole1789511284028';
@@ -14,6 +15,7 @@ export class AddUserCompanyRole1789511284028 implements MigrationInterface {
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
+    assertDestructiveDownAllowed(this.name);
     await queryRunner.query(`ALTER TABLE "user_company_roles" DROP CONSTRAINT "FK_de3eddd217378b6ced9075d8b57"`);
     await queryRunner.query(`ALTER TABLE "user_company_roles" DROP CONSTRAINT "FK_48031a3d3ab4aed4b46fc31905f"`);
     await queryRunner.query(`ALTER TABLE "user_company_roles" DROP CONSTRAINT "FK_cb234fcd85a151f6c63403349ad"`);

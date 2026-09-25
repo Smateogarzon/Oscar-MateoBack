@@ -6,6 +6,7 @@ import {
   CurrentCompanyId,
 } from '../../common/decorators/current-company.decorator.js';
 import { CurrentUser } from '../../common/decorators/current-user.decorator.js';
+import { IdempotencyKeyHeader } from '../../common/decorators/idempotency-key.decorator.js';
 import {
   RequireAnyPermission,
   RequirePermissions,
@@ -32,7 +33,8 @@ export class SaleResolver {
   constructor(private readonly saleService: SaleService) {}
 
   // El histórico de ventas: cada cajero o vendedor ve las que cobró o vendió; quien tiene
-  // sales.view_all ve las de todos y puede además filtrar por un cajero concreto.
+  // sales.view_all ve las de todos y puede además filtrar por un cajero concreto. Va acotado por fecha
+  // (`from`/`to`) y por `limit` (200 por defecto, 500 máximo) con `offset`.
   @Query(() => [SaleObjectType])
   @RequirePermissions(PermissionCode.SALES_VIEW)
   sales(
@@ -42,21 +44,33 @@ export class SaleResolver {
     @Args('status', { type: () => SaleStatus, nullable: true }) status?: SaleStatus,
     @Args('storeId', { type: () => ID, nullable: true }) storeId?: string,
     @Args('cashierId', { type: () => ID, nullable: true }) cashierId?: string,
+    @Args('from', { type: () => Date, nullable: true }) from?: Date,
+    @Args('to', { type: () => Date, nullable: true }) to?: Date,
+    @Args('limit', { type: () => Int, nullable: true }) limit?: number,
+    @Args('offset', { type: () => Int, nullable: true }) offset?: number,
   ) {
     return this.saleService.findAll(
       companyId,
       saleActor(currentUser.sub, access.permissionCodes),
-      { status, storeId, cashierId },
+      { status, storeId, cashierId, from, to, limit, offset },
     );
   }
 
+  // Una venta: la propia, o cualquiera si ve todo o aprueba descuentos o devoluciones. La que no puede
+  // ver se responde como si no existiera.
   @Query(() => SaleObjectType)
   @RequirePermissions(PermissionCode.SALES_VIEW)
   sale(
     @CurrentCompanyId() companyId: string,
+    @CurrentCompanyAccess() access: CompanyAccess,
+    @CurrentUser() currentUser: JwtPayload,
     @Args('id', { type: () => ID }) id: string,
   ) {
-    return this.saleService.findOne(companyId, id);
+    return this.saleService.findVisible(
+      companyId,
+      saleActor(currentUser.sub, access.permissionCodes),
+      id,
+    );
   }
 
   // Las líneas de una venta. Va como consulta aparte y no como campo de Sale para no repetir
@@ -65,15 +79,23 @@ export class SaleResolver {
   @RequirePermissions(PermissionCode.SALES_VIEW)
   saleItems(
     @CurrentCompanyId() companyId: string,
+    @CurrentCompanyAccess() access: CompanyAccess,
+    @CurrentUser() currentUser: JwtPayload,
     @Args('saleId', { type: () => ID }) saleId: string,
   ) {
-    return this.saleService.findItems(companyId, saleId);
+    return this.saleService.findItems(
+      companyId,
+      saleActor(currentUser.sub, access.permissionCodes),
+      saleId,
+    );
   }
 
-  // Cuántas líneas tiene, para listas (la cola de "Ventas en curso") sin traerlas todas.
+  // Cuántas líneas tiene, para listas (la cola de "Ventas en curso") sin traerlas todas. En el histórico
+  // ya viene calculado por SaleService.findAll (un solo query para todas); si no viene (una venta suelta,
+  // el resultado de una mutación) se cuenta aquí.
   @ResolveField(() => Int)
   itemCount(@Parent() sale: SaleObjectType) {
-    return this.saleService.countItems(sale.id);
+    return typeof sale.itemCount === 'number' ? sale.itemCount : this.saleService.countItems(sale.id);
   }
 
   // Las ventas cobradas de un turno, para su recibo de cierre. Autorizado igual que
@@ -127,8 +149,14 @@ export class SaleResolver {
     @CurrentCompanyAccess() access: CompanyAccess,
     @CurrentUser() currentUser: JwtPayload,
     @Args('input') input: CreateSaleInput,
+    @IdempotencyKeyHeader() idempotencyKey?: string,
   ) {
-    return this.saleService.create(companyId, cashActor(currentUser.sub, access.permissionCodes), input);
+    return this.saleService.create(
+      companyId,
+      cashActor(currentUser.sub, access.permissionCodes),
+      input,
+      idempotencyKey,
+    );
   }
 
   // Armar la venta es parte de crearla: quien puede crearla puede agregar y quitar líneas y
@@ -145,8 +173,14 @@ export class SaleResolver {
     @CurrentCompanyAccess() access: CompanyAccess,
     @CurrentUser() currentUser: JwtPayload,
     @Args('input') input: AddSaleItemInput,
+    @IdempotencyKeyHeader() idempotencyKey?: string,
   ) {
-    return this.saleService.addItem(companyId, cashActor(currentUser.sub, access.permissionCodes), input);
+    return this.saleService.addItem(
+      companyId,
+      cashActor(currentUser.sub, access.permissionCodes),
+      input,
+      idempotencyKey,
+    );
   }
 
   @Mutation(() => SaleObjectType)

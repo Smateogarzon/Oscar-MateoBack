@@ -43,4 +43,10 @@ export class User extends BaseEntity {
 
   @Column({ type: 'timestamptz', nullable: true })
   lastLoginAt: Date | null;
+
+  // Cuándo cambió por última vez la contraseña (la cambió el usuario o un administrador se la restableció).
+  // Las sesiones abiertas ANTES de esa fecha dejan de valer (JwtAuthGuard): quien tuviera un token robado
+  // no lo conserva por haber cambiado la clave. Nulo si nunca cambió.
+  @Column({ type: 'timestamptz', nullable: true })
+  passwordChangedAt: Date | null;
 }

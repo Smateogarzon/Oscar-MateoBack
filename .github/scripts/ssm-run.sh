@@ -6,11 +6,14 @@ set -euo pipefail
 
 COMMANDS_FILE="${1:?Falta el archivo de comandos}"
 PARAMETERS=$(jq -R . "$COMMANDS_FILE" | jq -s '{commands: .}')
+# En un rollback el commit que se despliega (IMAGE_TAG) no es el del workflow: el historial de SSM
+# debe mostrar el que realmente quedó en el servidor.
+DEPLOYED_SHA="${IMAGE_TAG:-$GITHUB_SHA}"
 
 COMMAND_ID=$(aws ssm send-command \
   --instance-ids "$INSTANCE_ID" \
   --document-name AWS-RunShellScript \
-  --comment "GitHub Actions ${GITHUB_REPOSITORY##*/} ${GITHUB_SHA:0:7}" \
+  --comment "GitHub Actions ${GITHUB_REPOSITORY##*/} ${DEPLOYED_SHA:0:7}" \
   --parameters "$PARAMETERS" \
   --query Command.CommandId --output text)
 

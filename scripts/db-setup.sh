@@ -18,6 +18,22 @@ fi
 DB_USER="${DB_USER:-ferreyepes}"
 DB_NAME="${DB_NAME:-ferreyepes}"
 
+# Este script crea (y con --reset borra) datos: solo puede apuntar al Postgres local. "localhost" no
+# basta, porque el túnel a producción de db-pull-prod.sh también es localhost (puerto 15432): el
+# puerto tiene que ser el del Postgres local (5432) o pedirse a propósito con ALLOW_DB_WRITES=1.
+case "${DB_HOST:-}" in
+  localhost | 127.0.0.1) ;;
+  *)
+    echo "ERROR: DB_HOST='${DB_HOST:-}' no es local. Este script solo corre contra localhost o 127.0.0.1 (define DB_HOST=localhost en .env)." >&2
+    exit 1
+    ;;
+esac
+if [ "${DB_PORT:-5432}" != "5432" ] && [ "${ALLOW_DB_WRITES:-}" != "1" ]; then
+  echo "ERROR: DB_PORT=${DB_PORT} no es el 5432 del Postgres local. Si es un túnel a producción, NO sigas: escribiría en producción." >&2
+  echo "Si de verdad es otra base local, repite con ALLOW_DB_WRITES=1." >&2
+  exit 1
+fi
+
 if [ "${1:-}" = "--reset" ]; then
   echo "==> Borrando contenedor y volumen actuales de Postgres..."
   docker compose down -v

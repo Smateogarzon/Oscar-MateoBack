@@ -1,13 +1,16 @@
+# Postgres solo para desarrollo local. Escucha únicamente en 127.0.0.1 (nadie de la red del
+# equipo puede entrar) y la clave sale de POSTGRES_PASSWORD, con DB_PASSWORD y luego un valor
+# de desarrollo como respaldo. Nunca uses este archivo ni esa clave fuera de tu equipo.
 services:
   postgres:
     image: postgres:17-alpine
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${DB_USER:-ferreyepes}
-      POSTGRES_PASSWORD: ${DB_PASSWORD:-ferreyepes}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-${DB_PASSWORD:-ferreyepes}}
       POSTGRES_DB: ${DB_NAME:-ferreyepes}
     ports:
-      - "${DB_PORT:-5432}:5432"
+      - "127.0.0.1:${DB_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
 

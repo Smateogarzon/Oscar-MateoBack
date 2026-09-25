@@ -1,4 +1,5 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
+import { assertDestructiveDownAllowed } from '../../config/destructive-down.js';
 
 interface CompanyData {
   id: string;
@@ -121,7 +122,9 @@ export class UpdateCompanyRealData1790220768430 implements MigrationInterface {
     await applyCompanyData(queryRunner, REAL_DATA);
   }
 
+  // Vuelve a los datos ficticios de la semilla: pisa nombre, NIT y contacto reales de las empresas.
   public async down(queryRunner: QueryRunner): Promise<void> {
+    assertDestructiveDownAllowed(this.name);
     await applyCompanyData(queryRunner, SEED_DATA);
   }
 }

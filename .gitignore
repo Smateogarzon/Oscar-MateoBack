@@ -10,6 +10,11 @@
 .env.*
 !.env.example
 
+# llaves y certificados (p. ej. la llave privada de QZ Tray): nunca al repositorio
+*.pem
+*.key
+*.p12
+
 # logs
 logs
 *.log

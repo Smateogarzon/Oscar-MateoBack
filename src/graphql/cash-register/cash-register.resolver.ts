@@ -1,6 +1,8 @@
 import { UseGuards } from '@nestjs/common';
 import { Args, ID, Mutation, Query, Resolver } from '@nestjs/graphql';
 import { CurrentCompanyId } from '../../common/decorators/current-company.decorator.js';
+import { CurrentUser } from '../../common/decorators/current-user.decorator.js';
+import { IdempotencyKeyHeader } from '../../common/decorators/idempotency-key.decorator.js';
 import {
   RequireAnyPermission,
   RequirePermissions,
@@ -10,6 +12,7 @@ import { RecordStatus } from '../../common/enums/record-status.enum.js';
 import { CsrfGuard } from '../../common/guards/csrf.guard.js';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard.js';
 import { PermissionsGuard } from '../../common/guards/permissions.guard.js';
+import type { JwtPayload } from '../auth/interface/jwt-payload.interface.js';
 import { CashRegisterService } from './cash-register.service.js';
 import { CashRegisterObjectType } from './dto/cash-register.object-type.js';
 import { CreateCashRegisterInput } from './dto/create-cash-register.input.js';
@@ -54,9 +57,11 @@ export class CashRegisterResolver {
   @RequirePermissions(PermissionCode.SETTINGS_MANAGE)
   createCashRegister(
     @CurrentCompanyId() companyId: string,
+    @CurrentUser() currentUser: JwtPayload,
     @Args('input') input: CreateCashRegisterInput,
+    @IdempotencyKeyHeader() idempotencyKey?: string,
   ) {
-    return this.cashRegisterService.create(companyId, input);
+    return this.cashRegisterService.create(companyId, currentUser.sub, input, idempotencyKey);
   }
 
   @Mutation(() => CashRegisterObjectType)

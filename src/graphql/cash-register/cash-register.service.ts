@@ -10,6 +10,7 @@ import { RecordStatus } from '../../common/enums/record-status.enum.js';
 import { mapPostgresWriteError } from '../../common/utils/postgres-error.js';
 import { CashSessionStatus } from '../cash-session/entities/cash-session-status.enum.js';
 import { CashSession } from '../cash-session/entities/cash-session.entity.js';
+import { runIdempotent } from '../idempotency/idempotency.js';
 import { LocationType } from '../location/entities/location-type.enum.js';
 import { Location } from '../location/entities/location.entity.js';
 import { nextCashRegisterCode } from './default-cash-register.js';
@@ -48,35 +49,56 @@ export class CashRegisterService {
 
   // El código no se escribe: lo asigna el servidor, consecutivo dentro de la tienda (C1, C2, C3...;
   // ver nextCashRegisterCode). La fila de la tienda se bloquea mientras se calcula y se guarda, así
-  // dos cajas creadas a la vez en la misma tienda no toman el mismo número.
-  async create(companyId: string, input: CreateCashRegisterInput): Promise<CashRegister> {
+  // dos cajas creadas a la vez en la misma tienda no toman el mismo número. Con `idempotencyKey`, repetir
+  // la petición (doble clic en "Crear caja") devuelve la caja ya creada en vez de crear otra con el
+  // código siguiente.
+  async create(
+    companyId: string,
+    userId: string,
+    input: CreateCashRegisterInput,
+    idempotencyKey?: string,
+  ): Promise<CashRegister> {
     const name = input.name.trim();
     if (!name) throw new BadRequestException('El nombre de la caja no puede estar vacío');
 
     try {
-      return await this.dataSource.transaction(async (manager) => {
-        // La caja está en una tienda (no en una bodega) de la empresa. Se busca sin filtrar por
-        // estado, a propósito: una tienda desactivada sí existe, y responder "no encontrada"
-        // mandaría a buscar el problema donde no está. Una de otra empresa sigue respondiéndose
-        // como inexistente (el filtro por `companyId` no se toca).
-        const store = await manager.getRepository(Location).findOne({
-          where: { id: input.storeId, companyId, type: LocationType.STORE },
-          lock: { mode: 'pessimistic_write' },
-        });
-        if (!store) throw new NotFoundException(`Tienda ${input.storeId} no encontrada`);
-        if (store.status !== RecordStatus.ACTIVE) {
-          throw new ConflictException(
-            `La tienda ${store.name} está desactivada: no se pueden crear cajas en ella`,
-          );
-        }
+      return await this.dataSource.transaction((manager) =>
+        runIdempotent(
+          manager,
+          {
+            companyId,
+            userId,
+            operation: 'createCashRegister',
+            key: idempotencyKey,
+            input,
+            resourceType: 'cash_register',
+          },
+          async () => {
+            // La caja está en una tienda (no en una bodega) de la empresa. Se busca sin filtrar por
+            // estado, a propósito: una tienda desactivada sí existe, y responder "no encontrada"
+            // mandaría a buscar el problema donde no está. Una de otra empresa sigue respondiéndose
+            // como inexistente (el filtro por `companyId` no se toca).
+            const store = await manager.getRepository(Location).findOne({
+              where: { id: input.storeId, companyId, type: LocationType.STORE },
+              lock: { mode: 'pessimistic_write' },
+            });
+            if (!store) throw new NotFoundException(`Tienda ${input.storeId} no encontrada`);
+            if (store.status !== RecordStatus.ACTIVE) {
+              throw new ConflictException(
+                `La tienda ${store.name} está desactivada: no se pueden crear cajas en ella`,
+              );
+            }
 
-        const repo = manager.getRepository(CashRegister);
-        // Todas las cajas de la tienda, también las desactivadas: su código sigue siendo suyo.
-        const used = await repo.find({ where: { storeId: store.id }, select: { code: true } });
-        const code = nextCashRegisterCode(used.map((register) => register.code));
+            const repo = manager.getRepository(CashRegister);
+            // Todas las cajas de la tienda, también las desactivadas: su código sigue siendo suyo.
+            const used = await repo.find({ where: { storeId: store.id }, select: { code: true } });
+            const code = nextCashRegisterCode(used.map((register) => register.code));
 
-        return repo.save(repo.create({ storeId: store.id, name, code }));
-      });
+            return repo.save(repo.create({ storeId: store.id, name, code }));
+          },
+          (id) => manager.getRepository(CashRegister).findOneByOrFail({ id }),
+        ),
+      );
     } catch (error) {
       throw this.mapWriteError(error);
     }

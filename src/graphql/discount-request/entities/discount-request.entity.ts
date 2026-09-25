@@ -80,4 +80,20 @@ export class DiscountRequest {
 
   @Column({ type: 'timestamptz', nullable: true })
   resolvedAt: Date | null;
+
+  // Quién la aprobó y cuándo: se escribe UNA vez, al aprobarla, y nadie lo pisa. resolvedBy/resolvedAt
+  // son de la última acción (aprobar, editar, cancelar), así que sin esto, editar un descuento aprobado
+  // borraba quién lo había aprobado primero.
+  @Column({ type: 'uuid', nullable: true })
+  approvedBy: string | null;
+
+  @Column({ type: 'timestamptz', nullable: true })
+  approvedAt: Date | null;
+
+  // El último administrador que cambió los montos de un descuento ya aprobado
+  @Column({ type: 'uuid', nullable: true })
+  lastEditedBy: string | null;
+
+  @Column({ type: 'timestamptz', nullable: true })
+  lastEditedAt: Date | null;
 }

@@ -1,11 +1,12 @@
 import { UseGuards } from '@nestjs/common';
-import { Args, ID, Mutation, Query, Resolver } from '@nestjs/graphql';
+import { Args, ID, Int, Mutation, Parent, Query, ResolveField, Resolver } from '@nestjs/graphql';
 import type { CompanyAccess } from '../../common/access/company-access.js';
 import {
   CurrentCompanyAccess,
   CurrentCompanyId,
 } from '../../common/decorators/current-company.decorator.js';
 import { CurrentUser } from '../../common/decorators/current-user.decorator.js';
+import { IdempotencyKeyHeader } from '../../common/decorators/idempotency-key.decorator.js';
 import {
   RequireAnyPermission,
   RequirePermissions,
@@ -16,6 +17,7 @@ import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard.js';
 import { PermissionsGuard } from '../../common/guards/permissions.guard.js';
 import type { JwtPayload } from '../auth/interface/jwt-payload.interface.js';
 import { cashActor } from '../cash-session/cash-actor.js';
+import { saleActor } from '../sale/sale-actor.js';
 import { CompleteReturnRefundInput } from './dto/complete-return-refund.input.js';
 import { EditSaleReturnInput } from './dto/edit-sale-return.input.js';
 import { RefundPaymentObjectType } from './dto/refund-payment.object-type.js';
@@ -25,6 +27,7 @@ import { SaleReturnNotesInput } from './dto/sale-return-notes.input.js';
 import { SaleReturnObjectType } from './dto/sale-return.object-type.js';
 import { SessionRefundObjectType } from './dto/session-refund.object-type.js';
 import { SaleReturnStatus } from './entities/sale-return-status.enum.js';
+import type { SaleReturn } from './entities/sale-return.entity.js';
 import { SaleReturnService } from './sale-return.service.js';
 
 @Resolver(() => SaleReturnObjectType)
@@ -33,25 +36,46 @@ export class SaleReturnResolver {
   constructor(private readonly saleReturnService: SaleReturnService) {}
 
   // Se puede consultar desde la venta original (`saleId`) o desde la venta nueva de un cambio
-  // (`replacementSaleId`).
+  // (`replacementSaleId`). Cada quien ve las devoluciones de SUS ventas y las que registró; quien ve todo
+  // o aprueba devoluciones ve todas. Va acotada: `limit` (500 por defecto, 1000 máximo) con `offset`.
   @Query(() => [SaleReturnObjectType])
   @RequirePermissions(PermissionCode.SALES_VIEW)
   saleReturns(
     @CurrentCompanyId() companyId: string,
+    @CurrentCompanyAccess() access: CompanyAccess,
+    @CurrentUser() currentUser: JwtPayload,
     @Args('status', { type: () => SaleReturnStatus, nullable: true }) status?: SaleReturnStatus,
     @Args('saleId', { type: () => ID, nullable: true }) saleId?: string,
     @Args('replacementSaleId', { type: () => ID, nullable: true }) replacementSaleId?: string,
+    @Args('limit', { type: () => Int, nullable: true }) limit?: number,
+    @Args('offset', { type: () => Int, nullable: true }) offset?: number,
   ) {
-    return this.saleReturnService.findAll(companyId, { status, saleId, replacementSaleId });
+    return this.saleReturnService.findAll(
+      companyId,
+      saleActor(currentUser.sub, access.permissionCodes),
+      { status, saleId, replacementSaleId, limit, offset },
+    );
   }
 
   @Query(() => SaleReturnObjectType)
   @RequirePermissions(PermissionCode.SALES_VIEW)
   saleReturn(
     @CurrentCompanyId() companyId: string,
+    @CurrentCompanyAccess() access: CompanyAccess,
+    @CurrentUser() currentUser: JwtPayload,
     @Args('id', { type: () => ID }) id: string,
   ) {
-    return this.saleReturnService.findOne(companyId, id);
+    return this.saleReturnService.findVisible(
+      companyId,
+      saleActor(currentUser.sub, access.permissionCodes),
+      id,
+    );
+  }
+
+  // El número de la venta original: ya viene cargado en las listas; en una devolución suelta se busca.
+  @ResolveField(() => String, { nullable: true })
+  saleNumber(@Parent() saleReturn: SaleReturnObjectType) {
+    return this.saleReturnService.saleNumberOf(saleReturn as unknown as SaleReturn);
   }
 
   // Las líneas y los reembolsos van como consultas aparte y no como campos de SaleReturn, para no
@@ -60,18 +84,30 @@ export class SaleReturnResolver {
   @RequirePermissions(PermissionCode.SALES_VIEW)
   saleReturnItems(
     @CurrentCompanyId() companyId: string,
+    @CurrentCompanyAccess() access: CompanyAccess,
+    @CurrentUser() currentUser: JwtPayload,
     @Args('saleReturnId', { type: () => ID }) saleReturnId: string,
   ) {
-    return this.saleReturnService.findItems(companyId, saleReturnId);
+    return this.saleReturnService.findItems(
+      companyId,
+      saleActor(currentUser.sub, access.permissionCodes),
+      saleReturnId,
+    );
   }
 
   @Query(() => [RefundPaymentObjectType])
   @RequirePermissions(PermissionCode.SALES_VIEW)
   refundPayments(
     @CurrentCompanyId() companyId: string,
+    @CurrentCompanyAccess() access: CompanyAccess,
+    @CurrentUser() currentUser: JwtPayload,
     @Args('saleReturnId', { type: () => ID }) saleReturnId: string,
   ) {
-    return this.saleReturnService.findRefunds(companyId, saleReturnId);
+    return this.saleReturnService.findRefunds(
+      companyId,
+      saleActor(currentUser.sub, access.permissionCodes),
+      saleReturnId,
+    );
   }
 
   // Los reembolsos en efectivo de un turno, para su detalle de cierre. Autorizado igual que
@@ -96,15 +132,23 @@ export class SaleReturnResolver {
     );
   }
 
-  // El cajero registra la devolución de una venta cobrada; queda pendiente de aprobación.
+  // El cajero registra la devolución de una venta cobrada; queda pendiente de aprobación. Solo de una
+  // venta que puede ver y en una tienda a la que tiene acceso.
   @Mutation(() => SaleReturnObjectType)
   @RequirePermissions(PermissionCode.SALES_RETURN)
   requestSaleReturn(
     @CurrentCompanyId() companyId: string,
+    @CurrentCompanyAccess() access: CompanyAccess,
     @CurrentUser() currentUser: JwtPayload,
     @Args('input') input: RequestSaleReturnInput,
+    @IdempotencyKeyHeader() idempotencyKey?: string,
   ) {
-    return this.saleReturnService.request(companyId, currentUser.sub, input);
+    return this.saleReturnService.request(
+      companyId,
+      saleActor(currentUser.sub, access.permissionCodes),
+      input,
+      idempotencyKey,
+    );
   }
 
   // Un administrador ajusta lo que pidió el cajero (qué líneas, cuántas unidades, dinero o cambio)
@@ -127,8 +171,9 @@ export class SaleReturnResolver {
     @CurrentUser() currentUser: JwtPayload,
     @Args('id', { type: () => ID }) id: string,
     @Args('input') input: SaleReturnNotesInput,
+    @IdempotencyKeyHeader() idempotencyKey?: string,
   ) {
-    return this.saleReturnService.approve(companyId, currentUser.sub, id, input);
+    return this.saleReturnService.approve(companyId, currentUser.sub, id, input, idempotencyKey);
   }
 
   @Mutation(() => SaleReturnObjectType)
@@ -138,8 +183,9 @@ export class SaleReturnResolver {
     @CurrentUser() currentUser: JwtPayload,
     @Args('id', { type: () => ID }) id: string,
     @Args('input') input: SaleReturnNotesInput,
+    @IdempotencyKeyHeader() idempotencyKey?: string,
   ) {
-    return this.saleReturnService.reject(companyId, currentUser.sub, id, input);
+    return this.saleReturnService.reject(companyId, currentUser.sub, id, input, idempotencyKey);
   }
 
   // Quien la registró (con sales.return) o quien aprueba devoluciones: el servicio comprueba cuál.
@@ -157,7 +203,8 @@ export class SaleReturnResolver {
   }
 
   // Entrega el dinero de una devolución aprobada. El cambio no pasa por aquí: se cobra la venta
-  // nueva con `completeSale` indicando el `saleReturnId`.
+  // nueva con `completeSale` indicando el `saleReturnId`. Quien lo entrega tiene acceso a la tienda de
+  // la venta original y, si es en efectivo, sale de un turno de esa tienda.
   @Mutation(() => SaleReturnObjectType)
   @RequirePermissions(PermissionCode.SALES_RETURN)
   completeSaleReturnRefund(
@@ -165,11 +212,13 @@ export class SaleReturnResolver {
     @CurrentCompanyAccess() access: CompanyAccess,
     @CurrentUser() currentUser: JwtPayload,
     @Args('input') input: CompleteReturnRefundInput,
+    @IdempotencyKeyHeader() idempotencyKey?: string,
   ) {
     return this.saleReturnService.completeRefund(
       companyId,
       cashActor(currentUser.sub, access.permissionCodes),
       input,
+      idempotencyKey,
     );
   }
 }

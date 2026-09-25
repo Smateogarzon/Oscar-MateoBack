@@ -1,4 +1,5 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
+import { assertDestructiveDownAllowed } from '../../config/destructive-down.js';
 
 // Catálogo real de roles operativos (del diseño de la app).
 // Timestamp +1 día: debe correr después de la migración de esquema de "role" (V0.1),
@@ -21,6 +22,7 @@ export class SeedRole1789598255954 implements MigrationInterface {
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
+    assertDestructiveDownAllowed(this.name);
     await queryRunner.query(`
       DELETE FROM "roles" WHERE "id" IN (
         '20000000-0000-4000-8000-000000000001',

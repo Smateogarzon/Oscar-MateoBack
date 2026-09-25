@@ -139,7 +139,8 @@ docker compose exec postgres pg_restore -U ferreyepes -d ferreyepes --no-owner -
 
 ## Reglas de seguridad
 
-- **Solo lectura:** el túnel se usa únicamente para `pg_dump`. Nunca pongas `DB_PORT=15432` en el `.env` del backend local: sería el backend local escribiendo en producción.
+- **Solo lectura:** el túnel se usa únicamente para `pg_dump`. Nunca pongas `DB_PORT=15432` en el `.env` del backend local: sería el backend local escribiendo en producción. Como red de seguridad, `scripts/db-setup.sh` y el test de integración de caja se niegan a correr salvo que `DB_HOST` sea `localhost`/`127.0.0.1` y `DB_PORT` sea `5432` (o se fuerce con `ALLOW_DB_WRITES=1`, solo para otra base local).
+- **Revertir migraciones:** `migration:revert:prod` exige `ALLOW_DESTRUCTIVE_DOWN=1` (`ALLOW_DESTRUCTIVE_DOWN=1 npm run migration:revert:prod`), y los `down` que borran tablas, columnas o filas reales piden lo mismo también en local (en PowerShell: `$env:ALLOW_DESTRUCTIVE_DOWN=1` antes del comando). Haz un respaldo antes: revertir esos `down` no se puede deshacer.
 - **Cierra el túnel** al terminar. El script lo cierra solo; si avisa que el puerto `15432` sigue abierto, ciérralo a mano (Administrador de tareas → `session-manager-plugin.exe`). Comprobarlo: `netstat -ano | findstr 15432` no debe mostrar nada.
 - **El dump trae datos reales** (correos, hashes de contraseña y, cuando haya ventas, datos de clientes). Vive en `backups/` (ignorado por git, igual que `*.dump`); solo se conserva el último y con `--no-keep` no queda ninguno. No lo subas a ningún lado.
 - Con la copia restaurada, cualquier usuario de producción entra en local con su contraseña real. Además, el `.env` local tiene llaves que suben al bucket de producción; con datos reales, considera apuntar el backend local a otro bucket.

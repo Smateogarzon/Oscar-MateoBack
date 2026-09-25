@@ -32,6 +32,17 @@ describe('buildNotificationText', () => {
     });
   });
 
+  it('talks about "una venta en curso" when the sale is a draft and has no number yet', () => {
+    const draft = { actorName: 'Camila Rojas', reference: null };
+
+    expect(buildNotificationText(NotificationType.DISCOUNT_REQUESTED, draft).message).toBe(
+      'Camila Rojas pidió un descuento en una venta en curso.',
+    );
+    expect(buildNotificationText(NotificationType.DISCOUNT_APPROVED, draft).message).toBe(
+      'Camila Rojas aprobó el descuento de una venta en curso.',
+    );
+  });
+
   it('tells the cashier that an approved return can already be paid out or exchanged', () => {
     const { message } = buildNotificationText(NotificationType.RETURN_APPROVED, {
       actorName: 'Admin',

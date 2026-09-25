@@ -1,11 +1,12 @@
 import { UseGuards } from '@nestjs/common';
-import { Args, ID, Mutation, Query, Resolver } from '@nestjs/graphql';
+import { Args, ID, Int, Mutation, Query, Resolver } from '@nestjs/graphql';
 import type { CompanyAccess } from '../../common/access/company-access.js';
 import {
   CurrentCompanyAccess,
   CurrentCompanyId,
 } from '../../common/decorators/current-company.decorator.js';
 import { CurrentUser } from '../../common/decorators/current-user.decorator.js';
+import { IdempotencyKeyHeader } from '../../common/decorators/idempotency-key.decorator.js';
 import {
   RequireAnyPermission,
   RequirePermissions,
@@ -44,11 +45,13 @@ export class CashSessionResolver {
     @CurrentUser() currentUser: JwtPayload,
     @Args('status', { type: () => CashSessionStatus, nullable: true }) status?: CashSessionStatus,
     @Args('cashRegisterId', { type: () => ID, nullable: true }) cashRegisterId?: string,
+    @Args('limit', { type: () => Int, nullable: true }) limit?: number,
+    @Args('offset', { type: () => Int, nullable: true }) offset?: number,
   ) {
     return this.cashSessionService.findAll(
       companyId,
       cashActor(currentUser.sub, access.permissionCodes),
-      { status, cashRegisterId },
+      { status, cashRegisterId, limit, offset },
     );
   }
 
@@ -138,8 +141,14 @@ export class CashSessionResolver {
     @CurrentCompanyId() companyId: string,
     @CurrentUser() currentUser: JwtPayload,
     @Args('input') input: OpenCashSessionInput,
+    @IdempotencyKeyHeader() idempotencyKey?: string,
   ) {
-    const { session, code } = await this.cashSessionService.open(companyId, currentUser.sub, input);
+    const { session, code } = await this.cashSessionService.open(
+      companyId,
+      currentUser.sub,
+      input,
+      idempotencyKey,
+    );
     return { session, code };
   }
 
@@ -151,11 +160,13 @@ export class CashSessionResolver {
     @CurrentCompanyAccess() access: CompanyAccess,
     @CurrentUser() currentUser: JwtPayload,
     @Args('input') input: CloseCashSessionInput,
+    @IdempotencyKeyHeader() idempotencyKey?: string,
   ) {
     return this.cashSessionService.close(
       companyId,
       cashActor(currentUser.sub, access.permissionCodes),
       input,
+      idempotencyKey,
     );
   }
 

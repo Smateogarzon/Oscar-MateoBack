@@ -19,9 +19,9 @@ export class SaleObjectType extends BaseObjectType {
   @Field(() => String, { nullable: true })
   internalOrderId: string | null;
 
-  // Consecutivo por empresa, ej: VTA-000001
-  @Field()
-  saleNumber: string;
+  // Consecutivo por empresa, ej: VTA-000001. Se asigna al cobrar: un borrador todavía no tiene número.
+  @Field(() => String, { nullable: true })
+  saleNumber: string | null;
 
   @Field(() => String, { nullable: true })
   sellerId: string | null;

@@ -7,11 +7,13 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Decimal } from 'decimal.js';
-import { DataSource, EntityManager, In, Not, Repository } from 'typeorm';
+import { DataSource, EntityManager, FindOptionsWhere, In, Not, Repository } from 'typeorm';
+import { assertStoreAccess } from '../../common/access/store-access.js';
 import { PermissionCode } from '../../common/enums/permission-code.enum.js';
 import { CashActor } from '../cash-session/cash-actor.js';
 import { CashSessionService } from '../cash-session/cash-session.service.js';
 import { DocumentSequenceService } from '../document-sequence/document-sequence.service.js';
+import { runIdempotent } from '../idempotency/idempotency.js';
 import { NotificationChannel } from '../notification/entities/notification-channel.enum.js';
 import { NotificationEntityType } from '../notification/entities/notification-entity-type.enum.js';
 import { NotificationType } from '../notification/entities/notification-type.enum.js';
@@ -20,6 +22,7 @@ import { PaymentMethodType } from '../payment-method/entities/payment-method-typ
 import { validatePaymentMethods } from '../payment-method/payment-method-validation.js';
 import { SaleItem } from '../sale/entities/sale-item.entity.js';
 import { Sale } from '../sale/entities/sale.entity.js';
+import { canReadSale, SaleActor } from '../sale/sale-actor.js';
 import { SaleService } from '../sale/sale.service.js';
 import { CompleteReturnRefundInput } from './dto/complete-return-refund.input.js';
 import { EditSaleReturnInput } from './dto/edit-sale-return.input.js';
@@ -35,6 +38,10 @@ import {
 import { SaleReturn } from './entities/sale-return.entity.js';
 import { paidPerLine, returnValue } from './return-values.js';
 import { formatReturnNumber, RETURN_SERIES } from './sale-return-number.js';
+
+// Cuántas devoluciones devuelve la lista de una vez: por defecto y como máximo (las más recientes).
+export const DEFAULT_RETURNS_LIMIT = 500;
+export const MAX_RETURNS_LIMIT = 1000;
 
 // Flujo de una devolución: el cajero la registra (PENDIENTE), un administrador la aprueba o la
 // rechaza, y se completa al entregar el dinero (REFUND) o al cobrar la venta nueva del cambio
@@ -68,37 +75,92 @@ export class SaleReturnService {
     private readonly notifications: NotificationService,
   ) {}
 
-  // Las más recientes primero.
+  // Las más recientes primero, acotadas: `limit` (500 por defecto, 1000 máximo) con `offset`. Quien no ve
+  // todo (SaleActor.canReadAny) solo ve las devoluciones de SUS ventas (las que cobró o vendió, o la venta
+  // nueva de un cambio que cobró) y las que él mismo registró; las demás no existen para él.
   findAll(
     companyId: string,
-    filters: { status?: SaleReturnStatus; saleId?: string; replacementSaleId?: string } = {},
+    actor: SaleActor,
+    filters: {
+      status?: SaleReturnStatus;
+      saleId?: string;
+      replacementSaleId?: string;
+      limit?: number;
+      offset?: number;
+    } = {},
   ): Promise<SaleReturn[]> {
     const { status, saleId, replacementSaleId } = filters;
+    const limit = Math.min(Math.max(filters.limit ?? DEFAULT_RETURNS_LIMIT, 1), MAX_RETURNS_LIMIT);
+    const narrowing: FindOptionsWhere<SaleReturn> = {
+      companyId,
+      ...(status && { status }),
+      ...(saleId && { saleId }),
+      ...(replacementSaleId && { replacementSaleId }),
+    };
+    const where: FindOptionsWhere<SaleReturn>[] = actor.canReadAny
+      ? [narrowing]
+      : [
+          { ...narrowing, sale: { cashierId: actor.userId } },
+          { ...narrowing, sale: { sellerId: actor.userId } },
+          { ...narrowing, replacementSale: { cashierId: actor.userId } },
+          { ...narrowing, processedBy: actor.userId },
+        ];
+
     return this.returnRepository.find({
-      where: {
-        companyId,
-        ...(status && { status }),
-        ...(saleId && { saleId }),
-        ...(replacementSaleId && { replacementSaleId }),
-      },
+      where,
+      relations: { sale: true },
       order: { createdAt: 'DESC' },
+      take: limit,
+      skip: Math.max(filters.offset ?? 0, 0),
     });
   }
 
+  // Sin comprobar quién pregunta: para los demás servicios, que ya tienen su propia regla. Lo que se le
+  // ofrece a un usuario pasa por `findVisible`.
   async findOne(companyId: string, id: string): Promise<SaleReturn> {
-    const saleReturn = await this.returnRepository.findOneBy({ id, companyId });
+    const saleReturn = await this.returnRepository.findOne({
+      where: { id, companyId },
+      relations: { sale: true },
+    });
     if (!saleReturn) throw new NotFoundException(`Devolución ${id} no encontrada`);
     return saleReturn;
   }
 
+  // Una devolución que quien pregunta puede leer (misma regla que la lista); si no, se responde como si
+  // no existiera.
+  async findVisible(companyId: string, actor: SaleActor, id: string): Promise<SaleReturn> {
+    const saleReturn = await this.findOne(companyId, id);
+    const isMine = saleReturn.processedBy === actor.userId;
+    const ofMySale = canReadSale(actor, saleReturn.sale);
+    const ofMyExchange = saleReturn.replacementSaleId
+      ? (await this.dataSource
+          .getRepository(Sale)
+          .findOneBy({ id: saleReturn.replacementSaleId, cashierId: actor.userId })) !== null
+      : false;
+    if (!isMine && !ofMySale && !ofMyExchange) {
+      throw new NotFoundException(`Devolución ${id} no encontrada`);
+    }
+    return saleReturn;
+  }
+
+  // El número de la venta original, para mostrarlo en la lista sin pedir todas las ventas. Las listas
+  // ya traen la venta cargada; una devolución suelta (el resultado de una mutación) la busca aquí.
+  async saleNumberOf(saleReturn: SaleReturn): Promise<string | null> {
+    if (saleReturn.sale) return saleReturn.sale.saleNumber;
+    const sale = await this.dataSource
+      .getRepository(Sale)
+      .findOne({ where: { id: saleReturn.saleId }, select: { id: true, saleNumber: true } });
+    return sale?.saleNumber ?? null;
+  }
+
   // Las líneas devueltas, en el orden en que se registraron.
-  async findItems(companyId: string, saleReturnId: string): Promise<SaleReturnItem[]> {
-    await this.findOne(companyId, saleReturnId);
+  async findItems(companyId: string, actor: SaleActor, saleReturnId: string): Promise<SaleReturnItem[]> {
+    await this.findVisible(companyId, actor, saleReturnId);
     return this.itemRepository.find({ where: { saleReturnId }, order: { createdAt: 'ASC' } });
   }
 
-  async findRefunds(companyId: string, saleReturnId: string): Promise<RefundPayment[]> {
-    await this.findOne(companyId, saleReturnId);
+  async findRefunds(companyId: string, actor: SaleActor, saleReturnId: string): Promise<RefundPayment[]> {
+    await this.findVisible(companyId, actor, saleReturnId);
     return this.refundRepository.find({ where: { saleReturnId }, order: { createdAt: 'ASC' } });
   }
 
@@ -126,46 +188,70 @@ export class SaleReturnService {
   // Registra una devolución de una venta ya cobrada. Lo que vale cada línea devuelta lo calcula el
   // servidor: lo que el cliente realmente pagó, con sus descuentos (ver return-values.ts). No se
   // puede devolver más de lo vendido, contando lo que ya se devolvió en otras devoluciones que
-  // siguen vigentes. No cambia nada de la venta original.
+  // siguen vigentes. No cambia nada de la venta original. Solo se pide sobre una venta que quien la pide
+  // puede ver (la suya, o cualquiera si ve todo o aprueba) y en una tienda a la que tiene acceso. Con
+  // `idempotencyKey`, repetir la petición (doble clic, reintento tras perder la respuesta) devuelve la
+  // devolución ya registrada en vez de registrar otra.
   async request(
     companyId: string,
-    cashierId: string,
+    actor: SaleActor,
     input: RequestSaleReturnInput,
+    idempotencyKey?: string,
   ): Promise<SaleReturn> {
     const wanted = this.parseWanted(input.items);
     const reason = input.reason?.trim() || null;
+    const cashierId = actor.userId;
 
-    return this.dataSource.transaction(async (manager) => {
-      const sale = await this.sales.lockCompleted(manager, companyId, input.saleId);
-      const { items, totalReturned } = await this.priceItems(manager, sale, wanted);
-
-      // El número se pide al final y dentro de la misma transacción: si algo de arriba falla, no se
-      // gasta un consecutivo.
-      const number = await this.sequences.next(manager, companyId, RETURN_SERIES);
-
-      const repo = manager.getRepository(SaleReturn);
-      const saleReturn = await repo.save(
-        repo.create({
+    return this.dataSource.transaction((manager) =>
+      runIdempotent(
+        manager,
+        {
           companyId,
-          saleId: sale.id,
-          returnNumber: formatReturnNumber(number),
-          resolution: input.resolution,
-          totalReturned,
-          refundAmount: new Decimal(0),
-          status: SaleReturnStatus.PENDING,
-          reason,
-          processedBy: cashierId,
-        }),
-      );
+          userId: cashierId,
+          operation: 'requestSaleReturn',
+          key: idempotencyKey,
+          input,
+          resourceType: 'sale_return',
+        },
+        async () => {
+          const sale = await this.sales.lockCompleted(manager, companyId, input.saleId);
+          // Una venta que no puede ver se responde como si no existiera
+          if (!canReadSale(actor, sale)) throw new NotFoundException(`Venta ${input.saleId} no encontrada`);
+          // La devolución se maneja en la tienda donde se hizo la venta
+          await assertStoreAccess(manager, cashierId, sale.storeId);
 
-      const itemRepo = manager.getRepository(SaleReturnItem);
-      await itemRepo.save(
-        items.map((item) => itemRepo.create({ saleReturnId: saleReturn.id, ...item })),
-      );
+          const { items, totalReturned } = await this.priceItems(manager, sale, wanted);
 
-      await this.notifyApprovers(manager, companyId, NotificationType.RETURN_REQUESTED, saleReturn, cashierId);
-      return saleReturn;
-    });
+          // El número se pide al final y dentro de la misma transacción: si algo de arriba falla, no se
+          // gasta un consecutivo.
+          const number = await this.sequences.next(manager, companyId, RETURN_SERIES);
+
+          const repo = manager.getRepository(SaleReturn);
+          const saleReturn = await repo.save(
+            repo.create({
+              companyId,
+              saleId: sale.id,
+              returnNumber: formatReturnNumber(number),
+              resolution: input.resolution,
+              totalReturned,
+              refundAmount: new Decimal(0),
+              status: SaleReturnStatus.PENDING,
+              reason,
+              processedBy: cashierId,
+            }),
+          );
+
+          const itemRepo = manager.getRepository(SaleReturnItem);
+          await itemRepo.save(
+            items.map((item) => itemRepo.create({ saleReturnId: saleReturn.id, ...item })),
+          );
+
+          await this.notifyApprovers(manager, companyId, NotificationType.RETURN_REQUESTED, saleReturn, cashierId);
+          return saleReturn;
+        },
+        (id) => manager.getRepository(SaleReturn).findOneByOrFail({ id }),
+      ),
+    );
   }
 
   // Cambia una devolución que todavía está pendiente: qué líneas y cuántas unidades se devuelven, y
@@ -208,6 +294,8 @@ export class SaleReturnService {
       saleReturn.totalReturned = totalReturned;
       if (input.resolution) saleReturn.resolution = input.resolution;
       if (input.reason !== undefined) saleReturn.reason = input.reason?.trim() || null;
+      saleReturn.lastEditedBy = editorId;
+      saleReturn.lastEditedAt = new Date();
       const saved = await manager.getRepository(SaleReturn).save(saleReturn);
 
       await this.notifyRequester(manager, companyId, NotificationType.RETURN_EDITED, saleReturn, editorId);
@@ -217,27 +305,46 @@ export class SaleReturnService {
     });
   }
 
-  // Aprueba una devolución pendiente. Cualquier administrador con el permiso puede aprobar.
+  // Aprueba una devolución pendiente. Cualquier administrador con el permiso puede aprobar. Con
+  // `idempotencyKey`, repetir la petición devuelve la devolución ya aprobada en vez de fallar con "ya
+  // fue resuelta".
   async approve(
     companyId: string,
     adminId: string,
     id: string,
     input: SaleReturnNotesInput,
+    idempotencyKey?: string,
   ): Promise<SaleReturn> {
-    return this.dataSource.transaction(async (manager) => {
-      const saleReturn = await this.lock(manager, companyId, id);
-      if (saleReturn.status !== SaleReturnStatus.PENDING) {
-        throw new ConflictException('La devolución ya fue resuelta');
-      }
+    return this.dataSource.transaction((manager) =>
+      runIdempotent(
+        manager,
+        {
+          companyId,
+          userId: adminId,
+          operation: 'approveSaleReturn',
+          key: idempotencyKey,
+          input: { id, ...input },
+          resourceType: 'sale_return',
+        },
+        async () => {
+          const saleReturn = await this.lock(manager, companyId, id);
+          if (saleReturn.status !== SaleReturnStatus.PENDING) {
+            throw new ConflictException('La devolución ya fue resuelta');
+          }
 
-      saleReturn.status = SaleReturnStatus.APPROVED;
-      this.markResolved(saleReturn, adminId, input.notes);
-      const saved = await manager.getRepository(SaleReturn).save(saleReturn);
+          saleReturn.status = SaleReturnStatus.APPROVED;
+          this.markResolved(saleReturn, adminId, input.notes);
+          saleReturn.approvedBy = adminId;
+          saleReturn.approvedAt = saleReturn.resolvedAt;
+          const saved = await manager.getRepository(SaleReturn).save(saleReturn);
 
-      await this.notifyRequester(manager, companyId, NotificationType.RETURN_APPROVED, saleReturn, adminId);
-      await this.clearPendingNotices(manager, companyId, saleReturn, adminId);
-      return saved;
-    });
+          await this.notifyRequester(manager, companyId, NotificationType.RETURN_APPROVED, saleReturn, adminId);
+          await this.clearPendingNotices(manager, companyId, saleReturn, adminId);
+          return saved;
+        },
+        (returnId) => manager.getRepository(SaleReturn).findOneByOrFail({ id: returnId }),
+      ),
+    );
   }
 
   // Rechaza una devolución pendiente: lo devuelto vuelve a quedar disponible para otra.
@@ -246,28 +353,43 @@ export class SaleReturnService {
     adminId: string,
     id: string,
     input: SaleReturnNotesInput,
+    idempotencyKey?: string,
   ): Promise<SaleReturn> {
-    return this.dataSource.transaction(async (manager) => {
-      const saleReturn = await this.lock(manager, companyId, id);
-      if (saleReturn.status !== SaleReturnStatus.PENDING) {
-        throw new ConflictException('La devolución ya fue resuelta');
-      }
-
-      saleReturn.status = SaleReturnStatus.REJECTED;
-      this.markResolved(saleReturn, adminId, input.notes);
-      const saved = await manager.getRepository(SaleReturn).save(saleReturn);
-
-      await this.notifyRequester(
+    return this.dataSource.transaction((manager) =>
+      runIdempotent(
         manager,
-        companyId,
-        NotificationType.RETURN_REJECTED,
-        saleReturn,
-        adminId,
-        saleReturn.resolutionNotes,
-      );
-      await this.clearPendingNotices(manager, companyId, saleReturn, adminId);
-      return saved;
-    });
+        {
+          companyId,
+          userId: adminId,
+          operation: 'rejectSaleReturn',
+          key: idempotencyKey,
+          input: { id, ...input },
+          resourceType: 'sale_return',
+        },
+        async () => {
+          const saleReturn = await this.lock(manager, companyId, id);
+          if (saleReturn.status !== SaleReturnStatus.PENDING) {
+            throw new ConflictException('La devolución ya fue resuelta');
+          }
+
+          saleReturn.status = SaleReturnStatus.REJECTED;
+          this.markResolved(saleReturn, adminId, input.notes);
+          const saved = await manager.getRepository(SaleReturn).save(saleReturn);
+
+          await this.notifyRequester(
+            manager,
+            companyId,
+            NotificationType.RETURN_REJECTED,
+            saleReturn,
+            adminId,
+            saleReturn.resolutionNotes,
+          );
+          await this.clearPendingNotices(manager, companyId, saleReturn, adminId);
+          return saved;
+        },
+        (returnId) => manager.getRepository(SaleReturn).findOneByOrFail({ id: returnId }),
+      ),
+    );
   }
 
   // Cancela una devolución pendiente o aprobada. La puede cancelar quien la registró o quien puede
@@ -302,6 +424,9 @@ export class SaleReturnService {
       const wasPending = saleReturn.status === SaleReturnStatus.PENDING;
       saleReturn.status = SaleReturnStatus.CANCELLED;
       this.markResolved(saleReturn, userId, input.notes);
+      // Quién aprobó (approvedBy) se conserva; aquí queda además quién la canceló.
+      saleReturn.cancelledBy = userId;
+      saleReturn.cancelledAt = saleReturn.resolvedAt;
       const saved = await manager.getRepository(SaleReturn).save(saleReturn);
 
       // Si la cancela quien la registró se avisa a los administradores; si la cancela un
@@ -321,10 +446,17 @@ export class SaleReturnService {
   // cambio por algo más barato (PARTIAL_REFUND). Los reembolsos van juntos y suman EXACTAMENTE lo que
   // hay que devolver. Uno en efectivo sale del cajón, así que necesita un turno abierto asignado a
   // quien lo entrega, igual que cobrar, y baja el efectivo esperado al cerrarlo.
+  //
+  // El reembolso se entrega en la tienda donde se hizo la venta original: quien lo entrega tiene que tener
+  // acceso a ESA tienda (aunque sea por tarjeta o transferencia) y el turno del que sale el efectivo tiene
+  // que ser de una caja de ESA tienda: la venta quedó ligada a su caja y el dinero no sale de otra tienda.
+  // Con `idempotencyKey`, repetir la petición devuelve la devolución ya completada en vez de fallar con
+  // "ya está completada" (o, peor, entregar el dinero dos veces).
   async completeRefund(
     companyId: string,
     actor: CashActor,
     input: CompleteReturnRefundInput,
+    idempotencyKey?: string,
   ): Promise<SaleReturn> {
     const payments = input.payments.map((payment) => ({
       paymentMethodId: payment.paymentMethodId,
@@ -335,54 +467,79 @@ export class SaleReturnService {
       throw new BadRequestException('Cada reembolso debe ser mayor que cero');
     }
 
-    return this.dataSource.transaction(async (manager) => {
-      const saleReturn = await this.lock(manager, companyId, input.saleReturnId);
-      this.assertApproved(saleReturn);
+    return this.dataSource.transaction((manager) =>
+      runIdempotent(
+        manager,
+        {
+          companyId,
+          userId: actor.userId,
+          operation: 'completeSaleReturnRefund',
+          key: idempotencyKey,
+          input,
+          resourceType: 'sale_return',
+        },
+        async () => {
+          const saleReturn = await this.lock(manager, companyId, input.saleReturnId);
+          this.assertApproved(saleReturn);
 
-      const toRefund = await this.amountToRefund(manager, saleReturn);
+          // La tienda de la venta original. Se lee sin bloquear: la venta no cambia (una venta cobrada no se
+          // modifica) y el orden de bloqueos (venta → devolución → turno) no se altera.
+          const originalSale = await manager.getRepository(Sale).findOneBy({ id: saleReturn.saleId });
+          if (!originalSale) throw new NotFoundException('No se encontró la venta original de la devolución');
+          await assertStoreAccess(manager, actor.userId, originalSale.storeId);
 
-      const methodsById = await validatePaymentMethods(manager, companyId, payments);
+          const toRefund = await this.amountToRefund(manager, saleReturn);
 
-      const refunded = payments.reduce((sum, payment) => sum.plus(payment.amount), new Decimal(0));
-      if (!refunded.equals(toRefund)) {
-        throw new BadRequestException(
-          `Los reembolsos suman ${refunded.toFixed(2)} y hay que devolver ${toRefund.toFixed(2)}: tienen que ser iguales`,
-        );
-      }
+          const methodsById = await validatePaymentMethods(manager, companyId, payments);
 
-      // El turno va al final: siempre después de la devolución, nunca antes.
-      const paidInCash = payments.some(
-        (payment) =>
-          methodsById.get(payment.paymentMethodId)?.type === PaymentMethodType.CASH,
-      );
-      if (paidInCash && !input.cashSessionId) {
-        throw new BadRequestException(
-          'El reembolso en efectivo sale de un turno de caja: indica el turno',
-        );
-      }
-      const session = input.cashSessionId
-        ? await this.cashSessions.lockOpen(manager, companyId, input.cashSessionId, actor)
-        : null;
+          const refunded = payments.reduce((sum, payment) => sum.plus(payment.amount), new Decimal(0));
+          if (!refunded.equals(toRefund)) {
+            throw new BadRequestException(
+              `Los reembolsos suman ${refunded.toFixed(2)} y hay que devolver ${toRefund.toFixed(2)}: tienen que ser iguales`,
+            );
+          }
 
-      const refundRepo = manager.getRepository(RefundPayment);
-      await refundRepo.save(
-        payments.map((payment) =>
-          refundRepo.create({
-            saleReturnId: saleReturn.id,
-            paymentMethodId: payment.paymentMethodId,
-            amount: payment.amount,
-            reference: payment.reference,
-            cashSessionId: session?.id ?? null,
-            paidBy: actor.userId,
-          }),
-        ),
-      );
+          // El turno va al final: siempre después de la devolución, nunca antes.
+          const paidInCash = payments.some(
+            (payment) =>
+              methodsById.get(payment.paymentMethodId)?.type === PaymentMethodType.CASH,
+          );
+          if (paidInCash && !input.cashSessionId) {
+            throw new BadRequestException(
+              'El reembolso en efectivo sale de un turno de caja: indica el turno',
+            );
+          }
+          const session = input.cashSessionId
+            ? await this.cashSessions.lockOpen(manager, companyId, input.cashSessionId, actor)
+            : null;
+          if (session && session.cashRegister.storeId !== originalSale.storeId) {
+            throw new ConflictException(
+              'El reembolso en efectivo tiene que salir de un turno de la tienda donde se hizo la venta',
+            );
+          }
 
-      saleReturn.refundAmount = refunded;
-      saleReturn.status = SaleReturnStatus.COMPLETED;
-      saleReturn.completedAt = new Date();
-      return manager.getRepository(SaleReturn).save(saleReturn);
-    });
+          const refundRepo = manager.getRepository(RefundPayment);
+          await refundRepo.save(
+            payments.map((payment) =>
+              refundRepo.create({
+                saleReturnId: saleReturn.id,
+                paymentMethodId: payment.paymentMethodId,
+                amount: payment.amount,
+                reference: payment.reference,
+                cashSessionId: session?.id ?? null,
+                paidBy: actor.userId,
+              }),
+            ),
+          );
+
+          saleReturn.refundAmount = refunded;
+          saleReturn.status = SaleReturnStatus.COMPLETED;
+          saleReturn.completedAt = new Date();
+          return manager.getRepository(SaleReturn).save(saleReturn);
+        },
+        (returnId) => manager.getRepository(SaleReturn).findOneByOrFail({ id: returnId }),
+      ),
+    );
   }
 
   // Bloquea la devolución de un cambio que se va a cobrar y exige que pueda usarse: aprobada, de

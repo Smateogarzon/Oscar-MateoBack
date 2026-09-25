@@ -35,9 +35,11 @@ export class Sale extends BaseEntity {
   @Column({ type: 'uuid', nullable: true })
   internalOrderId: string | null;
 
-  // Consecutivo por empresa (VTA-000001); lo entrega DocumentSequenceService
-  @Column({ type: 'varchar', length: 50 })
-  saleNumber: string;
+  // Consecutivo por empresa (VTA-000001); lo entrega DocumentSequenceService al COBRAR la venta
+  // (SaleService.assignNumber). Un borrador no tiene número: los que se abandonan o se borran no dejan
+  // huecos. Solo las ventas de antes de este cambio traen número desde que eran borradores.
+  @Column({ type: 'varchar', length: 50, nullable: true })
+  saleNumber: string | null;
 
   // Quien atendió al cliente
   @Index()

@@ -5,9 +5,11 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { Decimal } from 'decimal.js';
-import { In } from 'typeorm';
+import { In, Not } from 'typeorm';
 import { RecordStatus } from '../../common/enums/record-status.enum.js';
 import type { CashActor } from '../cash-session/cash-actor.js';
+import { IdempotencyKey } from '../idempotency/entities/idempotency-key.entity.js';
+import { fingerprintOf } from '../idempotency/idempotency.js';
 import { NotificationChannel } from '../notification/entities/notification-channel.enum.js';
 import { NotificationEntityType } from '../notification/entities/notification-entity-type.enum.js';
 import { NotificationType } from '../notification/entities/notification-type.enum.js';
@@ -15,6 +17,8 @@ import { PaymentMethodType } from '../payment-method/entities/payment-method-typ
 import { PaymentMethod } from '../payment-method/entities/payment-method.entity.js';
 import { SaleItem } from '../sale/entities/sale-item.entity.js';
 import { Sale } from '../sale/entities/sale.entity.js';
+import type { SaleActor } from '../sale/sale-actor.js';
+import { UserLocationAccess } from '../user-location-access/entities/user-location-access.entity.js';
 import { RefundPayment } from './entities/refund-payment.entity.js';
 import { SaleReturnItem } from './entities/sale-return-item.entity.js';
 import { SaleReturnResolution } from './entities/sale-return-resolution.enum.js';
@@ -28,7 +32,11 @@ import { SaleReturnService } from './sale-return.service.js';
 
 const COMPANY = 'company-1';
 const d = (value: string) => new Decimal(value);
+// Quien entrega un reembolso: el cajero del turno
 const cashier: CashActor = { userId: 'cashier-1', canViewAll: false, canManageShifts: false };
+// Quien pide una devolución o consulta: el cajero, que solo ve lo suyo, y quien aprueba o ve todo
+const cashierActor: SaleActor = { userId: 'cashier-1', canViewAll: false, canReadAny: false };
+const approverActor: SaleActor = { userId: 'admin-1', canViewAll: false, canReadAny: true };
 
 // Una línea de la venta original tal como la lee el servicio: lo que valió con su propio descuento
 const line = (id: string, quantity: string, total: string) => ({
@@ -38,12 +46,19 @@ const line = (id: string, quantity: string, total: string) => ({
   total: d(total),
 });
 
-// Una venta completada tal como la entrega SaleService.lockCompleted
+// Una venta completada tal como la entrega SaleService.lockCompleted: la cobró 'cashier-1' en 'store-1'
 const completedSale = (overrides: Record<string, unknown> = {}) => ({
   id: 'sale-1',
+  storeId: 'store-1',
+  saleNumber: 'VTA-000125',
+  cashierId: 'cashier-1',
+  sellerId: null,
   generalDiscount: d('0'),
   ...overrides,
 });
+
+// La venta original que lee completeRefund y el aviso para ubicar la tienda
+const originalSale = () => ({ id: 'sale-1', storeId: 'store-1' });
 
 // Lo que ya se devolvió de una línea en otra devolución vigente
 const previous = (saleItemId: string, quantity: string, amount: string) => ({
@@ -77,12 +92,25 @@ const saleReturn = (overrides: Record<string, unknown> = {}) => ({
   resolvedBy: null,
   resolvedAt: null,
   resolutionNotes: null,
+  approvedBy: null,
+  approvedAt: null,
+  lastEditedBy: null,
+  lastEditedAt: null,
+  cancelledBy: null,
+  cancelledAt: null,
   completedAt: null,
   ...overrides,
 });
 
 const approvedReturn = (overrides: Record<string, unknown> = {}) =>
   saleReturn({ status: SaleReturnStatus.APPROVED, ...overrides });
+
+// Una devolución tal como la entrega una consulta: con su venta original cargada
+const returnWithSale = (overrides: Record<string, unknown> = {}) =>
+  saleReturn({
+    sale: { id: 'sale-1', cashierId: 'cashier-1', sellerId: null, saleNumber: 'VTA-000125' },
+    ...overrides,
+  });
 
 const cashMethod = {
   id: 'method-cash',
@@ -120,14 +148,18 @@ const refundInputWithoutShift = (payments: RefundLine[]) => ({
 });
 
 function createService() {
-  const returnRepo = { find: vi.fn().mockResolvedValue([]), findOneBy: vi.fn() };
+  const returnRepo = { find: vi.fn().mockResolvedValue([]), findOne: vi.fn() };
   const itemRepo = { find: vi.fn().mockResolvedValue([]) };
   const refundRepo = { find: vi.fn().mockResolvedValue([]) };
+  // La venta que se busca fuera de una transacción (la de un cambio, o el número de la original)
+  const saleRepo = { findOneBy: vi.fn().mockResolvedValue(null), findOne: vi.fn() };
 
   // Lo que ve la transacción
   const txReturnRepo = {
     findOne: vi.fn().mockResolvedValue(saleReturn()),
     findOneBy: vi.fn().mockResolvedValue(saleReturn()),
+    // La carga de un reintento con clave: el recurso tal como está ahora
+    findOneByOrFail: vi.fn(async ({ id }: { id: string }) => saleReturn({ id })),
     create: vi.fn((value: unknown) => value),
     save: vi.fn(async (value: object) => ({ id: 'return-1', ...value })),
   };
@@ -143,32 +175,42 @@ function createService() {
     save: vi.fn(async (value: unknown) => value),
   };
   const txMethodRepo = { find: vi.fn().mockResolvedValue([cashMethod, transferMethod]) };
-  const txSaleRepo = { findOneBy: vi.fn(), save: vi.fn(), update: vi.fn() };
+  const txSaleRepo = {
+    findOneBy: vi.fn().mockResolvedValue(originalSale()),
+    save: vi.fn(),
+    update: vi.fn(),
+  };
+  // ¿Tiene acceso a la tienda? (assertStoreAccess)
+  const txAccessRepo = { existsBy: vi.fn().mockResolvedValue(true) };
+  // La fila de la clave de idempotencia que quedó guardada, si la hay
+  const txKeyRepo = { findOneBy: vi.fn().mockResolvedValue(null) };
 
+  const repositories = new Map<unknown, unknown>([
+    [SaleReturn, txReturnRepo],
+    [SaleReturnItem, txReturnItemRepo],
+    [SaleItem, txLineRepo],
+    [RefundPayment, txRefundRepo],
+    [PaymentMethod, txMethodRepo],
+    [Sale, txSaleRepo],
+    [UserLocationAccess, txAccessRepo],
+    [IdempotencyKey, txKeyRepo],
+  ]);
   const manager = {
-    getRepository: (entity: unknown) =>
-      entity === SaleReturn
-        ? txReturnRepo
-        : entity === SaleReturnItem
-          ? txReturnItemRepo
-          : entity === SaleItem
-            ? txLineRepo
-            : entity === RefundPayment
-              ? txRefundRepo
-              : entity === PaymentMethod
-                ? txMethodRepo
-                : entity === Sale
-                  ? txSaleRepo
-                  : undefined,
+    // El INSERT que reclama la clave devuelve su fila (la clave era nueva); el UPDATE que guarda el
+    // recurso no devuelve nada que importe
+    query: vi.fn().mockResolvedValue([{ id: 'claim-1' }]),
+    getRepository: (entity: unknown) => repositories.get(entity),
   };
   const dataSource = {
     transaction: vi.fn(async (fn: (manager: unknown) => unknown) => fn(manager)),
+    getRepository: vi.fn(() => saleRepo),
   };
 
   const sales = { lockCompleted: vi.fn().mockResolvedValue(completedSale()) };
   const sequences = { next: vi.fn().mockResolvedValue(18) };
+  // El turno bloqueado trae su caja, y la caja su tienda
   const cashSessions = {
-    lockOpen: vi.fn().mockResolvedValue({ id: 'session-1' }),
+    lockOpen: vi.fn().mockResolvedValue({ id: 'session-1', cashRegister: { storeId: 'store-1' } }),
     findOne: vi.fn().mockResolvedValue({ id: 'session-1' }),
   };
   // Los administradores de la empresa, que son quienes reciben las devoluciones
@@ -194,12 +236,15 @@ function createService() {
     returnRepo,
     itemRepo,
     refundRepo,
+    saleRepo,
     txReturnRepo,
     txReturnItemRepo,
     txLineRepo,
     txRefundRepo,
     txMethodRepo,
     txSaleRepo,
+    txAccessRepo,
+    txKeyRepo,
     manager,
     dataSource,
     sales,
@@ -209,65 +254,291 @@ function createService() {
   };
 }
 
+// Una clave que ya se usó: el INSERT que intenta reclamarla no devuelve fila y la que quedó guardada
+// apunta a `resourceId`, con la huella de `input` (o la que se diga).
+function keyAlreadyUsed(
+  mocks: ReturnType<typeof createService>,
+  input: unknown,
+  { resourceId = 'return-7' as string | null, fingerprint = fingerprintOf(input) } = {},
+) {
+  mocks.manager.query.mockResolvedValueOnce([]);
+  mocks.txKeyRepo.findOneBy.mockResolvedValue({ fingerprint, resourceId });
+}
+
+// La venta de un cambio: `findOneBy` responde según el id, porque la venta original también se lee por ahí
+const withExchangeSale = (
+  txSaleRepo: { findOneBy: ReturnType<typeof vi.fn> },
+  exchangeSale: unknown,
+) =>
+  txSaleRepo.findOneBy.mockImplementation(async ({ id }: { id: string }) =>
+    id === 'sale-2' ? exchangeSale : originalSale(),
+  );
+
 describe('SaleReturnService', () => {
   describe('findAll', () => {
-    it('lists the returns of the company, the most recent first', async () => {
+    it('lists the returns of the company, the most recent first, up to 500 by default', async () => {
       const { service, returnRepo } = createService();
 
-      await service.findAll(COMPANY);
+      await service.findAll(COMPANY, approverActor);
 
       expect(returnRepo.find).toHaveBeenCalledWith({
-        where: { companyId: COMPANY },
+        where: [{ companyId: COMPANY }],
+        relations: { sale: true },
         order: { createdAt: 'DESC' },
+        take: 500,
+        skip: 0,
       });
     });
 
     it('filters by status, by original sale and by the sale that replaced it', async () => {
       const { service, returnRepo } = createService();
 
-      await service.findAll(COMPANY, {
+      await service.findAll(COMPANY, approverActor, {
         status: SaleReturnStatus.APPROVED,
         saleId: 'sale-1',
         replacementSaleId: 'sale-2',
       });
 
-      expect(returnRepo.find).toHaveBeenCalledWith({
-        where: {
-          companyId: COMPANY,
-          status: SaleReturnStatus.APPROVED,
-          saleId: 'sale-1',
-          replacementSaleId: 'sale-2',
-        },
-        order: { createdAt: 'DESC' },
+      expect(returnRepo.find).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: [
+            {
+              companyId: COMPANY,
+              status: SaleReturnStatus.APPROVED,
+              saleId: 'sale-1',
+              replacementSaleId: 'sale-2',
+            },
+          ],
+        }),
+      );
+    });
+
+    it('lets whoever sees all the sales see every return of the company', async () => {
+      const { service, returnRepo } = createService();
+
+      await service.findAll(COMPANY, { userId: 'viewer-1', canViewAll: true, canReadAny: true });
+
+      expect(returnRepo.find).toHaveBeenCalledWith(
+        expect.objectContaining({ where: [{ companyId: COMPANY }] }),
+      );
+    });
+
+    it('shows whoever cannot see everything only the returns of their own sales and the ones they registered', async () => {
+      const { service, returnRepo } = createService();
+
+      await service.findAll(COMPANY, cashierActor);
+
+      expect(returnRepo.find).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: [
+            { companyId: COMPANY, sale: { cashierId: 'cashier-1' } },
+            { companyId: COMPANY, sale: { sellerId: 'cashier-1' } },
+            { companyId: COMPANY, replacementSale: { cashierId: 'cashier-1' } },
+            { companyId: COMPANY, processedBy: 'cashier-1' },
+          ],
+        }),
+      );
+    });
+
+    it('keeps the filters in every alternative, so a filter never shows more than the asker may see', async () => {
+      const { service, returnRepo } = createService();
+
+      await service.findAll(COMPANY, cashierActor, {
+        status: SaleReturnStatus.PENDING,
+        saleId: 'sale-1',
       });
+
+      const { where } = returnRepo.find.mock.calls[0][0];
+      expect(where).toHaveLength(4);
+      for (const alternative of where) {
+        expect(alternative).toMatchObject({
+          companyId: COMPANY,
+          status: SaleReturnStatus.PENDING,
+          saleId: 'sale-1',
+        });
+      }
+    });
+
+    it.each([
+      [undefined, 500],
+      [0, 1],
+      [-5, 1],
+      [300, 300],
+      [5000, 1000],
+    ])('takes a limit of %s as %s', async (limit, take) => {
+      const { service, returnRepo } = createService();
+
+      await service.findAll(COMPANY, approverActor, { limit });
+
+      expect(returnRepo.find.mock.calls[0][0].take).toBe(take);
+    });
+
+    it.each([
+      [undefined, 0],
+      [-3, 0],
+      [20, 20],
+    ])('takes an offset of %s as %s', async (offset, skip) => {
+      const { service, returnRepo } = createService();
+
+      await service.findAll(COMPANY, approverActor, { offset });
+
+      expect(returnRepo.find.mock.calls[0][0].skip).toBe(skip);
     });
   });
 
   describe('findOne', () => {
-    it('finds a return of the company', async () => {
+    it('finds a return of the company, with its original sale, without asking who is asking', async () => {
       const { service, returnRepo } = createService();
-      returnRepo.findOneBy.mockResolvedValue(saleReturn());
+      returnRepo.findOne.mockResolvedValue(returnWithSale());
 
       const found = await service.findOne(COMPANY, 'return-1');
 
       expect(found.id).toBe('return-1');
-      expect(returnRepo.findOneBy).toHaveBeenCalledWith({ id: 'return-1', companyId: COMPANY });
+      expect(returnRepo.findOne).toHaveBeenCalledWith({
+        where: { id: 'return-1', companyId: COMPANY },
+        relations: { sale: true },
+      });
     });
 
     it('answers "not found" for a return that does not exist or belongs to another company', async () => {
       const { service, returnRepo } = createService();
-      returnRepo.findOneBy.mockResolvedValue(null);
+      returnRepo.findOne.mockResolvedValue(null);
 
       await expect(service.findOne(COMPANY, 'return-9')).rejects.toThrow(NotFoundException);
+    });
+  });
+
+  describe('findVisible', () => {
+    // Una devolución de la venta de otro cajero, registrada por otro
+    const someoneElses = (overrides: Record<string, unknown> = {}) =>
+      returnWithSale({
+        processedBy: 'cashier-2',
+        sale: { id: 'sale-1', cashierId: 'cashier-2', sellerId: 'seller-1' },
+        ...overrides,
+      });
+
+    it('shows a return the asker registered themselves', async () => {
+      const { service, returnRepo } = createService();
+      returnRepo.findOne.mockResolvedValue(someoneElses({ processedBy: 'cashier-1' }));
+
+      const found = await service.findVisible(COMPANY, cashierActor, 'return-1');
+
+      expect(found.id).toBe('return-1');
+    });
+
+    it('shows the return of a sale the asker charged', async () => {
+      const { service, returnRepo } = createService();
+      returnRepo.findOne.mockResolvedValue(
+        someoneElses({ sale: { id: 'sale-1', cashierId: 'cashier-1', sellerId: null } }),
+      );
+
+      await expect(service.findVisible(COMPANY, cashierActor, 'return-1')).resolves.toMatchObject({
+        id: 'return-1',
+      });
+    });
+
+    it('shows the return of a sale the asker sold', async () => {
+      const { service, returnRepo } = createService();
+      returnRepo.findOne.mockResolvedValue(
+        someoneElses({ sale: { id: 'sale-1', cashierId: 'cashier-2', sellerId: 'cashier-1' } }),
+      );
+
+      await expect(service.findVisible(COMPANY, cashierActor, 'return-1')).resolves.toMatchObject({
+        id: 'return-1',
+      });
+    });
+
+    it('shows the return of an exchange whose new sale the asker charged', async () => {
+      const { service, returnRepo, saleRepo } = createService();
+      returnRepo.findOne.mockResolvedValue(someoneElses({ replacementSaleId: 'sale-2' }));
+      saleRepo.findOneBy.mockResolvedValue({ id: 'sale-2' });
+
+      await expect(service.findVisible(COMPANY, cashierActor, 'return-1')).resolves.toMatchObject({
+        id: 'return-1',
+      });
+      expect(saleRepo.findOneBy).toHaveBeenCalledWith({ id: 'sale-2', cashierId: 'cashier-1' });
+    });
+
+    it('lets whoever can read every sale, or approve, see any return without looking anything else up', async () => {
+      const { service, returnRepo, saleRepo } = createService();
+      returnRepo.findOne.mockResolvedValue(someoneElses());
+
+      await expect(service.findVisible(COMPANY, approverActor, 'return-1')).resolves.toMatchObject({
+        id: 'return-1',
+      });
+      expect(saleRepo.findOneBy).not.toHaveBeenCalled();
+    });
+
+    it('answers "not found" for the return of somebody else\'s sale, as if it did not exist', async () => {
+      const { service, returnRepo, saleRepo } = createService();
+      returnRepo.findOne.mockResolvedValue(someoneElses());
+
+      await expect(service.findVisible(COMPANY, cashierActor, 'return-1')).rejects.toThrow(
+        NotFoundException,
+      );
+      // No hay cambio cobrado que mirar
+      expect(saleRepo.findOneBy).not.toHaveBeenCalled();
+    });
+
+    it('answers "not found" when the exchange of somebody else\'s return was not charged by the asker either', async () => {
+      const { service, returnRepo, saleRepo } = createService();
+      returnRepo.findOne.mockResolvedValue(someoneElses({ replacementSaleId: 'sale-2' }));
+      saleRepo.findOneBy.mockResolvedValue(null);
+
+      await expect(service.findVisible(COMPANY, cashierActor, 'return-1')).rejects.toThrow(
+        NotFoundException,
+      );
+    });
+
+    it('answers "not found" for a return of another company', async () => {
+      const { service, returnRepo } = createService();
+      returnRepo.findOne.mockResolvedValue(null);
+
+      await expect(service.findVisible(COMPANY, approverActor, 'return-9')).rejects.toThrow(
+        NotFoundException,
+      );
+    });
+  });
+
+  describe('saleNumberOf', () => {
+    it('takes the number from the original sale when the list already loaded it', async () => {
+      const { service, dataSource } = createService();
+
+      const number = await service.saleNumberOf(returnWithSale() as never);
+
+      expect(number).toBe('VTA-000125');
+      expect(dataSource.getRepository).not.toHaveBeenCalled();
+    });
+
+    it('looks the sale up when the return comes on its own (the result of a mutation)', async () => {
+      const { service, saleRepo } = createService();
+      saleRepo.findOne.mockResolvedValue({ id: 'sale-1', saleNumber: 'VTA-000125' });
+
+      const number = await service.saleNumberOf(saleReturn() as never);
+
+      expect(number).toBe('VTA-000125');
+      expect(saleRepo.findOne).toHaveBeenCalledWith({
+        where: { id: 'sale-1' },
+        select: { id: true, saleNumber: true },
+      });
+    });
+
+    it('is null when the sale has no number or cannot be found', async () => {
+      const { service, saleRepo } = createService();
+      saleRepo.findOne.mockResolvedValueOnce({ id: 'sale-1', saleNumber: null });
+      saleRepo.findOne.mockResolvedValueOnce(null);
+
+      await expect(service.saleNumberOf(saleReturn() as never)).resolves.toBeNull();
+      await expect(service.saleNumberOf(saleReturn() as never)).resolves.toBeNull();
     });
   });
 
   describe('findItems and findRefunds', () => {
     it('lists the lines returned in the order they were registered', async () => {
       const { service, returnRepo, itemRepo } = createService();
-      returnRepo.findOneBy.mockResolvedValue(saleReturn());
+      returnRepo.findOne.mockResolvedValue(returnWithSale());
 
-      await service.findItems(COMPANY, 'return-1');
+      await service.findItems(COMPANY, cashierActor, 'return-1');
 
       expect(itemRepo.find).toHaveBeenCalledWith({
         where: { saleReturnId: 'return-1' },
@@ -277,9 +548,9 @@ describe('SaleReturnService', () => {
 
     it('lists the refunds in the order they were paid', async () => {
       const { service, returnRepo, refundRepo } = createService();
-      returnRepo.findOneBy.mockResolvedValue(saleReturn());
+      returnRepo.findOne.mockResolvedValue(returnWithSale());
 
-      await service.findRefunds(COMPANY, 'return-1');
+      await service.findRefunds(COMPANY, cashierActor, 'return-1');
 
       expect(refundRepo.find).toHaveBeenCalledWith({
         where: { saleReturnId: 'return-1' },
@@ -318,12 +589,43 @@ describe('SaleReturnService', () => {
 
     it('does not reveal the lines or the refunds of a return of another company', async () => {
       const { service, returnRepo, itemRepo, refundRepo } = createService();
-      returnRepo.findOneBy.mockResolvedValue(null);
+      returnRepo.findOne.mockResolvedValue(null);
 
-      await expect(service.findItems(COMPANY, 'return-9')).rejects.toThrow(NotFoundException);
-      await expect(service.findRefunds(COMPANY, 'return-9')).rejects.toThrow(NotFoundException);
+      await expect(service.findItems(COMPANY, cashierActor, 'return-9')).rejects.toThrow(NotFoundException);
+      await expect(service.findRefunds(COMPANY, cashierActor, 'return-9')).rejects.toThrow(NotFoundException);
       expect(itemRepo.find).not.toHaveBeenCalled();
       expect(refundRepo.find).not.toHaveBeenCalled();
+    });
+
+    it('does not reveal the lines or the refunds of a return of somebody else\'s sale', async () => {
+      const { service, returnRepo, itemRepo, refundRepo } = createService();
+      returnRepo.findOne.mockResolvedValue(
+        returnWithSale({
+          processedBy: 'cashier-2',
+          sale: { id: 'sale-1', cashierId: 'cashier-2', sellerId: null },
+        }),
+      );
+
+      await expect(service.findItems(COMPANY, cashierActor, 'return-1')).rejects.toThrow(NotFoundException);
+      await expect(service.findRefunds(COMPANY, cashierActor, 'return-1')).rejects.toThrow(NotFoundException);
+      expect(itemRepo.find).not.toHaveBeenCalled();
+      expect(refundRepo.find).not.toHaveBeenCalled();
+    });
+
+    it('lets whoever can read every sale see the lines and the refunds of any return', async () => {
+      const { service, returnRepo, itemRepo, refundRepo } = createService();
+      returnRepo.findOne.mockResolvedValue(
+        returnWithSale({
+          processedBy: 'cashier-2',
+          sale: { id: 'sale-1', cashierId: 'cashier-2', sellerId: null },
+        }),
+      );
+
+      await service.findItems(COMPANY, approverActor, 'return-1');
+      await service.findRefunds(COMPANY, approverActor, 'return-1');
+
+      expect(itemRepo.find).toHaveBeenCalledTimes(1);
+      expect(refundRepo.find).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -333,7 +635,7 @@ describe('SaleReturnService', () => {
 
       const created = await service.request(
         COMPANY,
-        'cashier-1',
+        cashierActor,
         requestInput([{ saleItemId: 'line-1', quantity: '1' }], { reason: '  Le queda pequeño  ' }),
       );
 
@@ -359,7 +661,7 @@ describe('SaleReturnService', () => {
 
       await service.request(
         COMPANY,
-        'cashier-1',
+        cashierActor,
         requestInput([{ saleItemId: 'line-1', quantity: '1' }], {
           resolution: SaleReturnResolution.EXCHANGE,
         }),
@@ -373,7 +675,7 @@ describe('SaleReturnService', () => {
 
       await service.request(
         COMPANY,
-        'cashier-1',
+        cashierActor,
         requestInput([{ saleItemId: 'line-1', quantity: '1' }], { reason: '   ' }),
       );
 
@@ -389,7 +691,7 @@ describe('SaleReturnService', () => {
 
       await service.request(
         COMPANY,
-        'cashier-1',
+        cashierActor,
         requestInput([
           { saleItemId: 'line-1', quantity: '1' },
           { saleItemId: 'line-2', quantity: '2' },
@@ -410,7 +712,7 @@ describe('SaleReturnService', () => {
 
       await service.request(
         COMPANY,
-        'cashier-1',
+        cashierActor,
         requestInput([{ saleItemId: 'line-1', quantity: '1' }]),
       );
 
@@ -429,7 +731,7 @@ describe('SaleReturnService', () => {
 
       await service.request(
         COMPANY,
-        'cashier-1',
+        cashierActor,
         requestInput([{ saleItemId: 'line-2', quantity: '1' }]),
       );
 
@@ -443,7 +745,7 @@ describe('SaleReturnService', () => {
 
       await service.request(
         COMPANY,
-        'cashier-1',
+        cashierActor,
         requestInput([{ saleItemId: 'line-1', quantity: '1' }]),
       );
 
@@ -461,7 +763,7 @@ describe('SaleReturnService', () => {
 
       await service.request(
         COMPANY,
-        'cashier-1',
+        cashierActor,
         requestInput([{ saleItemId: 'line-1', quantity: '1' }]),
       );
 
@@ -479,7 +781,7 @@ describe('SaleReturnService', () => {
 
       await service.request(
         COMPANY,
-        'cashier-1',
+        cashierActor,
         requestInput([
           { saleItemId: 'line-1', quantity: '1' },
           { saleItemId: 'line-2', quantity: '1' },
@@ -500,7 +802,7 @@ describe('SaleReturnService', () => {
 
       await service.request(
         COMPANY,
-        'cashier-1',
+        cashierActor,
         requestInput([{ saleItemId: 'line-1', quantity: '1' }]),
       );
 
@@ -515,7 +817,7 @@ describe('SaleReturnService', () => {
 
       await service.request(
         COMPANY,
-        'cashier-1',
+        cashierActor,
         requestInput([{ saleItemId: 'line-1', quantity: '1' }]),
       );
 
@@ -532,7 +834,7 @@ describe('SaleReturnService', () => {
 
       // Quedaba 1 y se piden 2
       await expect(
-        service.request(COMPANY, 'cashier-1', requestInput([{ saleItemId: 'line-1', quantity: '2' }])),
+        service.request(COMPANY, cashierActor, requestInput([{ saleItemId: 'line-1', quantity: '2' }])),
       ).rejects.toThrow('quedan 1.00 por devolver');
     });
 
@@ -541,7 +843,7 @@ describe('SaleReturnService', () => {
 
       await service.request(
         COMPANY,
-        'cashier-1',
+        cashierActor,
         requestInput([{ saleItemId: 'line-1', quantity: '1' }]),
       );
 
@@ -560,7 +862,7 @@ describe('SaleReturnService', () => {
       txLineRepo.find.mockResolvedValue([line('line-1', '2', '200000')]);
 
       await expect(
-        service.request(COMPANY, 'cashier-1', requestInput([{ saleItemId: 'line-1', quantity: '3' }])),
+        service.request(COMPANY, cashierActor, requestInput([{ saleItemId: 'line-1', quantity: '3' }])),
       ).rejects.toThrow('No se puede devolver más de lo vendido: de "Zapato line-1" quedan 2.00');
     });
 
@@ -569,7 +871,7 @@ describe('SaleReturnService', () => {
       txReturnItemRepo.find.mockResolvedValue([previous('line-1', '1', '100000')]);
 
       await expect(
-        service.request(COMPANY, 'cashier-1', requestInput([{ saleItemId: 'line-1', quantity: '1' }])),
+        service.request(COMPANY, cashierActor, requestInput([{ saleItemId: 'line-1', quantity: '1' }])),
       ).rejects.toThrow(BadRequestException);
     });
 
@@ -579,7 +881,7 @@ describe('SaleReturnService', () => {
       await expect(
         service.request(
           COMPANY,
-          'cashier-1',
+          cashierActor,
           requestInput([
             { saleItemId: 'line-1', quantity: '1' },
             { saleItemId: 'line-1', quantity: '1' },
@@ -593,7 +895,7 @@ describe('SaleReturnService', () => {
       const { service, dataSource } = createService();
 
       await expect(
-        service.request(COMPANY, 'cashier-1', requestInput([{ saleItemId: 'line-1', quantity }])),
+        service.request(COMPANY, cashierActor, requestInput([{ saleItemId: 'line-1', quantity }])),
       ).rejects.toThrow('La cantidad a devolver debe ser mayor que cero');
       expect(dataSource.transaction).not.toHaveBeenCalled();
     });
@@ -602,7 +904,7 @@ describe('SaleReturnService', () => {
       const { service, txReturnRepo } = createService();
 
       await expect(
-        service.request(COMPANY, 'cashier-1', requestInput([{ saleItemId: 'line-9', quantity: '1' }])),
+        service.request(COMPANY, cashierActor, requestInput([{ saleItemId: 'line-9', quantity: '1' }])),
       ).rejects.toThrow('Alguna de las líneas indicadas no pertenece a la venta');
       expect(txReturnRepo.save).not.toHaveBeenCalled();
     });
@@ -612,7 +914,7 @@ describe('SaleReturnService', () => {
       txLineRepo.find.mockResolvedValue([line('line-1', '1', '0')]);
 
       await expect(
-        service.request(COMPANY, 'cashier-1', requestInput([{ saleItemId: 'line-1', quantity: '1' }])),
+        service.request(COMPANY, cashierActor, requestInput([{ saleItemId: 'line-1', quantity: '1' }])),
       ).rejects.toThrow('No hay nada que devolver');
       expect(txReturnRepo.save).not.toHaveBeenCalled();
       expect(sequences.next).not.toHaveBeenCalled();
@@ -625,12 +927,12 @@ describe('SaleReturnService', () => {
       );
 
       await expect(
-        service.request(COMPANY, 'cashier-1', requestInput([{ saleItemId: 'line-1', quantity: '1' }])),
+        service.request(COMPANY, cashierActor, requestInput([{ saleItemId: 'line-1', quantity: '1' }])),
       ).rejects.toThrow(ConflictException);
 
       sales.lockCompleted.mockRejectedValue(new NotFoundException('Venta sale-9 no encontrada'));
       await expect(
-        service.request(COMPANY, 'cashier-1', requestInput([{ saleItemId: 'line-1', quantity: '1' }])),
+        service.request(COMPANY, cashierActor, requestInput([{ saleItemId: 'line-1', quantity: '1' }])),
       ).rejects.toThrow(NotFoundException);
       expect(txReturnRepo.save).not.toHaveBeenCalled();
       expect(sequences.next).not.toHaveBeenCalled();
@@ -641,7 +943,7 @@ describe('SaleReturnService', () => {
       txLineRepo.find.mockResolvedValue([line('line-1', '1', '100000')]);
 
       await expect(
-        service.request(COMPANY, 'cashier-1', requestInput([{ saleItemId: 'line-1', quantity: '5' }])),
+        service.request(COMPANY, cashierActor, requestInput([{ saleItemId: 'line-1', quantity: '5' }])),
       ).rejects.toThrow(BadRequestException);
 
       expect(sequences.next).not.toHaveBeenCalled();
@@ -652,13 +954,353 @@ describe('SaleReturnService', () => {
 
       await service.request(
         COMPANY,
-        'cashier-1',
+        cashierActor,
         requestInput([{ saleItemId: 'line-1', quantity: '1' }]),
       );
 
       expect(txSaleRepo.findOneBy).toHaveBeenCalledWith({ id: 'sale-1' });
       expect(txSaleRepo.save).not.toHaveBeenCalled();
       expect(txSaleRepo.update).not.toHaveBeenCalled();
+    });
+
+    it('locks the sale before it uses up a number or registers anything', async () => {
+      const { service, sales, sequences, txReturnRepo } = createService();
+
+      await service.request(
+        COMPANY,
+        cashierActor,
+        requestInput([{ saleItemId: 'line-1', quantity: '1' }]),
+      );
+
+      expect(sales.lockCompleted.mock.invocationCallOrder[0]).toBeLessThan(
+        sequences.next.mock.invocationCallOrder[0],
+      );
+      expect(sales.lockCompleted.mock.invocationCallOrder[0]).toBeLessThan(
+        txReturnRepo.save.mock.invocationCallOrder[0],
+      );
+    });
+
+    describe('who can register it', () => {
+      it('does not register a return of a sale that is not the asker\'s, and answers as if the sale did not exist', async () => {
+        const { service, sales, sequences, txReturnRepo, txAccessRepo, notifications } = createService();
+        sales.lockCompleted.mockResolvedValue(
+          completedSale({ cashierId: 'cashier-2', sellerId: 'seller-1' }),
+        );
+
+        await expect(
+          service.request(COMPANY, cashierActor, requestInput([{ saleItemId: 'line-1', quantity: '1' }])),
+        ).rejects.toThrow(NotFoundException);
+
+        // Ni el consecutivo, ni el registro, ni el aviso, ni siquiera mirar la tienda
+        expect(txAccessRepo.existsBy).not.toHaveBeenCalled();
+        expect(sequences.next).not.toHaveBeenCalled();
+        expect(txReturnRepo.save).not.toHaveBeenCalled();
+        expect(notifications.notify).not.toHaveBeenCalled();
+      });
+
+      it.each([
+        ['the cashier who charged it', { cashierId: 'cashier-1', sellerId: null }],
+        ['the seller who sold it', { cashierId: 'cashier-2', sellerId: 'cashier-1' }],
+      ])('lets %s register it', async (_who, sale) => {
+        const { service, sales } = createService();
+        sales.lockCompleted.mockResolvedValue(completedSale(sale));
+
+        await expect(
+          service.request(COMPANY, cashierActor, requestInput([{ saleItemId: 'line-1', quantity: '1' }])),
+        ).resolves.toMatchObject({ id: 'return-1' });
+      });
+
+      it('lets whoever can read any sale register a return of a sale that is not theirs, as the one who registered it', async () => {
+        const { service, sales, txReturnRepo, txAccessRepo } = createService();
+        sales.lockCompleted.mockResolvedValue(
+          completedSale({ cashierId: 'cashier-2', sellerId: 'seller-1' }),
+        );
+
+        await service.request(
+          COMPANY,
+          approverActor,
+          requestInput([{ saleItemId: 'line-1', quantity: '1' }]),
+        );
+
+        expect(txReturnRepo.create.mock.calls[0][0].processedBy).toBe('admin-1');
+        // Ver la venta no exime de tener la tienda asignada
+        expect(txAccessRepo.existsBy).toHaveBeenCalledWith(
+          expect.objectContaining({ userId: 'admin-1', locationId: 'store-1' }),
+        );
+      });
+
+      it.each([
+        ['a cashier', cashierActor],
+        ['an approver', approverActor],
+      ])('needs access to the store where the sale was made, for %s, and does not use up a number', async (_who, actor) => {
+        const { service, sequences, txReturnRepo, txAccessRepo, notifications } = createService();
+        txAccessRepo.existsBy.mockResolvedValue(false);
+
+        await expect(
+          service.request(COMPANY, actor, requestInput([{ saleItemId: 'line-1', quantity: '1' }])),
+        ).rejects.toThrow(ForbiddenException);
+
+        expect(txAccessRepo.existsBy).toHaveBeenCalledWith({
+          userId: actor.userId,
+          locationId: 'store-1',
+          status: RecordStatus.ACTIVE,
+        });
+        expect(sequences.next).not.toHaveBeenCalled();
+        expect(txReturnRepo.save).not.toHaveBeenCalled();
+        expect(notifications.notify).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('with an idempotency key', () => {
+      const input = requestInput([{ saleItemId: 'line-1', quantity: '1' }]);
+
+      it('claims the key in the same transaction as the return and records what was created', async () => {
+        const { service, manager, dataSource, txReturnRepo } = createService();
+
+        const created = await service.request(COMPANY, cashierActor, input, 'key-1');
+
+        expect(dataSource.transaction).toHaveBeenCalledTimes(1);
+        expect(manager.query).toHaveBeenNthCalledWith(
+          1,
+          expect.stringContaining('INSERT INTO "idempotency_keys"'),
+          [COMPANY, 'cashier-1', 'requestSaleReturn', 'key-1', fingerprintOf(input)],
+        );
+        expect(manager.query).toHaveBeenNthCalledWith(
+          2,
+          expect.stringContaining('UPDATE "idempotency_keys"'),
+          ['claim-1', 'sale_return', created.id],
+        );
+        // La clave se reclama antes de hacer nada
+        expect(manager.query.mock.invocationCallOrder[0]).toBeLessThan(
+          txReturnRepo.save.mock.invocationCallOrder[0],
+        );
+      });
+
+      it('does not claim anything when the request comes without a key', async () => {
+        const { service, manager, txKeyRepo } = createService();
+
+        await service.request(COMPANY, cashierActor, input);
+
+        expect(manager.query).not.toHaveBeenCalled();
+        expect(txKeyRepo.findOneBy).not.toHaveBeenCalled();
+      });
+
+      it('gives back the return that was already registered when the same key comes again, without registering another', async () => {
+        const mocks = createService();
+        const { service, manager, txKeyRepo, txReturnRepo, txReturnItemRepo, sales, sequences, notifications } = mocks;
+        keyAlreadyUsed(mocks, input);
+
+        const again = await service.request(COMPANY, cashierActor, input, 'key-1');
+
+        expect(again.id).toBe('return-7');
+        expect(txKeyRepo.findOneBy).toHaveBeenCalledWith({
+          companyId: COMPANY,
+          userId: 'cashier-1',
+          operation: 'requestSaleReturn',
+          key: 'key-1',
+        });
+        expect(txReturnRepo.findOneByOrFail).toHaveBeenCalledWith({ id: 'return-7' });
+        // Solo el intento de reclamar: no hay nada que registrar en el reintento
+        expect(manager.query).toHaveBeenCalledTimes(1);
+        expect(sales.lockCompleted).not.toHaveBeenCalled();
+        expect(sequences.next).not.toHaveBeenCalled();
+        expect(txReturnRepo.save).not.toHaveBeenCalled();
+        expect(txReturnItemRepo.save).not.toHaveBeenCalled();
+        expect(notifications.notify).not.toHaveBeenCalled();
+      });
+
+      it('refuses the same key with other data, and registers nothing', async () => {
+        const mocks = createService();
+        const { service, txReturnRepo, sequences } = mocks;
+        keyAlreadyUsed(mocks, input);
+
+        await expect(
+          service.request(
+            COMPANY,
+            cashierActor,
+            requestInput([{ saleItemId: 'line-1', quantity: '2' }]),
+            'key-1',
+          ),
+        ).rejects.toThrow(ConflictException);
+
+        expect(txReturnRepo.findOneByOrFail).not.toHaveBeenCalled();
+        expect(txReturnRepo.save).not.toHaveBeenCalled();
+        expect(sequences.next).not.toHaveBeenCalled();
+      });
+
+      it('says the operation is still going on when the key was claimed but has no result yet', async () => {
+        const mocks = createService();
+        const { service, txReturnRepo } = mocks;
+        keyAlreadyUsed(mocks, input, { resourceId: null });
+
+        await expect(service.request(COMPANY, cashierActor, input, 'key-1')).rejects.toThrow(
+          'Esta operación ya está en curso',
+        );
+        expect(txReturnRepo.save).not.toHaveBeenCalled();
+      });
+    });
+  });
+
+  describe('edit', () => {
+    const editInput = (overrides: Record<string, unknown> = {}) => ({
+      items: [{ saleItemId: 'line-1', quantity: '1' }],
+      ...overrides,
+    });
+
+    it('replaces the lines of a pending return, values them again, and leaves who edited it and when', async () => {
+      const { service, txReturnRepo, txReturnItemRepo, txLineRepo } = createService();
+      const pending = saleReturn({ totalReturned: d('200000') });
+      txReturnRepo.findOne.mockResolvedValue(pending);
+      // Pagó 200000 por 2 pares: devolver 1 vale 100000
+      txLineRepo.find.mockResolvedValue([line('line-1', '2', '200000')]);
+
+      const edited = await service.edit(COMPANY, 'admin-1', 'return-1', editInput());
+
+      expect(txReturnItemRepo.delete).toHaveBeenCalledWith({ saleReturnId: 'return-1' });
+      const saved = txReturnItemRepo.save.mock.calls[0][0];
+      expect(saved).toHaveLength(1);
+      expect(saved[0]).toMatchObject({ saleReturnId: 'return-1', saleItemId: 'line-1' });
+      expect(saved[0].amount.toFixed(2)).toBe('100000.00');
+      expect(edited.totalReturned.toFixed(2)).toBe('100000.00');
+      expect(edited.status).toBe(SaleReturnStatus.PENDING);
+      expect(edited.lastEditedBy).toBe('admin-1');
+      expect(edited.lastEditedAt).toBeInstanceOf(Date);
+      // Editar no es resolver: no cambia quién la resolvió ni quién la aprobó
+      expect(edited.resolvedBy).toBeNull();
+      expect(edited.approvedBy).toBeNull();
+      expect(txReturnRepo.save).toHaveBeenCalledWith(pending);
+    });
+
+    it('takes out the old lines before saving the new ones', async () => {
+      const { service, txReturnItemRepo } = createService();
+
+      await service.edit(COMPANY, 'admin-1', 'return-1', editInput());
+
+      expect(txReturnItemRepo.delete.mock.invocationCallOrder[0]).toBeLessThan(
+        txReturnItemRepo.save.mock.invocationCallOrder[0],
+      );
+    });
+
+    it('changes the resolution and the reason when they come, and trims the reason', async () => {
+      const { service } = createService();
+
+      const edited = await service.edit(
+        COMPANY,
+        'admin-1',
+        'return-1',
+        editInput({ resolution: SaleReturnResolution.EXCHANGE, reason: '  Otra talla  ' }),
+      );
+
+      expect(edited.resolution).toBe(SaleReturnResolution.EXCHANGE);
+      expect(edited.reason).toBe('Otra talla');
+    });
+
+    it('keeps the resolution and the reason when they do not come, and clears the reason when it comes blank', async () => {
+      const { service, txReturnRepo } = createService();
+      txReturnRepo.findOne.mockResolvedValue(
+        saleReturn({ resolution: SaleReturnResolution.EXCHANGE, reason: 'Le queda pequeño' }),
+      );
+
+      const kept = await service.edit(COMPANY, 'admin-1', 'return-1', editInput());
+      expect(kept.resolution).toBe(SaleReturnResolution.EXCHANGE);
+      expect(kept.reason).toBe('Le queda pequeño');
+
+      txReturnRepo.findOne.mockResolvedValue(saleReturn({ reason: 'Le queda pequeño' }));
+      const cleared = await service.edit(COMPANY, 'admin-1', 'return-1', editInput({ reason: '   ' }));
+      expect(cleared.reason).toBeNull();
+    });
+
+    it('values the lines without counting what this same return already had', async () => {
+      const { service, txReturnItemRepo } = createService();
+
+      await service.edit(COMPANY, 'admin-1', 'return-1', editInput());
+
+      expect(txReturnItemRepo.find).toHaveBeenCalledWith({
+        where: {
+          saleReturn: {
+            saleId: 'sale-1',
+            status: In(RESERVING_SALE_RETURN_STATUSES),
+            id: Not('return-1'),
+          },
+        },
+      });
+    });
+
+    it('locks the sale first and the return after, always in that order', async () => {
+      const { service, sales, txReturnRepo } = createService();
+
+      await service.edit(COMPANY, 'admin-1', 'return-1', editInput());
+
+      // Primero se lee la devolución sin bloquear, solo para saber cuál es su venta
+      expect(txReturnRepo.findOneBy).toHaveBeenCalledWith({ id: 'return-1', companyId: COMPANY });
+      expect(sales.lockCompleted).toHaveBeenCalledWith(expect.anything(), COMPANY, 'sale-1');
+      expect(sales.lockCompleted.mock.invocationCallOrder[0]).toBeLessThan(
+        txReturnRepo.findOne.mock.invocationCallOrder[0],
+      );
+      expect(txReturnRepo.findOne).toHaveBeenCalledWith({
+        where: { id: 'return-1', companyId: COMPANY },
+        lock: { mode: 'pessimistic_write' },
+      });
+    });
+
+    it.each([
+      SaleReturnStatus.APPROVED,
+      SaleReturnStatus.COMPLETED,
+      SaleReturnStatus.REJECTED,
+      SaleReturnStatus.CANCELLED,
+    ])('does not edit a return that is already %s', async (status) => {
+      const { service, txReturnRepo, txReturnItemRepo } = createService();
+      txReturnRepo.findOne.mockResolvedValue(saleReturn({ status }));
+
+      await expect(service.edit(COMPANY, 'admin-1', 'return-1', editInput())).rejects.toThrow(
+        'Solo se puede modificar una devolución pendiente de aprobación',
+      );
+      expect(txReturnItemRepo.delete).not.toHaveBeenCalled();
+      expect(txReturnRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('does not reveal a return of another company, and does not lock anything', async () => {
+      const { service, txReturnRepo, sales } = createService();
+      txReturnRepo.findOneBy.mockResolvedValue(null);
+
+      await expect(service.edit(COMPANY, 'admin-1', 'return-9', editInput())).rejects.toThrow(
+        NotFoundException,
+      );
+      expect(sales.lockCompleted).not.toHaveBeenCalled();
+    });
+
+    it('does not delete the old lines when the new ones ask for more than what is left', async () => {
+      const { service, txReturnItemRepo, txReturnRepo } = createService();
+
+      await expect(
+        service.edit(
+          COMPANY,
+          'admin-1',
+          'return-1',
+          editInput({ items: [{ saleItemId: 'line-1', quantity: '5' }] }),
+        ),
+      ).rejects.toThrow(BadRequestException);
+      expect(txReturnItemRepo.delete).not.toHaveBeenCalled();
+      expect(txReturnRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('does not repeat a line, before touching the database', async () => {
+      const { service, dataSource } = createService();
+
+      await expect(
+        service.edit(
+          COMPANY,
+          'admin-1',
+          'return-1',
+          editInput({
+            items: [
+              { saleItemId: 'line-1', quantity: '1' },
+              { saleItemId: 'line-1', quantity: '1' },
+            ],
+          }),
+        ),
+      ).rejects.toThrow('Una línea no puede repetirse en la devolución');
+      expect(dataSource.transaction).not.toHaveBeenCalled();
     });
   });
 
@@ -677,6 +1319,17 @@ describe('SaleReturnService', () => {
       expect(approved.resolvedAt).toBeInstanceOf(Date);
       expect(approved.resolutionNotes).toBe('Con la caja en buen estado');
       expect(txReturnRepo.save).toHaveBeenCalledWith(pending);
+    });
+
+    it('leaves who approved it and when, apart from who resolved it last', async () => {
+      const { service } = createService();
+
+      const approved = await service.approve(COMPANY, 'admin-1', 'return-1', {});
+
+      expect(approved.approvedBy).toBe('admin-1');
+      expect(approved.approvedAt).toBeInstanceOf(Date);
+      expect(approved.approvedAt).toBe(approved.resolvedAt);
+      expect(approved.cancelledBy).toBeNull();
     });
 
     it('locks the return of the company before deciding', async () => {
@@ -740,6 +1393,15 @@ describe('SaleReturnService', () => {
       expect(txReturnRepo.save).toHaveBeenCalledWith(pending);
     });
 
+    it('does not count as an approval: nobody is left as the one who approved it', async () => {
+      const { service } = createService();
+
+      const rejected = await service.reject(COMPANY, 'admin-1', 'return-1', {});
+
+      expect(rejected.approvedBy).toBeNull();
+      expect(rejected.approvedAt).toBeNull();
+    });
+
     it.each([
       SaleReturnStatus.APPROVED,
       SaleReturnStatus.COMPLETED,
@@ -762,6 +1424,78 @@ describe('SaleReturnService', () => {
       await expect(service.reject(COMPANY, 'admin-1', 'return-9', {})).rejects.toThrow(
         NotFoundException,
       );
+    });
+  });
+
+  // Aprobar y rechazar se pueden repetir con la misma clave sin resolver dos veces.
+  const resolutions: ['approve' | 'reject', string][] = [
+    ['approve', 'approveSaleReturn'],
+    ['reject', 'rejectSaleReturn'],
+  ];
+  describe.each(resolutions)('%s with an idempotency key', (action, operation) => {
+    const resolve = (service: SaleReturnService, notes: string, key?: string) =>
+      service[action](COMPANY, 'admin-1', 'return-1', { notes }, key);
+    const scopeInput = (notes: string) => ({ id: 'return-1', notes });
+
+    it('claims the key in the same transaction, before resolving, and records the return', async () => {
+      const { service, manager, dataSource, txReturnRepo } = createService();
+
+      const resolved = await resolve(service, 'Ok', 'key-1');
+
+      expect(dataSource.transaction).toHaveBeenCalledTimes(1);
+      expect(manager.query).toHaveBeenNthCalledWith(
+        1,
+        expect.stringContaining('INSERT INTO "idempotency_keys"'),
+        [COMPANY, 'admin-1', operation, 'key-1', fingerprintOf(scopeInput('Ok'))],
+      );
+      expect(manager.query).toHaveBeenNthCalledWith(
+        2,
+        expect.stringContaining('UPDATE "idempotency_keys"'),
+        ['claim-1', 'sale_return', resolved.id],
+      );
+      expect(manager.query.mock.invocationCallOrder[0]).toBeLessThan(
+        txReturnRepo.findOne.mock.invocationCallOrder[0],
+      );
+    });
+
+    it('does not claim anything without a key', async () => {
+      const { service, manager } = createService();
+
+      await resolve(service, 'Ok');
+
+      expect(manager.query).not.toHaveBeenCalled();
+    });
+
+    it('gives back the return that was already resolved when the same key comes again, instead of failing with "already resolved"', async () => {
+      const mocks = createService();
+      const { service, txReturnRepo, notifications } = mocks;
+      keyAlreadyUsed(mocks, scopeInput('Ok'), { resourceId: 'return-1' });
+      const alreadyResolved = saleReturn({
+        status: action === 'approve' ? SaleReturnStatus.APPROVED : SaleReturnStatus.REJECTED,
+      });
+      txReturnRepo.findOneByOrFail.mockResolvedValue(alreadyResolved);
+
+      const again = await resolve(service, 'Ok', 'key-1');
+
+      expect(again).toBe(alreadyResolved);
+      expect(txReturnRepo.findOneByOrFail).toHaveBeenCalledWith({ id: 'return-1' });
+      // Ni se vuelve a bloquear ni a guardar, ni se avisa otra vez
+      expect(txReturnRepo.findOne).not.toHaveBeenCalled();
+      expect(txReturnRepo.save).not.toHaveBeenCalled();
+      expect(notifications.notify).not.toHaveBeenCalled();
+      expect(notifications.markEntityRead).not.toHaveBeenCalled();
+      expect(notifications.signalChange).not.toHaveBeenCalled();
+    });
+
+    it('refuses the same key with other notes, and resolves nothing', async () => {
+      const mocks = createService();
+      const { service, txReturnRepo } = mocks;
+      keyAlreadyUsed(mocks, scopeInput('Ok'), { resourceId: 'return-1' });
+
+      await expect(resolve(service, 'Otra nota', 'key-1')).rejects.toThrow(ConflictException);
+
+      expect(txReturnRepo.findOneByOrFail).not.toHaveBeenCalled();
+      expect(txReturnRepo.save).not.toHaveBeenCalled();
     });
   });
 
@@ -796,6 +1530,38 @@ describe('SaleReturnService', () => {
 
       expect(cancelled.status).toBe(SaleReturnStatus.CANCELLED);
       expect(cancelled.resolvedBy).toBe('admin-1');
+    });
+
+    it('leaves who cancelled it and when', async () => {
+      const { service, txReturnRepo } = createService();
+      txReturnRepo.findOne.mockResolvedValue(saleReturn({ processedBy: 'cashier-1' }));
+
+      const cancelled = await service.cancel(COMPANY, 'admin-1', 'return-1', true, {});
+
+      expect(cancelled.cancelledBy).toBe('admin-1');
+      expect(cancelled.cancelledAt).toBeInstanceOf(Date);
+      expect(cancelled.cancelledAt).toBe(cancelled.resolvedAt);
+    });
+
+    it('keeps who approved it, and when, when an approved return is cancelled', async () => {
+      const { service, txReturnRepo } = createService();
+      const approvedAt = new Date('2026-09-24T10:00:00Z');
+      txReturnRepo.findOne.mockResolvedValue(approvedReturn({ approvedBy: 'admin-2', approvedAt }));
+
+      const cancelled = await service.cancel(COMPANY, 'cashier-1', 'return-1', false, {});
+
+      expect(cancelled.approvedBy).toBe('admin-2');
+      expect(cancelled.approvedAt).toBe(approvedAt);
+      expect(cancelled.cancelledBy).toBe('cashier-1');
+    });
+
+    it('does not leave anybody as the one who approved a pending return that gets cancelled', async () => {
+      const { service } = createService();
+
+      const cancelled = await service.cancel(COMPANY, 'cashier-1', 'return-1', false, {});
+
+      expect(cancelled.approvedBy).toBeNull();
+      expect(cancelled.approvedAt).toBeNull();
     });
 
     it('does not let another cashier cancel a return they did not register', async () => {
@@ -1051,6 +1817,179 @@ describe('SaleReturnService', () => {
       expect(txRefundRepo.save).not.toHaveBeenCalled();
     });
 
+    describe('in the store where the sale was made', () => {
+      it('needs access to the store of the original sale', async () => {
+        const { service, txReturnRepo, txAccessRepo, txRefundRepo, cashSessions } = createService();
+        txReturnRepo.findOne.mockResolvedValue(approvedReturn());
+        txAccessRepo.existsBy.mockResolvedValue(false);
+
+        await expect(
+          service.completeRefund(COMPANY, cashier, refundInput([cashRefund('100000')])),
+        ).rejects.toThrow(ForbiddenException);
+
+        expect(txAccessRepo.existsBy).toHaveBeenCalledWith({
+          userId: 'cashier-1',
+          locationId: 'store-1',
+          status: RecordStatus.ACTIVE,
+        });
+        expect(cashSessions.lockOpen).not.toHaveBeenCalled();
+        expect(txRefundRepo.save).not.toHaveBeenCalled();
+        expect(txReturnRepo.save).not.toHaveBeenCalled();
+      });
+
+      it('needs it even when nothing comes out of the drawer, like a refund by transfer', async () => {
+        const { service, txReturnRepo, txAccessRepo, txRefundRepo } = createService();
+        txReturnRepo.findOne.mockResolvedValue(approvedReturn());
+        txAccessRepo.existsBy.mockResolvedValue(false);
+
+        await expect(
+          service.completeRefund(
+            COMPANY,
+            cashier,
+            refundInputWithoutShift([transferRefund('100000', 'TRF-1')]),
+          ),
+        ).rejects.toThrow(ForbiddenException);
+        expect(txRefundRepo.save).not.toHaveBeenCalled();
+      });
+
+      it('checks the access before locking the shift', async () => {
+        const { service, txReturnRepo, txAccessRepo, cashSessions } = createService();
+        txReturnRepo.findOne.mockResolvedValue(approvedReturn());
+
+        await service.completeRefund(COMPANY, cashier, refundInput([cashRefund('100000')]));
+
+        expect(txAccessRepo.existsBy.mock.invocationCallOrder[0]).toBeLessThan(
+          cashSessions.lockOpen.mock.invocationCallOrder[0],
+        );
+      });
+
+      it('answers "not found" when the original sale of the return cannot be found', async () => {
+        const { service, txReturnRepo, txSaleRepo, txRefundRepo } = createService();
+        txReturnRepo.findOne.mockResolvedValue(approvedReturn());
+        txSaleRepo.findOneBy.mockResolvedValue(null);
+
+        await expect(
+          service.completeRefund(COMPANY, cashier, refundInput([cashRefund('100000')])),
+        ).rejects.toThrow('No se encontró la venta original de la devolución');
+        expect(txRefundRepo.save).not.toHaveBeenCalled();
+      });
+
+      it('takes the cash out of a shift of the same store', async () => {
+        const { service, txReturnRepo, cashSessions, txRefundRepo } = createService();
+        txReturnRepo.findOne.mockResolvedValue(approvedReturn());
+        cashSessions.lockOpen.mockResolvedValue({
+          id: 'session-1',
+          cashRegister: { storeId: 'store-1' },
+        });
+
+        const completed = await service.completeRefund(
+          COMPANY,
+          cashier,
+          refundInput([cashRefund('100000')]),
+        );
+
+        expect(completed.status).toBe(SaleReturnStatus.COMPLETED);
+        expect(txRefundRepo.create.mock.calls[0][0].cashSessionId).toBe('session-1');
+      });
+
+      it('does not take the cash out of a shift of another store', async () => {
+        const { service, txReturnRepo, txRefundRepo, cashSessions } = createService();
+        txReturnRepo.findOne.mockResolvedValue(approvedReturn());
+        cashSessions.lockOpen.mockResolvedValue({
+          id: 'session-2',
+          cashRegister: { storeId: 'store-2' },
+        });
+
+        const attempt = service.completeRefund(COMPANY, cashier, {
+          ...refundInput([cashRefund('100000')]),
+          cashSessionId: 'session-2',
+        });
+
+        await expect(attempt).rejects.toThrow(ConflictException);
+        await expect(attempt).rejects.toThrow(
+          'El reembolso en efectivo tiene que salir de un turno de la tienda donde se hizo la venta',
+        );
+        // Ni se entrega el dinero ni se completa la devolución
+        expect(txRefundRepo.save).not.toHaveBeenCalled();
+        expect(txReturnRepo.save).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('with an idempotency key', () => {
+      it('claims the key in the same transaction as the refund, gives the money once and records the return', async () => {
+        const { service, txReturnRepo, txRefundRepo, manager, dataSource } = createService();
+        txReturnRepo.findOne.mockResolvedValue(approvedReturn());
+        const input = refundInput([cashRefund('100000')]);
+
+        const completed = await service.completeRefund(COMPANY, cashier, input, 'key-1');
+
+        expect(dataSource.transaction).toHaveBeenCalledTimes(1);
+        expect(manager.query).toHaveBeenNthCalledWith(
+          1,
+          expect.stringContaining('INSERT INTO "idempotency_keys"'),
+          [COMPANY, 'cashier-1', 'completeSaleReturnRefund', 'key-1', fingerprintOf(input)],
+        );
+        expect(manager.query).toHaveBeenNthCalledWith(
+          2,
+          expect.stringContaining('UPDATE "idempotency_keys"'),
+          ['claim-1', 'sale_return', completed.id],
+        );
+        expect(txRefundRepo.save).toHaveBeenCalledTimes(1);
+        expect(manager.query.mock.invocationCallOrder[0]).toBeLessThan(
+          txRefundRepo.save.mock.invocationCallOrder[0],
+        );
+      });
+
+      it('does not claim anything when the request comes without a key', async () => {
+        const { service, txReturnRepo, manager } = createService();
+        txReturnRepo.findOne.mockResolvedValue(approvedReturn());
+
+        await service.completeRefund(COMPANY, cashier, refundInput([cashRefund('100000')]));
+
+        expect(manager.query).not.toHaveBeenCalled();
+      });
+
+      it('does not give the money twice: the same key gives back the return that was already completed', async () => {
+        const mocks = createService();
+        const { service, txReturnRepo, txRefundRepo, txKeyRepo, cashSessions, txAccessRepo } = mocks;
+        const input = refundInput([cashRefund('100000')]);
+        keyAlreadyUsed(mocks, input, { resourceId: 'return-1' });
+        const completedReturn = saleReturn({ status: SaleReturnStatus.COMPLETED });
+        txReturnRepo.findOneByOrFail.mockResolvedValue(completedReturn);
+
+        const again = await service.completeRefund(COMPANY, cashier, input, 'key-1');
+
+        expect(again).toBe(completedReturn);
+        expect(txKeyRepo.findOneBy).toHaveBeenCalledWith({
+          companyId: COMPANY,
+          userId: 'cashier-1',
+          operation: 'completeSaleReturnRefund',
+          key: 'key-1',
+        });
+        expect(txReturnRepo.findOneByOrFail).toHaveBeenCalledWith({ id: 'return-1' });
+        // Nada se repite: ni el bloqueo, ni el turno, ni el reembolso, ni la devolución
+        expect(txReturnRepo.findOne).not.toHaveBeenCalled();
+        expect(txAccessRepo.existsBy).not.toHaveBeenCalled();
+        expect(cashSessions.lockOpen).not.toHaveBeenCalled();
+        expect(txRefundRepo.save).not.toHaveBeenCalled();
+        expect(txReturnRepo.save).not.toHaveBeenCalled();
+      });
+
+      it('refuses the same key with other amounts, and gives no money', async () => {
+        const mocks = createService();
+        const { service, txReturnRepo, txRefundRepo } = mocks;
+        keyAlreadyUsed(mocks, refundInput([cashRefund('100000')]), { resourceId: 'return-1' });
+
+        await expect(
+          service.completeRefund(COMPANY, cashier, refundInput([cashRefund('90000')]), 'key-1'),
+        ).rejects.toThrow(ConflictException);
+
+        expect(txReturnRepo.findOneByOrFail).not.toHaveBeenCalled();
+        expect(txRefundRepo.save).not.toHaveBeenCalled();
+        expect(txReturnRepo.save).not.toHaveBeenCalled();
+      });
+    });
+
     describe('the difference of an exchange for something cheaper', () => {
       // Devolvió 100000 y el cambio valió 80000, con lo que el crédito usado fue 80000: sobran 20000
       const partial = () =>
@@ -1062,7 +2001,7 @@ describe('SaleReturnService', () => {
       it('refunds only what was left of the credit, and completes the return', async () => {
         const { service, txReturnRepo, txSaleRepo, txRefundRepo } = createService();
         txReturnRepo.findOne.mockResolvedValue(partial());
-        txSaleRepo.findOneBy.mockResolvedValue({ id: 'sale-2', returnCredit: d('80000') });
+        withExchangeSale(txSaleRepo, { id: 'sale-2', returnCredit: d('80000') });
 
         const completed = await service.completeRefund(
           COMPANY,
@@ -1079,7 +2018,7 @@ describe('SaleReturnService', () => {
       it('does not refund everything that was returned, because part of it already paid for the exchange', async () => {
         const { service, txReturnRepo, txSaleRepo, txRefundRepo } = createService();
         txReturnRepo.findOne.mockResolvedValue(partial());
-        txSaleRepo.findOneBy.mockResolvedValue({ id: 'sale-2', returnCredit: d('80000') });
+        withExchangeSale(txSaleRepo, { id: 'sale-2', returnCredit: d('80000') });
 
         await expect(
           service.completeRefund(COMPANY, cashier, refundInput([cashRefund('100000')])),
@@ -1090,11 +2029,26 @@ describe('SaleReturnService', () => {
       it('fails when the sale of the exchange cannot be found', async () => {
         const { service, txReturnRepo, txSaleRepo } = createService();
         txReturnRepo.findOne.mockResolvedValue(partial());
-        txSaleRepo.findOneBy.mockResolvedValue(null);
+        withExchangeSale(txSaleRepo, null);
 
         await expect(
           service.completeRefund(COMPANY, cashier, refundInput([cashRefund('20000')])),
         ).rejects.toThrow('No se encontró la venta del cambio');
+      });
+
+      it('gives the difference in the store of the ORIGINAL sale, not the one of the exchange', async () => {
+        const { service, txReturnRepo, txSaleRepo, cashSessions } = createService();
+        txReturnRepo.findOne.mockResolvedValue(partial());
+        // La venta nueva se hizo en otra tienda; el reembolso sale de la tienda de la original
+        withExchangeSale(txSaleRepo, { id: 'sale-2', storeId: 'store-2', returnCredit: d('80000') });
+        cashSessions.lockOpen.mockResolvedValue({
+          id: 'session-2',
+          cashRegister: { storeId: 'store-2' },
+        });
+
+        await expect(
+          service.completeRefund(COMPANY, cashier, refundInput([cashRefund('20000')])),
+        ).rejects.toThrow(ConflictException);
       });
     });
   });
@@ -1246,7 +2200,7 @@ describe('SaleReturnService', () => {
 
       await service.request(
         COMPANY,
-        'cashier-1',
+        cashierActor,
         requestInput([{ saleItemId: 'line-1', quantity: '1' }]),
       );
 
@@ -1271,7 +2225,7 @@ describe('SaleReturnService', () => {
       const { service, notifications } = createService();
 
       await expect(
-        service.request(COMPANY, 'cashier-1', requestInput([{ saleItemId: 'line-9', quantity: '1' }])),
+        service.request(COMPANY, cashierActor, requestInput([{ saleItemId: 'line-9', quantity: '1' }])),
       ).rejects.toThrow(BadRequestException);
 
       expect(notifications.notify).not.toHaveBeenCalled();
@@ -1506,7 +2460,7 @@ describe('SaleReturnService', () => {
 
       await service.request(
         COMPANY,
-        'cashier-1',
+        cashierActor,
         requestInput([{ saleItemId: 'line-1', quantity: '1' }]),
       );
 

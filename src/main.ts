@@ -7,6 +7,7 @@ import { NestFactory } from '@nestjs/core';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { AppModule } from './app.module.js';
 import { UPLOADS_ROOT } from './common/storage/local-storage.service.js';
+import { allowedOrigins } from './realtime/ws-context.js';
 
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule, { bufferLogs: true });
@@ -25,8 +26,9 @@ async function bootstrap() {
   app.use(cookieParser());
   app.useStaticAssets(UPLOADS_ROOT, { prefix: '/uploads/' });
 
+  // La misma lista (recortada) que valida el WebSocket: una sola definición de los orígenes permitidos.
   app.enableCors({
-    origin: process.env.CORS_ORIGIN?.split(',') ?? [],
+    origin: allowedOrigins(),
     credentials: true,
   });
 

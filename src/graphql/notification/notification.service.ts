@@ -38,9 +38,15 @@ export interface NotifyInput {
   entityType: NotificationEntityType;
   entityId: string;
   locationId: string | null;
-  reference: string;
+  // El número de la venta o de la devolución; null si es una venta en borrador (sin número todavía)
+  reference: string | null;
   notes?: string | null;
 }
+
+// Los avisos se guardan seis meses: después no le sirven a nadie y la tabla crecería sin fin.
+const NOTIFICATION_RETENTION_DAYS = 180;
+// Probabilidad de aprovechar un aviso nuevo para borrar los viejos (no hay tarea programada).
+const PURGE_PROBABILITY = 0.01;
 
 export interface NotifyResult {
   notification: Notification;
@@ -153,7 +159,35 @@ export class NotificationService {
       })),
     );
 
+    this.purgeOldSometimes(manager);
     return { notification, recipientIds };
+  }
+
+  // Borra los avisos de más de seis meses, de vez en cuando y sin esperar: va por otra conexión del
+  // pool (la transacción de quien avisa no se entera) y si falla no pasa nada, la próxima lo intenta.
+  // Primero las filas de destinatarios y después los avisos que ya no tienen ninguna.
+  private purgeOldSometimes(manager: EntityManager): void {
+    if (Math.random() >= PURGE_PROBABILITY) return;
+    const connection = manager.connection as
+      | { query?: (sql: string) => Promise<unknown> }
+      | undefined;
+    if (!connection?.query) return;
+
+    const interval = `interval '${NOTIFICATION_RETENTION_DAYS} days'`;
+    void connection
+      .query(
+        `DELETE FROM "user_notifications" WHERE "id" IN (
+           SELECT "id" FROM "user_notifications" WHERE "createdAt" < now() - ${interval} LIMIT 1000
+         )`,
+      )
+      .then(() =>
+        connection.query?.(
+          `DELETE FROM "notifications" n
+           WHERE n."createdAt" < now() - ${interval}
+             AND NOT EXISTS (SELECT 1 FROM "user_notifications" u WHERE u."notificationId" = n."id")`,
+        ),
+      )
+      .catch(() => undefined);
   }
 
   // Avisa en vivo que algo cambió, sin crear ningún aviso: para quienes lo estaban viendo (por
@@ -287,23 +321,29 @@ export class NotificationService {
   }
 
   // Marca como leídos todos los avisos sin leer de quien pregunta (de un canal, o de todos).
-  // Devuelve cuántos marcó.
+  // Devuelve cuántos marcó. Es UN solo UPDATE (no una fila por fila): con meses de avisos sin leer,
+  // una transacción con miles de escrituras retendría filas y una conexión del pool durante segundos.
   async markAllRead(
     companyId: string,
     userId: string,
     channel?: NotificationChannel,
   ): Promise<number> {
     return this.dataSource.transaction(async (manager) => {
-      const repo = manager.getRepository(UserNotification);
-      const unread = await repo.find({
-        where: this.mineWhere(companyId, userId, { channel, unreadOnly: true }),
-      });
-      if (unread.length === 0) return 0;
-
-      const now = new Date();
-      for (const row of unread) row.readAt = now;
-      await repo.save(unread);
-      return unread.length;
+      const result = await manager
+        .createQueryBuilder()
+        .update(UserNotification)
+        .set({ readAt: () => 'now()' })
+        .where('"userId" = :userId', { userId })
+        .andWhere('"readAt" IS NULL')
+        .andWhere(
+          `"notificationId" IN (
+             SELECT n."id" FROM "notifications" n
+             WHERE n."companyId" = :companyId${channel ? ' AND n."channel" = :channel' : ''}
+           )`,
+          channel ? { companyId, channel } : { companyId },
+        )
+        .execute();
+      return result.affected ?? 0;
     });
   }
 

@@ -20,6 +20,14 @@ export const RequirePermissions = (...permissions: PermissionCode[]) =>
 export const RequireAnyPermission = (...permissions: PermissionCode[]) =>
   SetMetadata<string, AccessRule>(ACCESS_RULE_KEY, { mode: 'any', permissions });
 
+export const AUTH_ONLY_KEY = 'auth-only';
+
+// La operación solo necesita una sesión válida, sin empresa ni permisos (por ejemplo `me`): se marca a
+// propósito. PermissionsGuard es "cerrado por defecto": una operación con PermissionsGuard que no lleva
+// ninguna regla NI esta marca se rechaza, así una operación nueva a la que se le olvide la regla no queda
+// abierta a cualquier usuario con sesión.
+export const AuthOnly = () => SetMetadata(AUTH_ONLY_KEY, true);
+
 // No pide ningún permiso, pero sí ser miembro activo de la empresa con la que se trabaja: así
 // una lectura queda acotada a esa empresa en vez de quedar abierta a cualquier sesión.
 export const RequireCompanyMembership = () =>

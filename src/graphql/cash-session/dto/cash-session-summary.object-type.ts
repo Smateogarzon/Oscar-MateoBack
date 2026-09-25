@@ -15,6 +15,10 @@ export class CashSessionSummaryObjectType {
   @Field(() => Int)
   salesCount: number;
 
+  // Ventas en borrador del turno: las que se borran al cerrarlo (para avisarlo antes de cerrar)
+  @Field(() => Int)
+  draftSalesCount: number;
+
   // Lo cobrado en efectivo: entra a la caja
   @Field(() => Decimal)
   cashSales: Decimal;

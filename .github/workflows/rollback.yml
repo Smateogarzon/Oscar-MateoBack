@@ -1,0 +1,66 @@
+name: Rollback
+
+# Vuelve a desplegar la imagen de un commit anterior que ya está en ECR, sin construir ni correr
+# tests: es la salida rápida cuando un despliegue salió mal (GitHub -> Actions -> Rollback ->
+# Run workflow, con el SHA completo del commit que funcionaba).
+# No revierte migraciones: deben ser compatibles con la versión anterior del código.
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: 'SHA completo (40 caracteres) del commit cuya imagen se despliega'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+# Mismo grupo que el job deploy de ci.yml: un rollback y un despliegue nunca corren a la vez.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  rollback:
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      AWS_REGION: us-east-1
+      ECR_REPOSITORY: oscarymateo-backend
+      INSTANCE_ID: i-04b6684e7c199a1e5
+      # Por variable de entorno y no dentro del script: el valor llega escrito por una persona.
+      IMAGE_TAG: ${{ inputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate sha
+        run: |
+          if ! [[ "$IMAGE_TAG" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "El sha debe ser el SHA completo del commit (40 caracteres hexadecimales)." >&2
+            exit 1
+          fi
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::384078510350:role/github-deploy-role
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Falla aquí, antes de tocar el servidor, si el sha está mal escrito o la imagen ya no existe.
+      - name: Check image exists in ECR
+        run: |
+          if ! aws ecr describe-images --repository-name "$ECR_REPOSITORY" --image-ids imageTag="$IMAGE_TAG" > /dev/null 2>&1; then
+            echo "No existe la imagen $ECR_REPOSITORY:$IMAGE_TAG en ECR. Revisa el sha (copia el del run que funcionaba)." >&2
+            exit 1
+          fi
+
+      # docker-compose.yml y deploy.sh no se tocan: se usan los que ya están instalados en el servidor.
+      - name: Deploy on server
+        run: |
+          {
+            echo "set -e"
+            echo "/opt/oscarymateo/deploy.sh backend $IMAGE_TAG"
+          } > ssm-commands.txt
+          bash .github/scripts/ssm-run.sh ssm-commands.txt

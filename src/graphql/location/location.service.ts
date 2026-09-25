@@ -3,6 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, EntityManager, In, Repository } from 'typeorm';
 import { assertActiveCompany } from '../../common/access/assert-active-company.js';
 import { RecordStatus } from '../../common/enums/record-status.enum.js';
+import { definedFields } from '../../common/utils/defined-fields.js';
 import {
   DEFAULT_CASH_REGISTER_CODE,
   defaultCashRegisterName,
@@ -11,6 +12,7 @@ import { CashRegister } from '../cash-register/entities/cash-register.entity.js'
 import { lockStoreRegisters } from '../cash-register/store-registers.js';
 import { CashSessionStatus } from '../cash-session/entities/cash-session-status.enum.js';
 import { CashSession } from '../cash-session/entities/cash-session.entity.js';
+import { runIdempotent } from '../idempotency/idempotency.js';
 import { allowAllPaymentMethods } from '../payment-method/default-payment-methods.js';
 import { CreateLocationInput } from './dto/create-location.input.js';
 import { UpdateLocationInput } from './dto/update-location.input.js';
@@ -41,28 +43,50 @@ export class LocationService {
 
   // Una tienda nace con su caja, con el nombre de la tienda (ver default-cash-register.ts), y
   // aceptando todos los medios de pago de la empresa (ver default-payment-methods.ts); las bodegas
-  // no tienen nada de eso. Todo se guarda en la misma transacción: no queda una tienda a medias.
-  async create(companyId: string, input: CreateLocationInput): Promise<Location> {
+  // no tienen nada de eso. Todo se guarda en la misma transacción: no queda una tienda a medias. Con
+  // `idempotencyKey`, repetir la petición (doble clic en "Crear tienda") devuelve la sede ya creada en vez
+  // de crear otra igual —y con ella otra caja y otra copia de los medios de pago—, que además no se
+  // pueden borrar.
+  async create(
+    companyId: string,
+    userId: string,
+    input: CreateLocationInput,
+    idempotencyKey?: string,
+  ): Promise<Location> {
     assertActiveCompany(companyId, input.companyId);
 
-    return this.dataSource.transaction(async (manager) => {
-      const repo = manager.getRepository(Location);
-      const location = await repo.save(repo.create({ ...input, companyId }));
+    return this.dataSource.transaction((manager) =>
+      runIdempotent(
+        manager,
+        {
+          companyId,
+          userId,
+          operation: 'createLocation',
+          key: idempotencyKey,
+          input,
+          resourceType: 'location',
+        },
+        async () => {
+          const repo = manager.getRepository(Location);
+          const location = await repo.save(repo.create({ ...input, companyId }));
 
-      if (location.type === LocationType.STORE) {
-        const registerRepo = manager.getRepository(CashRegister);
-        await registerRepo.save(
-          registerRepo.create({
-            storeId: location.id,
-            name: defaultCashRegisterName(location.name),
-            code: DEFAULT_CASH_REGISTER_CODE,
-          }),
-        );
-        await allowAllPaymentMethods(manager, companyId, location.id);
-      }
+          if (location.type === LocationType.STORE) {
+            const registerRepo = manager.getRepository(CashRegister);
+            await registerRepo.save(
+              registerRepo.create({
+                storeId: location.id,
+                name: defaultCashRegisterName(location.name),
+                code: DEFAULT_CASH_REGISTER_CODE,
+              }),
+            );
+            await allowAllPaymentMethods(manager, companyId, location.id);
+          }
 
-      return location;
-    });
+          return location;
+        },
+        (id) => manager.getRepository(Location).findOneByOrFail({ id }),
+      ),
+    );
   }
 
   // Al renombrar una tienda, la caja que nació con ella sigue el nombre nuevo — pero solo si nadie
@@ -79,7 +103,7 @@ export class LocationService {
     return this.dataSource.transaction(async (manager) => {
       const location = await this.lockLocation(manager, companyId, id);
       const previousName = location.name;
-      Object.assign(location, input);
+      Object.assign(location, definedFields(input));
 
       const saved = await manager.getRepository(Location).save(location);
       if (saved.type !== LocationType.STORE || saved.name === previousName) return saved;
