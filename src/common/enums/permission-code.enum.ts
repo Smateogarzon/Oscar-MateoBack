@@ -18,4 +18,13 @@ export enum PermissionCode {
   SALES_RETURN = 'sales.return',
   // Aprobar o rechazar una devolución (el administrador).
   SALES_APPROVE_RETURN = 'sales.approve_return',
+  // Crear y editar las MARCAS: son compartidas entre empresas (ver brand.entity.ts), así que por
+  // defecto solo lo tiene el super administrador — ninguna empresa le cambia a otra el nombre o el
+  // logo de una marca que ambas usan.
+  INVENTORY_MANAGE_CATALOG = 'inventory.manage_catalog',
+  // Crear y editar categorías, productos, sus variantes y los colores/tallas que usan: todo lo
+  // que es propio de cada empresa (a diferencia de las marcas, compartidas). Por defecto lo tienen
+  // el Administrador y el Bodeguero de cada empresa (quien recibe mercancía nueva es quien más lo
+  // usa), además del super administrador.
+  INVENTORY_MANAGE_PRODUCTS = 'inventory.manage_products',
 }

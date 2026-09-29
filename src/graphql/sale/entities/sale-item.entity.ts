@@ -2,6 +2,7 @@ import { Decimal } from 'decimal.js';
 import { Column, Entity, Index, JoinColumn, ManyToOne } from 'typeorm';
 import { BaseEntity } from '../../../common/entities/base.entity.js';
 import { decimalTransformer } from '../../../common/transformers/decimal.transformer.js';
+import { ProductVariant } from '../../product-variant/entities/product-variant.entity.js';
 import { SaleItemType } from './sale-item-type.enum.js';
 import { Sale } from './sale.entity.js';
 
@@ -23,11 +24,16 @@ export class SaleItem extends BaseEntity {
   @Column({ type: 'enum', enum: SaleItemType, enumName: 'sale_item_type' })
   type: SaleItemType;
 
-  // Variante de producto vendida (solo INVENTORIED). Todavía no hay catálogo: sin llave
-  // foránea por ahora; se agrega en la migración que cree product_variants.
+  // Variante de producto vendida (solo INVENTORIED); null en una línea GENERIC. Todavía no hay una
+  // mutación que agregue líneas desde el catálogo (falta el modelo de existencias por sede: sin él
+  // no hay de dónde descontar lo vendido), pero la relación ya es real.
   @Index()
   @Column({ type: 'uuid', nullable: true })
   productVariantId: string | null;
+
+  @ManyToOne(() => ProductVariant, { nullable: true })
+  @JoinColumn({ name: 'productVariantId' })
+  productVariant: ProductVariant | null;
 
   @Column({ type: 'varchar', length: 180 })
   description: string;

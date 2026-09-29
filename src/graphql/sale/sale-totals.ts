@@ -1,11 +1,13 @@
 import { Decimal } from 'decimal.js';
+import { MAX_AMOUNT } from '../../common/utils/money.js';
 
 // Toda la aritmética de dinero de una venta, con Decimal y sin punto flotante. Se redondea a
 // centavos "mitad hacia arriba" y de forma explícita, sin depender de la configuración global.
 const CENTS = 2;
 
-// numeric(14,2) guarda hasta 999999999999.99: un monto de un billón o más no cabe.
-export const MAX_AMOUNT = new Decimal('1e12');
+// Reexportado desde common/utils/money.ts (ahí vive el valor): así el resto del módulo de ventas
+// sigue importándolo de aquí, sin tocar cada archivo que ya lo usaba.
+export { MAX_AMOUNT };
 
 // Valor de una línea: cantidad × precio unitario (redondeado a centavos) y ese valor menos el
 // descuento de la línea.

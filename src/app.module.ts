@@ -27,6 +27,17 @@ import { UserModule } from './graphql/user/user.module.js';
 import { UserCompanyRoleModule } from './graphql/user-company-role/user-company-role.module.js';
 import { RolePermissionModule } from './graphql/role-permission/role-permission.module.js';
 import { UserLocationAccessModule } from './graphql/user-location-access/user-location-access.module.js';
+import { BrandModule } from './graphql/brand/brand.module.js';
+import { CategoryModule } from './graphql/category/category.module.js';
+import { ColorModule } from './graphql/color/color.module.js';
+import { SizeModule } from './graphql/size/size.module.js';
+import { ProductModule } from './graphql/product/product.module.js';
+import { ProductVariantModule } from './graphql/product-variant/product-variant.module.js';
+import { InventoryLocationModule } from './graphql/inventory-location/inventory-location.module.js';
+import { InventoryBalanceModule } from './graphql/inventory-balance/inventory-balance.module.js';
+import { InventoryMovementModule } from './graphql/inventory-movement/inventory-movement.module.js';
+import { InventoryReservationModule } from './graphql/inventory-reservation/inventory-reservation.module.js';
+import { IncidentModule } from './graphql/incident/incident.module.js';
 import { SaleModule } from './graphql/sale/sale.module.js';
 import { DiscountRequestModule } from './graphql/discount-request/discount-request.module.js';
 import { PaymentMethodModule } from './graphql/payment-method/payment-method.module.js';
@@ -134,6 +145,17 @@ const { validationRules, plugins } = new ApolloArmor().protect();
     UserCompanyRoleModule,
     RolePermissionModule,
     UserLocationAccessModule,
+    BrandModule,
+    CategoryModule,
+    ColorModule,
+    SizeModule,
+    ProductModule,
+    ProductVariantModule,
+    InventoryLocationModule,
+    InventoryBalanceModule,
+    InventoryMovementModule,
+    InventoryReservationModule,
+    IncidentModule,
     SaleModule,
     DiscountRequestModule,
     PaymentMethodModule,
