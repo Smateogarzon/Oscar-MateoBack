@@ -1,5 +1,5 @@
 import { Field, ID, InputType } from '@nestjs/graphql';
-import { IsNotEmpty, IsOptional, IsString, IsUUID, MaxLength } from 'class-validator';
+import { IsBoolean, IsNotEmpty, IsOptional, IsString, IsUUID, MaxLength } from 'class-validator';
 import { Trim } from '../../../common/decorators/trim.decorator.js';
 
 @InputType()
@@ -35,4 +35,11 @@ export class CreateProductInput {
   @IsString()
   @MaxLength(2000)
   description?: string;
+
+  // El trabajador ya vio el aviso "¿quisiste decir...?" (ver ProductService.assertNameNotSimilar)
+  // y confirmó que sí quiere crear una referencia distinta pese al parecido con una existente.
+  @Field({ nullable: true, defaultValue: false })
+  @IsOptional()
+  @IsBoolean()
+  confirmDuplicate?: boolean;
 }

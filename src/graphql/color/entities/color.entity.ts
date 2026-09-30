@@ -12,6 +12,9 @@ export class Color extends ImmutableEntity {
   name: string;
 
   // "#RRGGBB", si lo dan (sirve para pintar un punto de color en el selector de variantes).
-  @Column({ type: 'varchar', length: 7, nullable: true })
+  @Column({ type: 'varchar', length: 7 })
   hex: string | null;
+
+  @Column({ type: 'varchar', length: 7, nullable: true })
+  secondHex: string | null;
 }

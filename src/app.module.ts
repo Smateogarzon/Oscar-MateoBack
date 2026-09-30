@@ -33,6 +33,7 @@ import { ColorModule } from './graphql/color/color.module.js';
 import { SizeModule } from './graphql/size/size.module.js';
 import { ProductModule } from './graphql/product/product.module.js';
 import { ProductVariantModule } from './graphql/product-variant/product-variant.module.js';
+import { ProductDeletionRequestModule } from './graphql/product-deletion-request/product-deletion-request.module.js';
 import { InventoryLocationModule } from './graphql/inventory-location/inventory-location.module.js';
 import { InventoryBalanceModule } from './graphql/inventory-balance/inventory-balance.module.js';
 import { InventoryMovementModule } from './graphql/inventory-movement/inventory-movement.module.js';
@@ -151,6 +152,7 @@ const { validationRules, plugins } = new ApolloArmor().protect();
     SizeModule,
     ProductModule,
     ProductVariantModule,
+    ProductDeletionRequestModule,
     InventoryLocationModule,
     InventoryBalanceModule,
     InventoryMovementModule,

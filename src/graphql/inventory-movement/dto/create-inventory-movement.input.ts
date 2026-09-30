@@ -6,6 +6,10 @@ import { InventorySide } from '../../inventory-balance/entities/inventory-side.e
 import { InventoryMovementType } from '../entities/inventory-movement-type.enum.js';
 import { InventorySourceType } from '../entities/inventory-source-type.enum.js';
 
+// Igual que QUANTITY_PATTERN, pero admitiendo también vacío: así "" sigue sirviendo para borrar el
+// mínimo ya puesto (ver minStock más abajo), cosa que QUANTITY_PATTERN por sí solo no deja pasar.
+const MIN_STOCK_PATTERN = /^$|^\d{1,10}(\.\d{1,2})?$/;
+
 // La cantidad viaja como texto y se convierte a Decimal en el servicio (ver AddSaleItemInput): el
 // ValidationPipe recorre los inputs con class-transformer, que no sabe copiar Decimal.
 @InputType()
@@ -63,4 +67,24 @@ export class CreateInventoryMovementInput {
   @IsString()
   @MaxLength(255)
   notes?: string;
+
+  // Dónde queda dentro del cajón destino: "Rack A-14 · Nivel 2". Solo tiene efecto si el
+  // movimiento tiene `toLocationId` (si no, no hay balanza de destino a la que ponérsela); ausente
+  // no toca lo que ya tenía, "" la borra.
+  @Field({ nullable: true })
+  @IsOptional()
+  @Trim()
+  @IsString()
+  @MaxLength(120)
+  position?: string;
+
+  // Debajo de esta cantidad la existencia de la balanza destino se considera baja (para alertas de
+  // agotamiento, aún por construir). Mismas reglas que position: solo toca la balanza destino,
+  // ausente no la toca, "" la borra.
+  @Field({ nullable: true })
+  @IsOptional()
+  @Matches(MIN_STOCK_PATTERN, {
+    message: 'minStock debe ser una cantidad con hasta 2 decimales, por ejemplo 2 o 1.5, o vacío para borrarlo',
+  })
+  minStock?: string;
 }

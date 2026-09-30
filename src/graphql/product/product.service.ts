@@ -1,15 +1,34 @@
 import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, EntityManager, Not, Repository } from 'typeorm';
+import { DataSource, EntityManager, In, Not, Repository } from 'typeorm';
 import { RecordStatus } from '../../common/enums/record-status.enum.js';
 import { definedFields } from '../../common/utils/defined-fields.js';
 import { Brand } from '../brand/entities/brand.entity.js';
 import { Category } from '../category/entities/category.entity.js';
 import { runIdempotent } from '../idempotency/idempotency.js';
+import { InventoryBalance } from '../inventory-balance/entities/inventory-balance.entity.js';
+import { InventoryMovement } from '../inventory-movement/entities/inventory-movement.entity.js';
+import { InventoryReservation } from '../inventory-reservation/entities/inventory-reservation.entity.js';
 import { ProductVariant } from '../product-variant/entities/product-variant.entity.js';
 import { CreateProductInput } from './dto/create-product.input.js';
 import { UpdateProductInput } from './dto/update-product.input.js';
 import { Product } from './entities/product.entity.js';
+
+// Con este rol, "borrar" es un borrado real cuando la referencia está limpia (ver deleteReference).
+const HARD_DELETE_ROLE = 'SUPER_ADMIN';
+
+// Puntaje de similitud de trigramas (0 a 1) a partir del cual dos nombres se consideran "la
+// misma referencia mal escrita". Elegido a mano probando con el caso real que lo motivó:
+// "adiddas hair forse 1 opacas" contra "adidas air force one negras" da ~0.42.
+const NAME_SIMILARITY_THRESHOLD = 0.35;
+const MAX_SIMILAR_SUGGESTIONS = 5;
+
+export interface SimilarProductMatch {
+  id: string;
+  name: string;
+  reference: string;
+  score: number;
+}
 
 export interface ProductFilter {
   status?: RecordStatus;
@@ -67,6 +86,7 @@ export class ProductService {
           await this.assertCategory(manager, companyId, input.categoryId);
           if (input.brandId) await this.assertBrand(manager, input.brandId);
           await this.assertReferenceFree(manager, companyId, input.reference);
+          if (!input.confirmDuplicate) await this.assertNameNotSimilar(manager, companyId, input.name);
 
           const repo = manager.getRepository(Product);
           return repo.save(
@@ -141,6 +161,53 @@ export class ProductService {
     });
   }
 
+  // "Eliminar referencia": desactiva el producto y todas sus variantes (a diferencia de
+  // `deactivate`, que exige desactivarlas antes; acá se hace de una vez). Con el rol
+  // SUPER_ADMIN y solo si la referencia nunca tuvo actividad (ningún movimiento ni reserva en
+  // ninguna de sus variantes), en vez de desactivarla se borra de verdad — el único borrado real
+  // de este backend, reservado a lo que nunca llegó a moverse; con historial, o sin ese rol, se
+  // desactiva igual que para cualquier otro administrador.
+  async deleteReference(companyId: string, roleCodes: readonly string[], id: string): Promise<Product> {
+    await this.findOne(companyId, id);
+    return this.dataSource.transaction((manager) => this.deleteReferenceWithin(manager, companyId, roleCodes, id));
+  }
+
+  // Misma operación, pero dentro de una transacción que ya abrió el llamador (ver
+  // ProductDeletionRequestService.approve): así aprobar la solicitud y borrar la referencia son
+  // una sola operación atómica, no dos transacciones separadas que podrían quedar a medias entre sí.
+  async deleteReferenceWithin(manager: EntityManager, companyId: string, roleCodes: readonly string[], id: string): Promise<Product> {
+    const product = await this.lock(manager, companyId, id);
+    const variantRepo = manager.getRepository(ProductVariant);
+    const variants = await variantRepo.find({ where: { productId: product.id } });
+    const variantIds = variants.map((variant) => variant.id);
+
+    const canHardDelete = roleCodes.includes(HARD_DELETE_ROLE) && !(await this.hasActivity(manager, variantIds));
+    if (canHardDelete) {
+      if (variantIds.length > 0) {
+        await manager.getRepository(InventoryBalance).delete({ productVariantId: In(variantIds) });
+        await variantRepo.delete({ productId: product.id });
+      }
+      await manager.getRepository(Product).delete({ id: product.id });
+      return product;
+    }
+
+    for (const variant of variants) variant.status = RecordStatus.INACTIVE;
+    if (variants.length > 0) await variantRepo.save(variants);
+    product.status = RecordStatus.INACTIVE;
+    return manager.getRepository(Product).save(product);
+  }
+
+  // ¿Alguna variante tuvo alguna vez un movimiento o una reserva? Sin balanza no hace falta
+  // comprobarla aparte: solo existe si hubo un movimiento que la creara.
+  private async hasActivity(manager: EntityManager, variantIds: string[]): Promise<boolean> {
+    if (variantIds.length === 0) return false;
+    const [hasMovement, hasReservation] = await Promise.all([
+      manager.getRepository(InventoryMovement).existsBy({ productVariantId: In(variantIds) }),
+      manager.getRepository(InventoryReservation).existsBy({ productVariantId: In(variantIds) }),
+    ]);
+    return hasMovement || hasReservation;
+  }
+
   private async lock(manager: EntityManager, companyId: string, id: string): Promise<Product> {
     const product = await manager
       .getRepository(Product)
@@ -158,6 +225,50 @@ export class ProductService {
   private async assertBrand(manager: EntityManager, brandId: string): Promise<void> {
     const exists = await manager.getRepository(Brand).existsBy({ id: brandId });
     if (!exists) throw new NotFoundException(`Marca ${brandId} no encontrada`);
+  }
+
+  // Para el front: mientras el trabajador escribe el nombre, le muestra candidatos parecidos
+  // antes de que llegue a intentar crear (mismo cálculo que el aviso de create(), pero sin
+  // bloquear nada: es solo para autocompletar).
+  findSimilarByName(companyId: string, name: string): Promise<SimilarProductMatch[]> {
+    return this.findSimilarByNameWithin(this.dataSource.manager, companyId, name);
+  }
+
+  // pg_trgm compara por trigramas de letras, no por coincidencia exacta: "adiddas hair forse 1"
+  // y "adidas air force one" comparten suficientes como para que esto las relacione aunque la
+  // primera esté mal escrita. `unaccent`+`lower` evitan que tildes o mayúsculas bajen el puntaje
+  // por razones que no tienen que ver con el error real. Ver migración V0.2_update_product.
+  private async findSimilarByNameWithin(
+    manager: EntityManager,
+    companyId: string,
+    name: string,
+  ): Promise<SimilarProductMatch[]> {
+    const rows: SimilarProductMatch[] = await manager.query(
+      `SELECT id, name, reference,
+              similarity(lower(unaccent(name)), lower(unaccent($1))) AS score
+         FROM products
+        WHERE "companyId" = $2::uuid
+          AND status = $3::record_status
+          AND similarity(lower(unaccent(name)), lower(unaccent($1))) >= $4
+        ORDER BY score DESC
+        LIMIT ${MAX_SIMILAR_SUGGESTIONS}`,
+      [name, companyId, RecordStatus.ACTIVE, NAME_SIMILARITY_THRESHOLD],
+    );
+    return rows.map((row) => ({ ...row, score: Number(row.score) }));
+  }
+
+  // Aviso "¿quisiste decir...?": no bloquea nada distinto de lo que ya existía (la referencia
+  // interna sigue siendo el único chequeo duro), solo obliga a confirmar (`confirmDuplicate`)
+  // cuando el nombre se parece demasiado a uno que ya existe en esta empresa.
+  private async assertNameNotSimilar(manager: EntityManager, companyId: string, name: string): Promise<void> {
+    const matches = await this.findSimilarByNameWithin(manager, companyId, name);
+    if (matches.length === 0) return;
+    const best = matches[0];
+    throw new ConflictException({
+      message: `Ya existe una referencia parecida: "${best.name}" (${best.reference}). ¿Quisiste decir esta? Si es otra referencia distinta, confírmalo para crearla igual.`,
+      code: 'POSSIBLE_DUPLICATE_NAME',
+      suggestions: matches,
+    });
   }
 
   private async assertReferenceFree(

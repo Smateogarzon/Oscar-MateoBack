@@ -102,7 +102,7 @@ export class InventoryMovementService {
           }
           if (input.toLocationId) {
             const toBalance = balances.get(input.toLocationId)!;
-            await this.adjustBalance(manager, toBalance, quantity);
+            await this.adjustBalance(manager, toBalance, quantity, input.position, input.minStock);
           }
 
           const repo = manager.getRepository(InventoryMovement);
@@ -146,8 +146,13 @@ export class InventoryMovementService {
     if (!exists) throw new NotFoundException(`Ubicación de inventario ${inventoryLocationId} no encontrada`);
   }
 
-  private async adjustBalance(manager: EntityManager, balance: InventoryBalance, delta: Decimal): Promise<void> {
+  // `position` y `minStock` solo se le ponen a la balanza de destino (ver la llamada): la de
+  // origen se está vaciando, no tiene sentido reubicarla ni fijarle un mínimo. Ausentes no tocan
+  // lo que ya tenían; "" los borra (ver el input).
+  private async adjustBalance(manager: EntityManager, balance: InventoryBalance, delta: Decimal, position?: string, minStock?: string): Promise<void> {
     balance.quantity = balance.quantity.plus(delta);
+    if (position !== undefined) balance.position = position || null;
+    if (minStock !== undefined) balance.minStock = minStock ? new Decimal(minStock) : null;
     await manager.getRepository(InventoryBalance).save(balance);
   }
 }

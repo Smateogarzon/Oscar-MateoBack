@@ -49,13 +49,23 @@ export class ProductVariant extends BaseEntity {
   @JoinColumn({ name: 'sizeId' })
   size: Size;
 
-  @Column({ type: 'varchar', length: 100 })
+  @Column({ type: 'varchar', length: 100, unique: true })
   sku: string;
 
-  @Column({ type: 'numeric', precision: 14, scale: 2, transformer: decimalTransformer })
+  @Column({
+    type: 'numeric',
+    precision: 14,
+    scale: 2,
+    transformer: decimalTransformer,
+  })
   cost: Decimal;
 
-  @Column({ type: 'numeric', precision: 14, scale: 2, transformer: decimalTransformer })
+  @Column({
+    type: 'numeric',
+    precision: 14,
+    scale: 2,
+    transformer: decimalTransformer,
+  })
   price: Decimal;
 
   @Column({ type: 'text', nullable: true })

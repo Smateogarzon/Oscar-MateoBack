@@ -47,7 +47,7 @@ export class ColorService {
           if (await repo.existsBy({ name: ILike(input.name) })) {
             throw new ConflictException(`Ya existe un color llamado "${input.name}"`);
           }
-          return repo.save(repo.create({ name: input.name, hex: input.hex ?? null }));
+          return repo.save(repo.create({ name: input.name, hex: input.hex ?? null, secondHex: input.secondHex ?? null }));
         },
         (id) => manager.getRepository(Color).findOneByOrFail({ id }),
       ),

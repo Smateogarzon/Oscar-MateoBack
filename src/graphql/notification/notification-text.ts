@@ -17,6 +17,10 @@ const sale = (p: NotificationTextParams): string =>
 // El número de una devolución siempre existe; el respaldo es solo para que el tipo cuadre.
 const ref = (p: NotificationTextParams): string => p.reference ?? 'sin número';
 
+// La referencia del producto siempre existe (se genera sola al crearlo); el respaldo es solo para
+// que el tipo cuadre.
+const productRef = (p: NotificationTextParams): string => (p.reference ? `la referencia ${p.reference}` : 'una referencia');
+
 const TEXTS: Record<
   NotificationType,
   { title: string; message: (p: NotificationTextParams) => string }
@@ -64,6 +68,22 @@ const TEXTS: Record<
     title: 'Devolución cancelada',
     message: (p) => `${p.actorName} canceló la devolución ${ref(p)}.`,
   },
+  [NotificationType.PRODUCT_DELETION_REQUESTED]: {
+    title: 'Solicitud de borrado',
+    message: (p) => `${p.actorName} pidió borrar ${productRef(p)}.`,
+  },
+  [NotificationType.PRODUCT_DELETION_APPROVED]: {
+    title: 'Referencia borrada',
+    message: (p) => `${p.actorName} aprobó borrar ${productRef(p)}.`,
+  },
+  [NotificationType.PRODUCT_DELETION_REJECTED]: {
+    title: 'Solicitud de borrado rechazada',
+    message: (p) => `${p.actorName} rechazó borrar ${productRef(p)}.`,
+  },
+  [NotificationType.PRODUCT_DELETION_CANCELLED]: {
+    title: 'Solicitud de borrado cancelada',
+    message: (p) => `${p.actorName} canceló la solicitud de borrar ${productRef(p)}.`,
+  },
 };
 
 const TYPES_WITH_NOTES = new Set<NotificationType>([
@@ -71,6 +91,8 @@ const TYPES_WITH_NOTES = new Set<NotificationType>([
   NotificationType.DISCOUNT_CANCELLED,
   NotificationType.RETURN_REJECTED,
   NotificationType.RETURN_CANCELLED,
+  NotificationType.PRODUCT_DELETION_REJECTED,
+  NotificationType.PRODUCT_DELETION_CANCELLED,
 ]);
 
 export function buildNotificationText(

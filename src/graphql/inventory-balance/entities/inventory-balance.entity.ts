@@ -39,6 +39,18 @@ export class InventoryBalance {
   @Column({ type: 'numeric', precision: 12, scale: 2, default: 0, transformer: decimalTransformer })
   quantity: Decimal;
 
+  // Dónde queda dentro del cajón (un rack, un estante): "Rack A-14 · Nivel 2". La pone quien
+  // registra el movimiento que hace crecer esta balanza (ver CreateInventoryMovementInput.position
+  // e InventoryMovementService.record); sin eso, queda como estaba.
+  @Column({ type: 'varchar', length: 120, nullable: true })
+  position: string | null;
+
+  // Debajo de esta cantidad la existencia se considera baja (para alertas de agotamiento, aún por
+  // construir). Se pone igual que position: solo desde CreateInventoryMovementInput.minStock, y
+  // solo en la balanza de destino.
+  @Column({ type: 'numeric', precision: 12, scale: 2, nullable: true, transformer: decimalTransformer })
+  minStock: Decimal | null;
+
   @UpdateDateColumn({ type: 'timestamptz' })
   updatedAt: Date;
 }

@@ -1,6 +1,6 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, EntityManager, Not, Repository } from 'typeorm';
+import { DataSource, EntityManager, type FindOptionsWhere, IsNull, Not, Repository } from 'typeorm';
 import { RecordStatus } from '../../common/enums/record-status.enum.js';
 import { definedFields } from '../../common/utils/defined-fields.js';
 import { slugify } from '../../common/utils/slugify.js';
@@ -24,14 +24,17 @@ export class CategoryService {
   // `parentId` distingue "no filtrar por padre" (ausente) de "solo las raíz" (null): quien llama
   // decide cuál quiere.
   findAll(companyId: string, status?: RecordStatus, parentId?: string | null): Promise<Category[]> {
-    return this.categoryRepository.find({
-      where: {
-        companyId,
-        ...(status && { status }),
-        ...(parentId !== undefined && { parentId }),
-      },
-      order: { name: 'ASC' },
-    });
+    // Anotado a mano: `Category` es la única entidad que se referencia a sí misma (`parent`), lo
+    // que vuelve `FindOptionsWhere<Category>` un tipo recursivo. Sin este tipo explícito, TS no
+    // resuelve bien la unión de un objeto armado con spreads condicionales contra ese tipo.
+    // `parentId: null` no es un valor válido de columna para TypeORM: una raíz se busca con
+    // `IsNull()`, no con el `null` literal.
+    const where: FindOptionsWhere<Category> = {
+      companyId,
+      ...(status && { status }),
+      ...(parentId !== undefined && { parentId: parentId === null ? IsNull() : parentId }),
+    };
+    return this.categoryRepository.find({ where, order: { name: 'ASC' } });
   }
 
   async findOne(companyId: string, id: string): Promise<Category> {

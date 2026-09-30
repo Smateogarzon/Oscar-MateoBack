@@ -15,4 +15,10 @@ export class CreateColorInput {
   @IsOptional()
   @Matches(/^#[0-9A-Fa-f]{6}$/, { message: 'hex debe ser un color en formato #RRGGBB' })
   hex?: string;
+
+  // El segundo tono de un color combinado ("Blanco negro"), p.ej. "#000000" junto a hex "#FFFFFF".
+  @Field({ nullable: true })
+  @IsOptional()
+  @Matches(/^#[0-9A-Fa-f]{6}$/, { message: 'secondHex debe ser un color en formato #RRGGBB' })
+  secondHex?: string;
 }

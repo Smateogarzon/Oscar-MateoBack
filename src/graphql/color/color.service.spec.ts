@@ -56,7 +56,7 @@ describe('ColorService', () => {
 
       const color = await service.create(COMPANY, USER, input);
 
-      expect(txColorRepo.create).toHaveBeenCalledWith({ name: 'Rojo', hex: '#FF0000' });
+      expect(txColorRepo.create).toHaveBeenCalledWith({ name: 'Rojo', hex: '#FF0000', secondHex: null });
       expect(color.id).toBe('color-1');
     });
 
@@ -65,7 +65,15 @@ describe('ColorService', () => {
 
       await service.create(COMPANY, USER, { name: 'Rojo' });
 
-      expect(txColorRepo.create.mock.calls[0][0]).toMatchObject({ hex: null });
+      expect(txColorRepo.create.mock.calls[0][0]).toMatchObject({ hex: null, secondHex: null });
+    });
+
+    it('saves the second tone of a combined color, when it comes with one', async () => {
+      const { service, txColorRepo } = createService();
+
+      await service.create(COMPANY, USER, { name: 'Blanco negro', hex: '#FFFFFF', secondHex: '#000000' });
+
+      expect(txColorRepo.create.mock.calls[0][0]).toMatchObject({ hex: '#FFFFFF', secondHex: '#000000' });
     });
 
     it('rejects a name that already exists, case-insensitive', async () => {

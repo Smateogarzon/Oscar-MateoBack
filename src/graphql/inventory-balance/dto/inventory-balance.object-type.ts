@@ -21,6 +21,12 @@ export class InventoryBalanceObjectType {
   @Field(() => Decimal)
   quantity: Decimal;
 
+  @Field(() => String, { nullable: true })
+  position: string | null;
+
+  @Field(() => Decimal, { nullable: true })
+  minStock: Decimal | null;
+
   @Field(() => Date)
   updatedAt: Date;
 }

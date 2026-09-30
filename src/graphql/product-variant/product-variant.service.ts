@@ -160,6 +160,10 @@ export class ProductVariantService {
     if (!exists) throw new NotFoundException(`Talla ${sizeId} no encontrada`);
   }
 
+  // El SKU es único de verdad (índice único en la tabla): esto no se puede "confirmar y crear
+  // igual" como el nombre parecido de un producto (ver ProductService.assertNameNotSimilar). Lo
+  // único que se hace acá es decir A QUIÉN pertenece ya ese SKU, para que quien lo escribió mal
+  // encuentre la variante correcta en vez de intentar otro SKU al azar.
   private async assertSkuFree(
     manager: EntityManager,
     companyId: string,
@@ -171,7 +175,36 @@ export class ProductVariantService {
       sku,
       ...(excludeId && { id: Not(excludeId) }),
     });
-    if (clash) throw new ConflictException(`Ya existe una variante con el SKU "${sku}"`);
+    if (!clash) return;
+    throw new ConflictException(await this.duplicateSkuError(manager, companyId, sku, excludeId));
+  }
+
+  // A quién pertenece ya el SKU, para el mensaje de assertSkuFree. Consulta aparte (con join a
+  // products) porque el repositorio de variantes no trae la relación cargada por defecto; si por
+  // lo que sea no encuentra el dueño, el mensaje cae a uno genérico en vez de romper.
+  private async duplicateSkuError(
+    manager: EntityManager,
+    companyId: string,
+    sku: string,
+    excludeId?: string,
+  ): Promise<Record<string, unknown>> {
+    const rows: { variantId: string; productId: string; productName: string; productReference: string }[] =
+      await manager.query(
+        `SELECT pv.id AS "variantId", p.id AS "productId", p.name AS "productName", p.reference AS "productReference"
+           FROM product_variants pv
+           JOIN products p ON p.id = pv."productId"
+          WHERE pv."companyId" = $1::uuid AND pv.sku = $2
+          ${excludeId ? 'AND pv.id <> $3::uuid' : ''}
+          LIMIT 1`,
+        excludeId ? [companyId, sku, excludeId] : [companyId, sku],
+      );
+    const owner = rows[0];
+    if (!owner) return { message: `Ya existe una variante con el SKU "${sku}"`, code: 'DUPLICATE_SKU' };
+    return {
+      message: `El SKU "${sku}" ya pertenece a "${owner.productName}" (referencia ${owner.productReference}). ¿Quisiste decir este producto?`,
+      code: 'DUPLICATE_SKU',
+      ...owner,
+    };
   }
 
   // Este producto no puede tener dos variantes con el mismo color y la misma talla.
