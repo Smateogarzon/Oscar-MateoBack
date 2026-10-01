@@ -29,9 +29,11 @@ export class CreateInventoryReservationInput {
   @IsEnum(InventorySourceType)
   sourceType: InventorySourceType;
 
-  @Field(() => ID)
+  // El documento del que nace la reserva. Solo una reserva manual (MANUAL_ADJUSTMENT) puede ir sin él.
+  @Field(() => ID, { nullable: true })
+  @IsOptional()
   @IsUUID()
-  sourceId: string;
+  sourceId?: string;
 
   @Field({ nullable: true })
   @IsOptional()

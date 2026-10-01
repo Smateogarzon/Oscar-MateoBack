@@ -23,6 +23,16 @@ const HARD_DELETE_ROLE = 'SUPER_ADMIN';
 const NAME_SIMILARITY_THRESHOLD = 0.35;
 const MAX_SIMILAR_SUGGESTIONS = 5;
 
+// pg_trgm se queda corto con nombres de una sola palabra corta: "samba" y "zamba" tienen tan
+// pocos trigramas que cambiar una letra hunde el puntaje muy por debajo de NAME_SIMILARITY_THRESHOLD.
+// Para nombres de hasta SHORT_NAME_MAX_LENGTH se refuerza con distancia de edición (levenshtein):
+// se exige 1 sola letra de diferencia en nombres de hasta 5 caracteres, y 2 hasta el límite, para
+// no marcar como "parecidos" pares cortos que en realidad son distintos (p. ej. "nike" / "vibe").
+const SHORT_NAME_MAX_LENGTH = 8;
+const SHORT_NAME_MAX_EDITS_TIGHT = 1;
+const SHORT_NAME_MAX_EDITS_TIGHT_LENGTH = 5;
+const SHORT_NAME_MAX_EDITS = 2;
+
 export interface SimilarProductMatch {
   id: string;
   name: string;
@@ -172,9 +182,8 @@ export class ProductService {
     return this.dataSource.transaction((manager) => this.deleteReferenceWithin(manager, companyId, roleCodes, id));
   }
 
-  // Misma operación, pero dentro de una transacción que ya abrió el llamador (ver
-  // ProductDeletionRequestService.approve): así aprobar la solicitud y borrar la referencia son
-  // una sola operación atómica, no dos transacciones separadas que podrían quedar a medias entre sí.
+  // Misma operación, pero dentro de una transacción que ya abrió el llamador: así borrar la
+  // referencia puede ir junto con otros cambios en una sola operación atómica.
   async deleteReferenceWithin(manager: EntityManager, companyId: string, roleCodes: readonly string[], id: string): Promise<Product> {
     const product = await this.lock(manager, companyId, id);
     const variantRepo = manager.getRepository(ProductVariant);
@@ -238,6 +247,8 @@ export class ProductService {
   // y "adidas air force one" comparten suficientes como para que esto las relacione aunque la
   // primera esté mal escrita. `unaccent`+`lower` evitan que tildes o mayúsculas bajen el puntaje
   // por razones que no tienen que ver con el error real. Ver migración V0.2_update_product.
+  // Para nombres cortos (hasta SHORT_NAME_MAX_LENGTH) se suma levenshtein() como segunda señal
+  // (ver V0.3_update_product): ahí el trigrama solo no alcanza para cazar un "zamba" por "samba".
   private async findSimilarByNameWithin(
     manager: EntityManager,
     companyId: string,
@@ -249,10 +260,26 @@ export class ProductService {
          FROM products
         WHERE "companyId" = $2::uuid
           AND status = $3::record_status
-          AND similarity(lower(unaccent(name)), lower(unaccent($1))) >= $4
+          AND (
+            similarity(lower(unaccent(name)), lower(unaccent($1))) >= $4
+            OR (
+              length($1) <= $5::int AND length(name) <= $5::int
+              AND levenshtein(lower(unaccent(name)), lower(unaccent($1)))
+                  <= CASE WHEN LEAST(length($1), length(name)) <= $6::int THEN $7::int ELSE $8::int END
+            )
+          )
         ORDER BY score DESC
         LIMIT ${MAX_SIMILAR_SUGGESTIONS}`,
-      [name, companyId, RecordStatus.ACTIVE, NAME_SIMILARITY_THRESHOLD],
+      [
+        name,
+        companyId,
+        RecordStatus.ACTIVE,
+        NAME_SIMILARITY_THRESHOLD,
+        SHORT_NAME_MAX_LENGTH,
+        SHORT_NAME_MAX_EDITS_TIGHT_LENGTH,
+        SHORT_NAME_MAX_EDITS_TIGHT,
+        SHORT_NAME_MAX_EDITS,
+      ],
     );
     return rows.map((row) => ({ ...row, score: Number(row.score) }));
   }

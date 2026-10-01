@@ -15,6 +15,7 @@ import { PermissionsGuard } from '../../common/guards/permissions.guard.js';
 import type { JwtPayload } from '../auth/interface/jwt-payload.interface.js';
 import { CreateProductVariantInput } from './dto/create-product-variant.input.js';
 import { ProductVariantObjectType } from './dto/product-variant.object-type.js';
+import { ProductVariantSearchResultObjectType } from './dto/product-variant-search-result.object-type.js';
 import { UpdateProductVariantInput } from './dto/update-product-variant.input.js';
 import { ProductVariantService } from './product-variant.service.js';
 
@@ -37,6 +38,13 @@ export class ProductVariantResolver {
   @RequireCompanyMembership()
   productVariant(@CurrentCompanyId() companyId: string, @Args('id', { type: () => ID }) id: string) {
     return this.productVariantService.findOne(companyId, id);
+  }
+
+  // El buscador de Ventas: para el carrito, mientras se teclea o se escanea un código de barras.
+  @Query(() => [ProductVariantSearchResultObjectType])
+  @RequireCompanyMembership()
+  searchProductVariants(@CurrentCompanyId() companyId: string, @Args('search') search: string) {
+    return this.productVariantService.search(companyId, search);
   }
 
   @Mutation(() => ProductVariantObjectType)

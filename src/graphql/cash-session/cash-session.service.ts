@@ -76,9 +76,11 @@ export interface OpenedCashSession {
 
 // La empresa de un turno es la de la tienda de su caja: todo se hace dentro de la empresa activa y
 // un turno de otra empresa se responde como si no existiera.
-// El administrador abre el turno de una caja para UN cajero y lo cierra; el cajero asignado es el
-// único que cobra y mueve dinero en él. Cada cajero ve los turnos que se le asignaron; quien abre y
-// cierra turnos, o tiene el permiso de ver todo (CashActor.canViewAll), ve los de todos.
+// El administrador abre el turno de una caja para UN cajero y lo cierra; el cajero asignado es quien
+// normalmente cobra y mueve dinero en él, pero quien abre y cierra turnos (CashActor.canManageShifts,
+// permiso cash.open_close_shift) también puede intervenir cualquier turno sin asignárselo primero.
+// Cada cajero ve los turnos que se le asignaron; quien abre y cierra turnos, o tiene el permiso de
+// ver todo (CashActor.canViewAll), ve los de todos.
 // Toda operación que cambia un turno lo bloquea (`lockOpen`) hasta que termina su transacción: si
 // además toca una venta, la venta se bloquea ANTES (ver SalePaymentService.complete), y así nunca
 // se cruzan dos operaciones.
@@ -482,18 +484,19 @@ export class CashSessionService {
   }
 
   // Trae el turno bloqueado hasta que la transacción termine, para que cobre o mueva dinero SU
-  // cajero: el asignado, nadie más (un solo cajero por caja), tampoco el administrador que lo abrió:
-  // si tiene que cobrar, se asigna como cajero. Exige que el turno siga abierto. Devuelve el turno con
-  // su caja (`cashRegister`) cargada. Es pública porque SaleService, CashMovementService,
-  // SalePaymentService y SaleReturnService la usan: todo lo que cambia un turno ocurre con el turno
-  // bloqueado, y por eso un cierre nunca deja pasar un cobro a medias.
+  // cajero: el asignado, nadie más (un solo cajero por caja) — salvo quien abre y cierra turnos
+  // (CashActor.canManageShifts), que interviene cualquier turno sin asignárselo. Exige que el turno
+  // siga abierto. Devuelve el turno con su caja (`cashRegister`) cargada. Es pública porque
+  // SaleService, CashMovementService, SalePaymentService y SaleReturnService la usan: todo lo que
+  // cambia un turno ocurre con el turno bloqueado, y por eso un cierre nunca deja pasar un cobro a
+  // medias.
   lockOpen(
     manager: EntityManager,
     companyId: string,
     id: string,
     actor: CashActor,
   ): Promise<CashSession> {
-    return this.lock(manager, companyId, id, actor.userId);
+    return this.lock(manager, companyId, id, actor.canManageShifts ? null : actor.userId);
   }
 
   // Lo mismo, pero para el administrador que cierra el turno o cambia su código: cualquier turno

@@ -133,6 +133,10 @@ function createService() {
     markEntityRead: vi.fn().mockResolvedValue(0),
     signalChange: vi.fn(),
   };
+  // Ninguna de estas pruebas cobra una línea de catálogo (todas son GENERIC): el descuento de
+  // inventario nunca se dispara, así que basta con que estos mocks existan para completar la firma.
+  const inventoryBalances = { findStockLocationForSale: vi.fn() };
+  const inventoryMovements = { recordInTransaction: vi.fn() };
 
   // Las claves de idempotencia que guardaría la base: reclamar una nueva la inserta; si ya estaba
   // (ON CONFLICT DO NOTHING) no inserta nada y el reintento la busca para devolver lo que se cobró.
@@ -192,6 +196,8 @@ function createService() {
     cashSessions as never,
     returns as never,
     notifications as never,
+    inventoryBalances as never,
+    inventoryMovements as never,
   );
   return {
     service,
@@ -532,8 +538,9 @@ describe('SalePaymentService', () => {
     });
   });
 
-  // Solo cobra el cajero asignado a la venta: ni siquiera el administrador que abre y cierra turnos cobra
-  // la venta de otro cajero, ni opera una tienda que no tiene asignada.
+  // Solo cobra normalmente el cajero asignado a la venta, salvo quien abre y cierra turnos
+  // (cash.open_close_shift): ese interviene cualquier caja, igual que crea ventas y mueve dinero en
+  // turnos ajenos.
   describe('complete, who can charge', () => {
     it('does not let a cashier charge the sale of another cashier', async () => {
       const { service, sales, accessRepo, cashSessions, txRequestRepo, txPaymentRepo, txSaleRepo } =
@@ -555,24 +562,23 @@ describe('SalePaymentService', () => {
       expect(txSaleRepo.save).not.toHaveBeenCalled();
     });
 
-    it('does not let whoever opens and closes shifts charge it either, when they are not its cashier', async () => {
-      const { service, sales, accessRepo, cashSessions, txPaymentRepo, txSaleRepo } = createService();
+    it('lets whoever opens and closes shifts charge a sale that is not theirs', async () => {
+      const { service, sales, cashSessions, txPaymentRepo, txSaleRepo } = createService();
       sales.lockAnyStatus.mockResolvedValue(draftSale());
 
-      await expect(service.complete(COMPANY, admin, charge([cash('100000')]))).rejects.toThrow(
-        'Solo el cajero de la venta puede cobrarla',
-      );
-      expect(accessRepo.existsBy).not.toHaveBeenCalled();
-      expect(cashSessions.lockOpen).not.toHaveBeenCalled();
-      expect(txPaymentRepo.save).not.toHaveBeenCalled();
-      expect(txSaleRepo.save).not.toHaveBeenCalled();
+      const sale = await service.complete(COMPANY, admin, charge([cash('100000')]));
+
+      expect(sale).toMatchObject({ cashierId: 'cashier-1', status: SaleStatus.COMPLETED });
+      expect(cashSessions.lockOpen).toHaveBeenCalledWith(expect.anything(), COMPANY, 'session-1', admin);
+      expect(txPaymentRepo.save).toHaveBeenCalled();
+      expect(txSaleRepo.save).toHaveBeenCalled();
     });
 
     it('does not spend a consecutive number on a charge that was refused', async () => {
       const { service, sales } = createService();
       sales.lockAnyStatus.mockResolvedValue(draftSale());
 
-      await expect(service.complete(COMPANY, admin, charge([cash('100000')]))).rejects.toThrow(
+      await expect(service.complete(COMPANY, otherCashier, charge([cash('100000')]))).rejects.toThrow(
         ForbiddenException,
       );
       expect(sales.assignNumber).not.toHaveBeenCalled();
@@ -753,17 +759,29 @@ describe('SalePaymentService', () => {
       },
     );
 
-    it.each([
-      ['another cashier', otherCashier],
-      ['whoever opens and closes shifts, when they are not the cashier of the sale', admin],
-    ])('does not take it for a retry when it comes from %s, so it does not reveal the payments', async (_who, actor) => {
+    it('does not take it for a retry when it comes from another cashier, so it does not reveal the payments', async () => {
       const { service, sales, txPaymentRepo, cashSessions } = createService();
       sales.lockAnyStatus.mockResolvedValue(completedSale());
       txPaymentRepo.find.mockResolvedValue([stored('method-cash', '100000')]);
 
-      await expect(service.complete(COMPANY, actor, charge([cash('100000')]))).rejects.toThrow(ConflictException);
+      await expect(service.complete(COMPANY, otherCashier, charge([cash('100000')]))).rejects.toThrow(
+        ConflictException,
+      );
       // Ni siquiera se comparan los pagos
       expect(txPaymentRepo.find).not.toHaveBeenCalled();
+      expect(cashSessions.lockOpen).not.toHaveBeenCalled();
+    });
+
+    it('does not take it for a retry when whoever opens and closes shifts received other payments than the ones stored', async () => {
+      // Puede cobrar cualquier caja, pero el reintento solo reconoce lo que ESE actor cobró: si lo stored
+      // lo recibió otra persona (el cajero original), no es el mismo cobro aunque los importes cuadren.
+      const { service, sales, txPaymentRepo, cashSessions } = createService();
+      sales.lockAnyStatus.mockResolvedValue(completedSale());
+      txPaymentRepo.find.mockResolvedValue([stored('method-cash', '100000')]);
+
+      await expect(service.complete(COMPANY, admin, charge([cash('100000')]))).rejects.toThrow(
+        ConflictException,
+      );
       expect(cashSessions.lockOpen).not.toHaveBeenCalled();
     });
 

@@ -24,9 +24,10 @@ export class SaleItem extends BaseEntity {
   @Column({ type: 'enum', enum: SaleItemType, enumName: 'sale_item_type' })
   type: SaleItemType;
 
-  // Variante de producto vendida (solo INVENTORIED); null en una línea GENERIC. Todavía no hay una
-  // mutación que agregue líneas desde el catálogo (falta el modelo de existencias por sede: sin él
-  // no hay de dónde descontar lo vendido), pero la relación ya es real.
+  // Variante de producto vendida (solo INVENTORIED); null en una línea GENERIC. La agrega
+  // SaleService.addItem cuando AddSaleItemInput trae productVariantId (desde el buscador de
+  // Ventas). Al cobrar, SalePaymentService.complete descuenta cada línea de la bodega STOCK donde
+  // esa variante esté registrada (no la tienda que vendió: ver InventoryBalanceService.findStockLocationForSale).
   @Index()
   @Column({ type: 'uuid', nullable: true })
   productVariantId: string | null;

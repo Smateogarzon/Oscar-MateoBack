@@ -50,7 +50,10 @@ function createService() {
   const dataSource = {
     transaction: vi.fn(async (fn: (manager: unknown) => unknown) => fn(manager)),
   };
-  const service = new InventoryMovementService(repo as never, dataSource as never);
+  // Ninguna prueba de aquí pone `minStock` en una balanza: el aviso de existencia baja nunca se
+  // dispara, así que basta con que el mock exista para completar la firma.
+  const notifications = { findUserIdsWithPermission: vi.fn().mockResolvedValue([]), notify: vi.fn() };
+  const service = new InventoryMovementService(repo as never, dataSource as never, notifications as never);
   return {
     service,
     repo,

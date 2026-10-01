@@ -9,7 +9,7 @@ describe('CHANNEL_OF_TYPE', () => {
     for (const type of Object.values(NotificationType)) {
       const expected = type.startsWith('DISCOUNT_')
         ? NotificationChannel.DISCOUNTS
-        : type.startsWith('PRODUCT_DELETION_')
+        : type.startsWith('INVENTORY_')
           ? NotificationChannel.INVENTORY
           : NotificationChannel.RETURNS;
       expect(CHANNEL_OF_TYPE[type]).toBe(expected);
@@ -61,8 +61,6 @@ describe('buildNotificationText', () => {
     NotificationType.DISCOUNT_CANCELLED,
     NotificationType.RETURN_REJECTED,
     NotificationType.RETURN_CANCELLED,
-    NotificationType.PRODUCT_DELETION_REJECTED,
-    NotificationType.PRODUCT_DELETION_CANCELLED,
   ])('adds the note to %s', (type) => {
     const { message } = buildNotificationText(type, { ...params, notes: '  Muy alto  ' });
 
@@ -76,8 +74,6 @@ describe('buildNotificationText', () => {
     NotificationType.RETURN_REQUESTED,
     NotificationType.RETURN_EDITED,
     NotificationType.RETURN_APPROVED,
-    NotificationType.PRODUCT_DELETION_REQUESTED,
-    NotificationType.PRODUCT_DELETION_APPROVED,
   ])('does not add a note to %s', (type) => {
     const { message } = buildNotificationText(type, { ...params, notes: 'Muy alto' });
 

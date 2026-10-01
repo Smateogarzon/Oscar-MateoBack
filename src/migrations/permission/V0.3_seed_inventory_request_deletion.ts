@@ -9,14 +9,14 @@ export class SeedInventoryRequestDeletionPermission1790900000000 implements Migr
   public async up(queryRunner: QueryRunner): Promise<void> {
     await queryRunner.query(`
       INSERT INTO "permissions" ("id", "code", "name", "module", "status")
-      VALUES ('30000000-0000-4000-8000-000000000021', 'inventory.request_deletion', 'Pedir borrar una referencia', 'INVENTORY', 'ACTIVE')
+      VALUES ('30000000-0000-4000-8000-000000000032', 'inventory.request_deletion', 'Pedir borrar una referencia', 'INVENTORY', 'ACTIVE')
     `);
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
     assertDestructiveDownAllowed(this.name);
     await queryRunner.query(`
-      DELETE FROM "permissions" WHERE "id" = '30000000-0000-4000-8000-000000000021'
+      DELETE FROM "permissions" WHERE "id" = '30000000-0000-4000-8000-000000000032'
     `);
   }
 }

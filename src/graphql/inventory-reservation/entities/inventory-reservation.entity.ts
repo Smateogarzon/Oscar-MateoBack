@@ -41,8 +41,9 @@ export class InventoryReservation extends ImmutableEntity {
   @Column({ type: 'enum', enum: InventorySourceType, enumName: 'inventory_source_type' })
   sourceType: InventorySourceType;
 
-  @Column({ type: 'uuid' })
-  sourceId: string;
+  // Nulo en una reserva manual (MANUAL_ADJUSTMENT): no nace de ningún documento.
+  @Column({ type: 'uuid', nullable: true })
+  sourceId: string | null;
 
   @Column({ type: 'varchar', length: 50, nullable: true })
   sourceNumber: string | null;

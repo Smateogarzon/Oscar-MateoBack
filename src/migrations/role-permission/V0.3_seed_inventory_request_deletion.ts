@@ -9,10 +9,12 @@ export class SeedInventoryRequestDeletionRolePermission1790900000001 implements 
 
   public async up(queryRunner: QueryRunner): Promise<void> {
     await queryRunner.query(`
-      INSERT INTO "role_permissions" ("roleId", "permissionId")
-      SELECT r.id, p.id FROM "roles" r
+      INSERT INTO "role_permissions" ("roleId", "permissionId", "companyId")
+      SELECT r.id, p.id, c.id FROM "roles" r
       CROSS JOIN "permissions" p
+      CROSS JOIN "companies" c
       WHERE p."code" = 'inventory.request_deletion' AND r."code" IN ('WAREHOUSE', 'SELLER', 'CASHIER')
+      ON CONFLICT DO NOTHING
     `);
   }
 

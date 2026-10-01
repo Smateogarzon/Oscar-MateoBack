@@ -4,6 +4,7 @@ import { Decimal } from 'decimal.js';
 import { DataSource, EntityManager, Repository } from 'typeorm';
 import { lockOrCreateInventoryBalance } from '../inventory-balance/lock-inventory-balance.js';
 import { InventoryLocation } from '../inventory-location/entities/inventory-location.entity.js';
+import { InventorySourceType } from '../inventory-movement/entities/inventory-source-type.enum.js';
 import { runIdempotent } from '../idempotency/idempotency.js';
 import { ProductVariant } from '../product-variant/entities/product-variant.entity.js';
 import { CreateInventoryReservationInput } from './dto/create-inventory-reservation.input.js';
@@ -54,6 +55,9 @@ export class InventoryReservationService {
     if (quantity.lessThanOrEqualTo(0)) {
       throw new BadRequestException('La cantidad debe ser mayor que cero');
     }
+    if (!input.sourceId && input.sourceType !== InventorySourceType.MANUAL_ADJUSTMENT) {
+      throw new BadRequestException('Una reserva que nace de un documento debe indicar sourceId');
+    }
 
     return this.dataSource.transaction((manager) =>
       runIdempotent(
@@ -99,7 +103,7 @@ export class InventoryReservationService {
               side: input.side,
               quantity,
               sourceType: input.sourceType,
-              sourceId: input.sourceId,
+              sourceId: input.sourceId ?? null,
               sourceNumber: input.sourceNumber?.trim() || null,
             }),
           );

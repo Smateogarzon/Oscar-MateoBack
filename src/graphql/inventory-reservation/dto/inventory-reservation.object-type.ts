@@ -22,8 +22,8 @@ export class InventoryReservationObjectType extends ImmutableObjectType {
   @Field(() => InventorySourceType)
   sourceType: InventorySourceType;
 
-  @Field(() => ID)
-  sourceId: string;
+  @Field(() => ID, { nullable: true })
+  sourceId: string | null;
 
   @Field(() => String, { nullable: true })
   sourceNumber: string | null;

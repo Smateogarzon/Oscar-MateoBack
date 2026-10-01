@@ -79,6 +79,39 @@ export class InventoryLocationService {
     );
   }
 
+  // La ubicación RETURNS de una sede, para poner ahí lo que vuelve de una devolución (ver
+  // SaleReturnService.restockReturnedItems). A diferencia del resto (que "no nace sola": alguien
+  // la crea a mano), esta sí se crea sola la primera vez que una sede la necesita: una devolución
+  // no puede fallar solo porque nadie configuró todavía dónde poner lo devuelto. Si ya hay una
+  // (la haya creado esto mismo antes, o a mano un administrador), se usa la más antigua; puede
+  // haber más de una, igual que con cualquier otro tipo (ver la entidad).
+  async findOrCreateReturnsLocation(
+    manager: EntityManager,
+    companyId: string,
+    storeId: string,
+  ): Promise<InventoryLocation> {
+    const repo = manager.getRepository(InventoryLocation);
+    const existing = await repo.findOne({
+      where: {
+        companyId,
+        locationId: storeId,
+        type: InventoryLocationType.RETURNS,
+        status: RecordStatus.ACTIVE,
+      },
+      order: { createdAt: 'ASC' },
+    });
+    if (existing) return existing;
+
+    return repo.save(
+      repo.create({
+        companyId,
+        type: InventoryLocationType.RETURNS,
+        locationId: storeId,
+        custodianUserId: null,
+      }),
+    );
+  }
+
   async deactivate(companyId: string, id: string): Promise<InventoryLocation> {
     await this.findOne(companyId, id);
     return this.dataSource.transaction(async (manager) => {

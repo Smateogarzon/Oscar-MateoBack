@@ -3,9 +3,15 @@ import { NotificationType } from './entities/notification-type.enum.js';
 export interface NotificationTextParams {
   actorName: string;
   // El número de la venta o de la devolución. Una venta en borrador todavía no tiene número
-  // (se asigna al cobrarla): con null el texto habla de "una venta en curso".
+  // (se asigna al cobrarla): con null el texto habla de "una venta en curso". En
+  // INVENTORY_LOW_STOCK lleva el producto y el SKU en vez de un número (ver `productRef`).
   reference: string | null;
   notes?: string | null;
+  // Solo para INVENTORY_LOW_STOCK (ver InventoryMovementService.maybeNotifyLowStock).
+  quantity?: string;
+  minStock?: string;
+  locationName?: string | null;
+  outOfStock?: boolean;
 }
 
 const MESSAGE_MAX_LENGTH = 500;
@@ -68,21 +74,15 @@ const TEXTS: Record<
     title: 'Devolución cancelada',
     message: (p) => `${p.actorName} canceló la devolución ${ref(p)}.`,
   },
-  [NotificationType.PRODUCT_DELETION_REQUESTED]: {
-    title: 'Solicitud de borrado',
-    message: (p) => `${p.actorName} pidió borrar ${productRef(p)}.`,
-  },
-  [NotificationType.PRODUCT_DELETION_APPROVED]: {
-    title: 'Referencia borrada',
-    message: (p) => `${p.actorName} aprobó borrar ${productRef(p)}.`,
-  },
-  [NotificationType.PRODUCT_DELETION_REJECTED]: {
-    title: 'Solicitud de borrado rechazada',
-    message: (p) => `${p.actorName} rechazó borrar ${productRef(p)}.`,
-  },
-  [NotificationType.PRODUCT_DELETION_CANCELLED]: {
-    title: 'Solicitud de borrado cancelada',
-    message: (p) => `${p.actorName} canceló la solicitud de borrar ${productRef(p)}.`,
+  [NotificationType.INVENTORY_LOW_STOCK]: {
+    title: 'Existencia baja',
+    message: (p) => {
+      const where = p.locationName ? ` en ${p.locationName}` : '';
+      const left = p.quantity ?? '0';
+      return p.outOfStock
+        ? `${productRef(p)} se agotó${where}: quedaron ${left} unidades.`
+        : `${productRef(p)} está baja${where}: quedaron ${left} unidades (mínimo ${p.minStock ?? '-'}).`;
+    },
   },
 };
 
@@ -91,8 +91,6 @@ const TYPES_WITH_NOTES = new Set<NotificationType>([
   NotificationType.DISCOUNT_CANCELLED,
   NotificationType.RETURN_REJECTED,
   NotificationType.RETURN_CANCELLED,
-  NotificationType.PRODUCT_DELETION_REJECTED,
-  NotificationType.PRODUCT_DELETION_CANCELLED,
 ]);
 
 export function buildNotificationText(

@@ -1416,16 +1416,14 @@ describe('CashSessionService', () => {
       expect(txSessionRepo.findOne).toHaveBeenCalledTimes(1);
     });
 
-    it('does not let whoever opens and closes shifts operate a shift that is not theirs: only the assigned cashier charges', async () => {
+    it('lets whoever opens and closes shifts operate a shift that is not theirs: admins intervene any register', async () => {
       const { service, manager, txSessionRepo } = createService();
       txSessionRepo.findOne.mockResolvedValue(openSession());
 
-      // El administrador (admin-1) abrió el turno de 'cashier-1': no lo puede cobrar por ese turno
-      await expect(service.lockOpen(manager as never, COMPANY, 'session-1', admin)).rejects.toThrow(
-        ForbiddenException,
-      );
-      // Ni siquiera se bloquea el turno
-      expect(txSessionRepo.findOne).toHaveBeenCalledTimes(1);
+      // El administrador (admin-1) abrió el turno de 'cashier-1': puede cobrar y mover dinero en él igual
+      await expect(
+        service.lockOpen(manager as never, COMPANY, 'session-1', admin),
+      ).resolves.toMatchObject({ id: 'session-1', cashierId: 'cashier-1' });
     });
 
     it('lets the administrator operate a shift when they are the cashier assigned to it: to charge, they assign themselves', async () => {

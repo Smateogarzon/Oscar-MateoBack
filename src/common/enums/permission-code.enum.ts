@@ -27,8 +27,7 @@ export enum PermissionCode {
   // el Administrador y el Bodeguero de cada empresa (quien recibe mercancía nueva es quien más lo
   // usa), además del super administrador.
   INVENTORY_MANAGE_PRODUCTS = 'inventory.manage_products',
-  // Ver el inventario y pedir que se borre una referencia, sin poder borrarla directo: la pide
-  // quien maneja el stock o vende (bodega, vendedor, caja) y la resuelve quien tiene
-  // INVENTORY_MANAGE_PRODUCTS.
-  INVENTORY_REQUEST_DELETION = 'inventory.request_deletion',
+  // Solo ver el inventario (existencias, traslados), sin modificar nada: lo tienen Bodega, Vendedor
+  // y Caja. Todo lo que cambia el inventario sigue pidiendo INVENTORY_MANAGE_PRODUCTS (solo Admin).
+  INVENTORY_VIEW = 'inventory.view',
 }

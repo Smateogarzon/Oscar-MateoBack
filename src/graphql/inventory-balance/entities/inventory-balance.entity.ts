@@ -45,9 +45,9 @@ export class InventoryBalance {
   @Column({ type: 'varchar', length: 120, nullable: true })
   position: string | null;
 
-  // Debajo de esta cantidad la existencia se considera baja (para alertas de agotamiento, aún por
-  // construir). Se pone igual que position: solo desde CreateInventoryMovementInput.minStock, y
-  // solo en la balanza de destino.
+  // Debajo de esta cantidad la existencia se considera baja: el listado de inventario avisa. Se pone
+  // desde CreateInventoryMovementInput.minStock o UpdateInventoryBalanceMinStockInput, y solo en la
+  // balanza de destino.
   @Column({ type: 'numeric', precision: 12, scale: 2, nullable: true, transformer: decimalTransformer })
   minStock: Decimal | null;
 

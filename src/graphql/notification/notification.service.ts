@@ -41,6 +41,11 @@ export interface NotifyInput {
   // El número de la venta o de la devolución; null si es una venta en borrador (sin número todavía)
   reference: string | null;
   notes?: string | null;
+  // Solo para INVENTORY_LOW_STOCK (ver NotificationTextParams).
+  quantity?: string;
+  minStock?: string;
+  locationName?: string | null;
+  outOfStock?: boolean;
 }
 
 // Los avisos se guardan seis meses: después no le sirven a nadie y la tabla crecería sin fin.
@@ -115,6 +120,10 @@ export class NotificationService {
       actorName,
       reference: input.reference,
       notes: input.notes,
+      quantity: input.quantity,
+      minStock: input.minStock,
+      locationName: input.locationName,
+      outOfStock: input.outOfStock,
     });
 
     const notificationRepo = manager.getRepository(Notification);
