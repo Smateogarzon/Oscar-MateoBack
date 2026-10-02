@@ -112,6 +112,55 @@ export class InventoryLocationService {
     );
   }
 
+  // El STOCK de una sede puntual (no "el que más tenga de toda la empresa": eso es
+  // InventoryBalanceService.findStockLocationForSale, para cuando no importa cuál tienda). La usan
+  // WriteOffService y InternalOrderService, que sí ya saben de qué sede están descontando.
+  async findStockLocation(manager: EntityManager, companyId: string, locationId: string): Promise<InventoryLocation> {
+    const stockLocation = await manager.getRepository(InventoryLocation).findOne({
+      where: {
+        companyId,
+        locationId,
+        type: InventoryLocationType.STOCK,
+        status: RecordStatus.ACTIVE,
+      },
+      order: { createdAt: 'ASC' },
+    });
+    if (!stockLocation) {
+      throw new NotFoundException('Esta sede no tiene una ubicación de inventario STOCK activa');
+    }
+    return stockLocation;
+  }
+
+  // La bolsa de un corredor: igual que findOrCreateReturnsLocation, se crea sola la primera vez
+  // que ese corredor la necesita (al tomar su primer pedido), y de ahí en más se reutiliza la
+  // misma en todos sus pedidos — no una por pedido. Ver InternalOrderService.pickUp.
+  async findOrCreateRunnerLocation(
+    manager: EntityManager,
+    companyId: string,
+    runnerUserId: string,
+  ): Promise<InventoryLocation> {
+    const repo = manager.getRepository(InventoryLocation);
+    const existing = await repo.findOne({
+      where: {
+        companyId,
+        custodianUserId: runnerUserId,
+        type: InventoryLocationType.RUNNER,
+        status: RecordStatus.ACTIVE,
+      },
+      order: { createdAt: 'ASC' },
+    });
+    if (existing) return existing;
+
+    return repo.save(
+      repo.create({
+        companyId,
+        type: InventoryLocationType.RUNNER,
+        locationId: null,
+        custodianUserId: runnerUserId,
+      }),
+    );
+  }
+
   async deactivate(companyId: string, id: string): Promise<InventoryLocation> {
     await this.findOne(companyId, id);
     return this.dataSource.transaction(async (manager) => {

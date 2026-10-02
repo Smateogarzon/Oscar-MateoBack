@@ -247,4 +247,69 @@ describe('InventoryLocationService', () => {
       expect(result.status).toBe(RecordStatus.ACTIVE);
     });
   });
+
+  describe('findStockLocation', () => {
+    it('finds the active STOCK of a given store', async () => {
+      const { service, manager, txInventoryLocationRepo } = createService();
+      txInventoryLocationRepo.findOne.mockResolvedValue({ id: 'inv-loc-1', type: InventoryLocationType.STOCK });
+
+      const found = await service.findStockLocation(manager as never, COMPANY, 'store-1');
+
+      expect(txInventoryLocationRepo.findOne).toHaveBeenCalledWith({
+        where: {
+          companyId: COMPANY,
+          locationId: 'store-1',
+          type: InventoryLocationType.STOCK,
+          status: RecordStatus.ACTIVE,
+        },
+        order: { createdAt: 'ASC' },
+      });
+      expect(found.id).toBe('inv-loc-1');
+    });
+
+    it('fails when that store has no active STOCK', async () => {
+      const { service, manager, txInventoryLocationRepo } = createService();
+      txInventoryLocationRepo.findOne.mockResolvedValue(null);
+
+      await expect(service.findStockLocation(manager as never, COMPANY, 'store-1')).rejects.toThrow(
+        NotFoundException,
+      );
+    });
+  });
+
+  describe('findOrCreateRunnerLocation', () => {
+    it('reuses the runner’s existing bag instead of creating another', async () => {
+      const { service, manager, txInventoryLocationRepo } = createService();
+      txInventoryLocationRepo.findOne.mockResolvedValue({ id: 'inv-loc-runner-1' });
+
+      const location = await service.findOrCreateRunnerLocation(manager as never, COMPANY, 'runner-1');
+
+      expect(txInventoryLocationRepo.findOne).toHaveBeenCalledWith({
+        where: {
+          companyId: COMPANY,
+          custodianUserId: 'runner-1',
+          type: InventoryLocationType.RUNNER,
+          status: RecordStatus.ACTIVE,
+        },
+        order: { createdAt: 'ASC' },
+      });
+      expect(location.id).toBe('inv-loc-runner-1');
+      expect(txInventoryLocationRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('creates the bag the first time that runner needs one', async () => {
+      const { service, manager, txInventoryLocationRepo } = createService();
+      txInventoryLocationRepo.findOne.mockResolvedValue(null);
+
+      const location = await service.findOrCreateRunnerLocation(manager as never, COMPANY, 'runner-1');
+
+      expect(txInventoryLocationRepo.create).toHaveBeenCalledWith({
+        companyId: COMPANY,
+        type: InventoryLocationType.RUNNER,
+        locationId: null,
+        custodianUserId: 'runner-1',
+      });
+      expect(location.id).toBe('inv-loc-1');
+    });
+  });
 });

@@ -30,4 +30,29 @@ export enum PermissionCode {
   // Solo ver el inventario (existencias, traslados), sin modificar nada: lo tienen Bodega, Vendedor
   // y Caja. Todo lo que cambia el inventario sigue pidiendo INVENTORY_MANAGE_PRODUCTS (solo Admin).
   INVENTORY_VIEW = 'inventory.view',
+
+  // Los siguientes ya existían en la base desde la semilla original (V0.2, antes de que existiera
+  // ningún módulo que los usara) y ya tienen reparto por rol (Vendedor/Bodega/Corredor/Proveedor):
+  // se agregan acá tal cual, sin una migración nueva, al construir pedidos internos, órdenes de
+  // compra y bajas de inventario.
+
+  // Pedidos internos (internal_orders): pedir, ver todos y confirmar que lo pedido llegó.
+  ORDERS_REQUEST_FROM_WAREHOUSE = 'orders.request_from_warehouse',
+  ORDERS_VIEW_ALL = 'orders.view_all',
+  ORDERS_CONFIRM_RECEIPT = 'orders.confirm_receipt',
+  // Bodega: aceptar, alistar y despachar un pedido; recibir en bodega lo que vuelve de una devolución.
+  WAREHOUSE_FULFILL_ORDERS = 'warehouse.fulfill_orders',
+  WAREHOUSE_RECEIVE_RETURNS = 'warehouse.receive_returns',
+  // Corredor: tomar un pedido listo para transportar y confirmar que lo entregó.
+  RUNNER_PICKUP_ORDERS = 'runner.pickup_orders',
+  RUNNER_CONFIRM_DELIVERY = 'runner.confirm_delivery',
+  RUNNER_REPORT_INCIDENT = 'runner.report_incident',
+  // Bajas de inventario (write_offs): pedir una (mismo permiso que pedir un ajuste de stock) y
+  // aprobarla o rechazarla.
+  INVENTORY_REQUEST_ADJUSTMENT = 'inventory.request_adjustment',
+  INVENTORY_RESOLVE_ADJUSTMENTS = 'inventory.resolve_adjustments',
+  INVENTORY_APPROVE_WRITEOFF = 'inventory.approve_writeoff',
+  // El proveedor, sobre SU PROPIA orden de compra: confirmarla y registrar que la entregó.
+  SUPPLIERS_CONFIRM_PURCHASE_ORDER = 'suppliers.confirm_purchase_order',
+  SUPPLIERS_REGISTER_DELIVERY = 'suppliers.register_delivery',
 }
