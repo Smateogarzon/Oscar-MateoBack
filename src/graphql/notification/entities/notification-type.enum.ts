@@ -11,6 +11,10 @@ export enum NotificationType {
   RETURN_APPROVED = 'RETURN_APPROVED',
   RETURN_REJECTED = 'RETURN_REJECTED',
   RETURN_CANCELLED = 'RETURN_CANCELLED',
+  // Una existencia cruzó su mínimo (ver InventoryBalance.minStock): justo al pasar de estar por
+  // encima a estar en o por debajo, no en cada movimiento siguiente mientras siga baja (ver
+  // InventoryMovementService.maybeNotifyLowStock).
+  INVENTORY_LOW_STOCK = 'INVENTORY_LOW_STOCK',
 }
 
 export const CHANNEL_OF_TYPE: Record<NotificationType, NotificationChannel> = {
@@ -24,4 +28,5 @@ export const CHANNEL_OF_TYPE: Record<NotificationType, NotificationChannel> = {
   [NotificationType.RETURN_APPROVED]: NotificationChannel.RETURNS,
   [NotificationType.RETURN_REJECTED]: NotificationChannel.RETURNS,
   [NotificationType.RETURN_CANCELLED]: NotificationChannel.RETURNS,
+  [NotificationType.INVENTORY_LOW_STOCK]: NotificationChannel.INVENTORY,
 };

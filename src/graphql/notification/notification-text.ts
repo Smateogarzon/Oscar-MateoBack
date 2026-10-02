@@ -3,9 +3,15 @@ import { NotificationType } from './entities/notification-type.enum.js';
 export interface NotificationTextParams {
   actorName: string;
   // El número de la venta o de la devolución. Una venta en borrador todavía no tiene número
-  // (se asigna al cobrarla): con null el texto habla de "una venta en curso".
+  // (se asigna al cobrarla): con null el texto habla de "una venta en curso". En
+  // INVENTORY_LOW_STOCK lleva el producto y el SKU en vez de un número (ver `productRef`).
   reference: string | null;
   notes?: string | null;
+  // Solo para INVENTORY_LOW_STOCK (ver InventoryMovementService.maybeNotifyLowStock).
+  quantity?: string;
+  minStock?: string;
+  locationName?: string | null;
+  outOfStock?: boolean;
 }
 
 const MESSAGE_MAX_LENGTH = 500;
@@ -16,6 +22,10 @@ const sale = (p: NotificationTextParams): string =>
 
 // El número de una devolución siempre existe; el respaldo es solo para que el tipo cuadre.
 const ref = (p: NotificationTextParams): string => p.reference ?? 'sin número';
+
+// La referencia del producto siempre existe (se genera sola al crearlo); el respaldo es solo para
+// que el tipo cuadre.
+const productRef = (p: NotificationTextParams): string => (p.reference ? `la referencia ${p.reference}` : 'una referencia');
 
 const TEXTS: Record<
   NotificationType,
@@ -63,6 +73,16 @@ const TEXTS: Record<
   [NotificationType.RETURN_CANCELLED]: {
     title: 'Devolución cancelada',
     message: (p) => `${p.actorName} canceló la devolución ${ref(p)}.`,
+  },
+  [NotificationType.INVENTORY_LOW_STOCK]: {
+    title: 'Existencia baja',
+    message: (p) => {
+      const where = p.locationName ? ` en ${p.locationName}` : '';
+      const left = p.quantity ?? '0';
+      return p.outOfStock
+        ? `${productRef(p)} se agotó${where}: quedaron ${left} unidades.`
+        : `${productRef(p)} está baja${where}: quedaron ${left} unidades (mínimo ${p.minStock ?? '-'}).`;
+    },
   },
 };
 

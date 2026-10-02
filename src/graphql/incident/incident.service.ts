@@ -1,0 +1,155 @@
+import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { DataSource, EntityManager, Repository } from 'typeorm';
+import { Location } from '../location/entities/location.entity.js';
+import { runIdempotent } from '../idempotency/idempotency.js';
+import { ProductVariant } from '../product-variant/entities/product-variant.entity.js';
+import { CreateIncidentInput } from './dto/create-incident.input.js';
+import { Incident } from './entities/incident.entity.js';
+import { IncidentStatus } from './entities/incident-status.enum.js';
+import { IncidentType } from './entities/incident-type.enum.js';
+
+export interface IncidentFilter {
+  type?: IncidentType;
+  status?: IncidentStatus;
+  locationId?: string;
+}
+
+// Cualquier miembro puede reportar (ver el resolver: sin permiso especial); resolverla o
+// cancelarla sí exige inventory.manage_products, igual que el resto de esta área — el día que
+// existan pedidos, corredores o proveedores, sus propias novedades podrán pedir su propio permiso.
+@Injectable()
+export class IncidentService {
+  constructor(
+    @InjectRepository(Incident)
+    private readonly incidentRepository: Repository<Incident>,
+    private readonly dataSource: DataSource,
+  ) {}
+
+  findAll(companyId: string, filter: IncidentFilter = {}): Promise<Incident[]> {
+    return this.incidentRepository.find({
+      where: {
+        companyId,
+        ...(filter.type && { type: filter.type }),
+        ...(filter.status && { status: filter.status }),
+        ...(filter.locationId && { locationId: filter.locationId }),
+      },
+      order: { createdAt: 'DESC' },
+    });
+  }
+
+  async findOne(companyId: string, id: string): Promise<Incident> {
+    const incident = await this.incidentRepository.findOneBy({ id, companyId });
+    if (!incident) throw new NotFoundException(`Novedad ${id} no encontrada`);
+    return incident;
+  }
+
+  async report(
+    companyId: string,
+    userId: string,
+    input: CreateIncidentInput,
+    idempotencyKey?: string,
+  ): Promise<Incident> {
+    return this.dataSource.transaction((manager) =>
+      runIdempotent(
+        manager,
+        {
+          companyId,
+          userId,
+          operation: 'reportIncident',
+          key: idempotencyKey,
+          input,
+          resourceType: 'incident',
+        },
+        async () => {
+          if (input.locationId) await this.assertLocation(manager, companyId, input.locationId);
+          if (input.productVariantId) await this.assertProductVariant(manager, companyId, input.productVariantId);
+
+          const repo = manager.getRepository(Incident);
+          return repo.save(
+            repo.create({
+              companyId,
+              type: input.type,
+              title: input.title,
+              description: input.description ?? null,
+              entityType: input.entityType ?? null,
+              entityId: input.entityId ?? null,
+              locationId: input.locationId ?? null,
+              productVariantId: input.productVariantId ?? null,
+              reportedBy: userId,
+              resolvedBy: null,
+              resolvedAt: null,
+            }),
+          );
+        },
+        (id) => manager.getRepository(Incident).findOneByOrFail({ id }),
+      ),
+    );
+  }
+
+  // No hay quién "puso en revisión" en la entidad (solo resolvedBy, para cuando se cierra): por
+  // eso no pide userId, a diferencia de resolve/cancel.
+  async startReview(companyId: string, id: string): Promise<Incident> {
+    await this.findOne(companyId, id);
+    return this.dataSource.transaction(async (manager) => {
+      const incident = await this.lock(manager, companyId, id);
+      if (incident.status !== IncidentStatus.OPEN) {
+        throw new ConflictException('Solo se pasa a revisión una novedad abierta');
+      }
+      incident.status = IncidentStatus.IN_REVIEW;
+      return manager.getRepository(Incident).save(incident);
+    });
+  }
+
+  async resolve(companyId: string, userId: string, id: string): Promise<Incident> {
+    await this.findOne(companyId, id);
+    return this.dataSource.transaction(async (manager) => {
+      const incident = await this.lock(manager, companyId, id);
+      this.assertOpen(incident);
+      incident.status = IncidentStatus.RESOLVED;
+      incident.resolvedBy = userId;
+      incident.resolvedAt = new Date();
+      return manager.getRepository(Incident).save(incident);
+    });
+  }
+
+  async cancel(companyId: string, userId: string, id: string): Promise<Incident> {
+    await this.findOne(companyId, id);
+    return this.dataSource.transaction(async (manager) => {
+      const incident = await this.lock(manager, companyId, id);
+      this.assertOpen(incident);
+      incident.status = IncidentStatus.CANCELLED;
+      incident.resolvedBy = userId;
+      incident.resolvedAt = new Date();
+      return manager.getRepository(Incident).save(incident);
+    });
+  }
+
+  private assertOpen(incident: Incident): void {
+    if (incident.status === IncidentStatus.RESOLVED || incident.status === IncidentStatus.CANCELLED) {
+      throw new ConflictException('Esta novedad ya se cerró');
+    }
+  }
+
+  private async lock(manager: EntityManager, companyId: string, id: string): Promise<Incident> {
+    const incident = await manager
+      .getRepository(Incident)
+      .findOne({ where: { id, companyId }, lock: { mode: 'pessimistic_write' } });
+    if (!incident) throw new NotFoundException(`Novedad ${id} no encontrada`);
+    return incident;
+  }
+
+  private async assertLocation(manager: EntityManager, companyId: string, locationId: string): Promise<void> {
+    const exists = await manager.getRepository(Location).existsBy({ id: locationId, companyId });
+    if (!exists) throw new NotFoundException(`Sede ${locationId} no encontrada`);
+  }
+
+  private async assertProductVariant(
+    manager: EntityManager,
+    companyId: string,
+    productVariantId: string,
+  ): Promise<void> {
+    const exists = await manager.getRepository(ProductVariant).existsBy({ id: productVariantId, companyId });
+    if (!exists) throw new NotFoundException(`Variante ${productVariantId} no encontrada`);
+  }
+}

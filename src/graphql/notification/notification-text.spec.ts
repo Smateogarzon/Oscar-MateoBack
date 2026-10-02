@@ -9,7 +9,9 @@ describe('CHANNEL_OF_TYPE', () => {
     for (const type of Object.values(NotificationType)) {
       const expected = type.startsWith('DISCOUNT_')
         ? NotificationChannel.DISCOUNTS
-        : NotificationChannel.RETURNS;
+        : type.startsWith('INVENTORY_')
+          ? NotificationChannel.INVENTORY
+          : NotificationChannel.RETURNS;
       expect(CHANNEL_OF_TYPE[type]).toBe(expected);
     }
   });

@@ -20,6 +20,7 @@ import { DocumentSequenceService } from '../document-sequence/document-sequence.
 import { LocationType } from '../location/entities/location-type.enum.js';
 import { Location } from '../location/entities/location.entity.js';
 import { NotificationService } from '../notification/notification.service.js';
+import { ProductVariant } from '../product-variant/entities/product-variant.entity.js';
 import { User } from '../user/entities/user.entity.js';
 import { UserCompanyRole } from '../user-company-role/entities/user-company-role.entity.js';
 import { AddSaleItemInput } from './dto/add-sale-item.input.js';
@@ -284,12 +285,19 @@ export class SaleService {
           this.assertOwnDraft(sale, actor);
           await assertStoreAccess(manager, actor.userId, sale.storeId);
 
+          if (input.productVariantId) {
+            const exists = await manager
+              .getRepository(ProductVariant)
+              .existsBy({ id: input.productVariantId, companyId, status: RecordStatus.ACTIVE });
+            if (!exists) throw new NotFoundException(`Variante ${input.productVariantId} no encontrada`);
+          }
+
           const repo = manager.getRepository(SaleItem);
           await repo.save(
             repo.create({
               saleId: sale.id,
-              type: SaleItemType.GENERIC,
-              productVariantId: null,
+              type: input.productVariantId ? SaleItemType.INVENTORIED : SaleItemType.GENERIC,
+              productVariantId: input.productVariantId ?? null,
               description,
               sku: input.sku?.trim() || null,
               quantity,
