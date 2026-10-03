@@ -3,7 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, EntityManager, ILike, Not, Repository } from 'typeorm';
 import { RecordStatus } from '../../common/enums/record-status.enum.js';
 import { definedFields } from '../../common/utils/defined-fields.js';
-import { slugify } from '../../common/utils/slugify.js';
+import { uniqueSlug } from '../../common/utils/slugify.js';
 import { runIdempotent } from '../idempotency/idempotency.js';
 import { CreateBrandInput } from './dto/create-brand.input.js';
 import { UpdateBrandInput } from './dto/update-brand.input.js';
@@ -119,13 +119,11 @@ export class BrandService {
     if (clash) throw new ConflictException(`Ya existe una marca llamada "${name}"`);
   }
 
-  private async uniqueSlug(manager: EntityManager, name: string, excludeId?: string): Promise<string> {
+  // Las marcas son compartidas entre empresas: el slug no se repite en toda la tabla.
+  private uniqueSlug(manager: EntityManager, name: string, excludeId?: string): Promise<string> {
     const repo = manager.getRepository(Brand);
-    const base = slugify(name, SLUG_MAX_LENGTH);
-    let candidate = base;
-    for (let suffix = 2; await repo.existsBy({ slug: candidate, ...(excludeId && { id: Not(excludeId) }) }); suffix++) {
-      candidate = `${base}-${suffix}`.slice(0, SLUG_MAX_LENGTH);
-    }
-    return candidate;
+    return uniqueSlug(name, SLUG_MAX_LENGTH, (slug) =>
+      repo.existsBy({ slug, ...(excludeId && { id: Not(excludeId) }) }),
+    );
   }
 }

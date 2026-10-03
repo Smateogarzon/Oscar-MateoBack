@@ -5,7 +5,6 @@ import { DataSource, EntityManager, Repository } from 'typeorm';
 import { IncidentStatus } from '../incident/entities/incident-status.enum.js';
 import { IncidentType } from '../incident/entities/incident-type.enum.js';
 import { Incident } from '../incident/entities/incident.entity.js';
-import { InventorySide } from '../inventory-balance/entities/inventory-side.enum.js';
 import { InventoryLocationService } from '../inventory-location/inventory-location.service.js';
 import { InventoryMovementType } from '../inventory-movement/entities/inventory-movement-type.enum.js';
 import { InventorySourceType } from '../inventory-movement/entities/inventory-source-type.enum.js';
@@ -233,7 +232,6 @@ export class InternalOrderService {
           productVariantId: item.productVariantId,
           fromLocationId: sourceStock.id,
           toLocationId: runnerBag.id,
-          side: InventorySide.PAIR,
           quantity: item.foundQuantity ?? item.quantity,
           type: InventoryMovementType.RUNNER_PICKUP,
           sourceType: InventorySourceType.TRANSFER_REQUEST,
@@ -272,7 +270,6 @@ export class InternalOrderService {
           productVariantId: item.productVariantId,
           fromLocationId: runnerBag.id,
           toLocationId: destinationStock.id,
-          side: InventorySide.PAIR,
           quantity: item.foundQuantity ?? item.quantity,
           type: InventoryMovementType.RUNNER_DELIVERY,
           sourceType: InventorySourceType.TRANSFER_REQUEST,

@@ -12,8 +12,6 @@ import { GraphQLModule } from '@nestjs/graphql';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ThrottlerModule, seconds } from '@nestjs/throttler';
 import { ApolloArmor } from '@escape.tech/graphql-armor';
-import { AppController } from './app.controller.js';
-import { AppService } from './app.service.js';
 import { AppResolver } from './app.resolver.js';
 import { GqlThrottlerGuard } from './common/guards/gql-throttler.guard.js';
 import { GqlAllExceptionsFilter } from './common/filters/gql-all-exceptions.filter.js';
@@ -178,9 +176,7 @@ const { validationRules, plugins } = new ApolloArmor().protect();
     UploadModule,
     PosHardwareModule,
   ],
-  controllers: [AppController],
   providers: [
-    AppService,
     AppResolver,
     DecimalScalar,
     GraphqlLoggingPlugin,

@@ -1,4 +1,5 @@
-import { MONEY_PATTERN, QUANTITY_PATTERN } from './money.js';
+import { Decimal } from 'decimal.js';
+import { MAX_AMOUNT, MONEY_PATTERN, QUANTITY_PATTERN, roundMoney } from './money.js';
 
 describe('MONEY_PATTERN', () => {
   it.each(['0', '10', '10.5', '10.55', '125000.50', '999999999999.99'])(
@@ -37,5 +38,19 @@ describe('QUANTITY_PATTERN', () => {
     ['an empty string', ''],
   ])('rejects %s', (_description, value) => {
     expect(QUANTITY_PATTERN.test(value)).toBe(false);
+  });
+});
+
+describe('MAX_AMOUNT', () => {
+  it('is the first amount that no longer fits numeric(14,2)', () => {
+    expect(MAX_AMOUNT.toFixed(0)).toBe('1000000000000');
+  });
+});
+
+describe('roundMoney', () => {
+  it('rounds to cents, half up, whatever the global decimal.js setting', () => {
+    expect(roundMoney(new Decimal('10.005')).toFixed(2)).toBe('10.01');
+    expect(roundMoney(new Decimal('10.004')).toFixed(2)).toBe('10.00');
+    expect(roundMoney(new Decimal('3').times('33333.335')).toFixed(2)).toBe('100000.01');
   });
 });

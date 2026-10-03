@@ -1,7 +1,6 @@
 import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
 import { Decimal } from 'decimal.js';
 import { InventoryBalance } from '../inventory-balance/entities/inventory-balance.entity.js';
-import { InventorySide } from '../inventory-balance/entities/inventory-side.enum.js';
 import { InventoryLocation } from '../inventory-location/entities/inventory-location.entity.js';
 import { IdempotencyKey } from '../idempotency/entities/idempotency-key.entity.js';
 import { fingerprintOf } from '../idempotency/idempotency.js';
@@ -13,13 +12,12 @@ import { InventoryMovementService } from './inventory-movement.service.js';
 const claimKey = (sql: string) =>
   sql.includes('INSERT INTO "idempotency_keys"') ? [{ id: 'claim-1' }] : [];
 
-// Cómo entrega la balanza ya bloqueada (lockOrCreateBalance): siempre la misma variante y lado en
-// estas pruebas, solo cambia la ubicación y lo que había.
+// Cómo entrega la balanza ya bloqueada (lockOrCreateBalance): siempre la misma variante en estas
+// pruebas, solo cambia la ubicación y lo que había.
 const balance = (inventoryLocationId: string, quantity: string) => ({
   id: `bal-${inventoryLocationId}`,
   productVariantId: 'variant-1',
   inventoryLocationId,
-  side: InventorySide.PAIR,
   quantity: new Decimal(quantity),
 });
 
@@ -73,7 +71,6 @@ const USER = 'user-1';
 const purchase = {
   productVariantId: 'variant-1',
   toLocationId: 'to-1',
-  side: InventorySide.PAIR,
   quantity: '5',
   type: InventoryMovementType.PURCHASE,
   sourceType: InventorySourceType.PURCHASE_ORDER,
@@ -82,7 +79,6 @@ const purchase = {
 const sale = {
   productVariantId: 'variant-1',
   fromLocationId: 'from-1',
-  side: InventorySide.PAIR,
   quantity: '3',
   type: InventoryMovementType.SALE,
   sourceType: InventorySourceType.SALE,
@@ -181,6 +177,22 @@ describe('InventoryMovementService', () => {
       expect(txMovementRepo.save).not.toHaveBeenCalled();
     });
 
+    it('does not let the client skip what another sale reserved by naming that sale as the source', async () => {
+      const { service, balanceRepo, manager, txMovementRepo } = createService();
+      balanceRepo.findOne.mockResolvedValueOnce(balance('from-1', '5'));
+      // 3 de las 5 unidades están apartadas por una venta en curso (de otro vendedor).
+      manager.query = vi.fn(async (sql: string) =>
+        sql.includes('inventory_reservations') ? [{ sum: '3' }] : claimKey(sql),
+      );
+
+      await expect(
+        service.record(COMPANY, USER, { ...sale, quantity: '3', sourceId: 'sale-of-another-seller' }),
+      ).rejects.toThrow(/apartados/);
+      const reservedCall = manager.query.mock.calls.find(([sql]) => String(sql).includes('inventory_reservations'));
+      expect(reservedCall?.[1]).toEqual(['variant-1', 'from-1']);
+      expect(txMovementRepo.save).not.toHaveBeenCalled();
+    });
+
     it('a transfer locks both balances in location-id order, regardless of which is origin and which is destination', async () => {
       const { service, balanceRepo } = createService();
       // 'loc-a' < 'loc-b': se bloquea primero 'loc-a' (el destino), aunque el origen es 'loc-b'.
@@ -196,11 +208,11 @@ describe('InventoryMovementService', () => {
       });
 
       expect(balanceRepo.findOne).toHaveBeenNthCalledWith(1, {
-        where: { productVariantId: 'variant-1', inventoryLocationId: 'loc-a', side: InventorySide.PAIR },
+        where: { productVariantId: 'variant-1', inventoryLocationId: 'loc-a' },
         lock: { mode: 'pessimistic_write' },
       });
       expect(balanceRepo.findOne).toHaveBeenNthCalledWith(2, {
-        where: { productVariantId: 'variant-1', inventoryLocationId: 'loc-b', side: InventorySide.PAIR },
+        where: { productVariantId: 'variant-1', inventoryLocationId: 'loc-b' },
         lock: { mode: 'pessimistic_write' },
       });
       // 'loc-b' (origen) resta, 'loc-a' (destino) suma, sin que el orden de bloqueo cambie cuál es cuál.

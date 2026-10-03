@@ -3,9 +3,9 @@
 export const PUBLIC_PREFIX = 'public';
 
 // Lista blanca de carpetas válidas para POST /uploads/image. El front manda
-// `folder` como flag de qué está subiendo (users, brands, ...); se valida acá
+// `folder` como flag de qué está subiendo (users, products, ...); se valida acá
 // para que nunca escriba a una ruta arbitraria del bucket.
-export const UPLOAD_FOLDERS = ['users'] as const;
+export const UPLOAD_FOLDERS = ['users', 'products'] as const;
 
 export type UploadFolder = (typeof UPLOAD_FOLDERS)[number];
 

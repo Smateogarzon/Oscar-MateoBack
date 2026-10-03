@@ -1,4 +1,5 @@
-import { Decimal } from 'decimal.js';
+import type { Decimal } from 'decimal.js';
+import { roundMoney } from '../../common/utils/money.js';
 
 // Tope de un descuento: el 30 % del valor de aquello sobre lo que se pide, ya sea una línea o
 // toda la venta. Vale para quien lo pide, para quien lo aprueba y para quien lo edita: ni un
@@ -9,10 +10,7 @@ export const MAX_DISCOUNT_PERCENT = 30;
 // hacia arriba". Al redondear igual que se convierte un porcentaje en monto, cualquier
 // porcentaje hasta el tope da un monto que cabe.
 export function maxDiscountFor(value: Decimal): Decimal {
-  return value
-    .times(MAX_DISCOUNT_PERCENT)
-    .dividedBy(100)
-    .toDecimalPlaces(2, Decimal.ROUND_HALF_UP);
+  return roundMoney(value.times(MAX_DISCOUNT_PERCENT).dividedBy(100));
 }
 
 // Lo que vale una línea antes de su descuento: su total más el descuento que ya lleve.

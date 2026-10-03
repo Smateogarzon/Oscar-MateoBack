@@ -5,14 +5,16 @@ import {
   EntityManager,
   In,
   IsNull,
-  Not,
   Repository,
 } from 'typeorm';
+import { COMPANY_VISIBLE_ROLE, PLATFORM_ROLE } from '../../common/access/platform-role.js';
 import { PermissionCode } from '../../common/enums/permission-code.enum.js';
 import { RecordStatus } from '../../common/enums/record-status.enum.js';
+import { fullName } from '../../common/utils/text.js';
 import { RealtimeEventKind } from '../../realtime/realtime-event.js';
 import { RealtimeService } from '../../realtime/realtime.service.js';
-import { RoleScope } from '../role/entities/role-scope.enum.js';
+import { Permission } from '../permission/entities/permission.entity.js';
+import type { RoleScope } from '../role/entities/role-scope.enum.js';
 import { RolePermission } from '../role-permission/entities/role-permission.entity.js';
 import { UserCompanyRole } from '../user-company-role/entities/user-company-role.entity.js';
 import { User } from '../user/entities/user.entity.js';
@@ -114,7 +116,7 @@ export class NotificationService {
       .getRepository(User)
       .findOneBy({ id: input.actorId });
     const actorName = actor
-      ? `${actor.firstName} ${actor.lastName}`.trim()
+      ? fullName(actor)
       : UNKNOWN_ACTOR_NAME;
     const { title, message } = buildNotificationText(input.type, {
       actorName,
@@ -224,30 +226,38 @@ export class NotificationService {
   }
 
   // Los usuarios de la empresa que tienen un permiso: miembros activos, con la cuenta activa, en un
-  // rol activo que la empresa dejó con ese permiso. Los usuarios de plataforma (rol global) no
-  // cuentan: las empresas no los ven.
+  // rol activo que la empresa dejó con ese permiso; y además los miembros de plataforma (el super
+  // admin), que tienen todo el catálogo sin pasar por role_permissions (ver loadCompanyAccess): si
+  // no, nunca recibían un aviso ni una señal en vivo.
+  // `scope` acota los roles de la empresa a ESE alcance (los de plataforma entran siempre). Lo usan
+  // las compras: el proveedor tiene el mismo permiso que el administrador
+  // (suppliers.manage_purchase_orders) y no le toca enterarse de las órdenes de otro proveedor.
   async findUserIdsWithPermission(
     manager: EntityManager,
     companyId: string,
     permission: PermissionCode,
+    options: { scope?: RoleScope } = {},
   ): Promise<string[]> {
+    const permissionActive = await manager
+      .getRepository(Permission)
+      .existsBy({ code: permission, status: RecordStatus.ACTIVE });
+    if (!permissionActive) return [];
+
     const grants = await manager.getRepository(RolePermission).find({
       where: {
         companyId,
-        permission: { code: permission, status: RecordStatus.ACTIVE },
-        role: { status: RecordStatus.ACTIVE, scope: Not(RoleScope.GLOBAL) },
+        permission: { code: permission },
+        role: { status: RecordStatus.ACTIVE, ...(options.scope ? { scope: options.scope } : COMPANY_VISIBLE_ROLE) },
       },
     });
     const roleIds = [...new Set(grants.map((grant) => grant.roleId))];
-    if (roleIds.length === 0) return [];
 
+    const activeMember = { companyId, status: RecordStatus.ACTIVE, user: { status: RecordStatus.ACTIVE } };
     const memberships = await manager.getRepository(UserCompanyRole).find({
-      where: {
-        companyId,
-        roleId: In(roleIds),
-        status: RecordStatus.ACTIVE,
-        user: { status: RecordStatus.ACTIVE },
-      },
+      where: [
+        { ...activeMember, role: { ...PLATFORM_ROLE, status: RecordStatus.ACTIVE } },
+        ...(roleIds.length > 0 ? [{ ...activeMember, roleId: In(roleIds) }] : []),
+      ],
     });
     return [...new Set(memberships.map((membership) => membership.userId))];
   }

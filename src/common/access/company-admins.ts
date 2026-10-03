@@ -86,6 +86,11 @@ export async function permissionCodesOfUser(
   return rows.map((row) => row.code);
 }
 
+// Los rechazos de "solo das lo que tienes" (ver assertHoldsPermissions), iguales al asignar un rol
+// desde Usuarios o desde las membresías.
+export const GRANT_MESSAGE = 'No puedes dar un rol con permisos que tú no tienes';
+export const TOUCH_MESSAGE = 'No puedes modificar a alguien con más permisos que tú';
+
 // "Solo das lo que tienes": quien administra usuarios o la configuración no puede dar (ni tocar a quien
 // tiene) permisos que él mismo no tiene. Sin esto, un rol delegado con users.manage podía darse el rol
 // de administrador o restablecer la contraseña de uno y entrar como él.

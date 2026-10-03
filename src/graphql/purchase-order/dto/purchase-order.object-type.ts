@@ -25,6 +25,10 @@ export class PurchaseOrderObjectType extends BaseObjectType {
   @Field(() => PurchaseOrderStatus)
   status: PurchaseOrderStatus;
 
+  // Alguna línea quedó con novedad: la pantalla pinta la orden distinto aunque esté recibida.
+  @Field()
+  hasIncidents: boolean;
+
   @Field(() => Decimal)
   subtotal: Decimal;
 
@@ -34,17 +38,17 @@ export class PurchaseOrderObjectType extends BaseObjectType {
   @Field(() => Date, { nullable: true })
   expectedAt: Date | null;
 
-  @Field(() => String, { nullable: true })
-  notes: string | null;
-
   @Field()
   createdBy: string;
 
   @Field(() => Date, { nullable: true })
-  confirmedAt: Date | null;
+  shippedAt: Date | null;
 
   @Field(() => Date, { nullable: true })
   receivedAt: Date | null;
+
+  @Field(() => ID, { nullable: true })
+  receivedBy: string | null;
 
   @Field(() => Date, { nullable: true })
   cancelledAt: Date | null;

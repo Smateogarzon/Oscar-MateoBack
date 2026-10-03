@@ -2,6 +2,7 @@ import { ConflictException, Injectable, NotFoundException } from '@nestjs/common
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, EntityManager, In, Not, Repository } from 'typeorm';
 import { RecordStatus } from '../../common/enums/record-status.enum.js';
+import { RoleCode } from '../../common/enums/role-code.enum.js';
 import { definedFields } from '../../common/utils/defined-fields.js';
 import { Brand } from '../brand/entities/brand.entity.js';
 import { Category } from '../category/entities/category.entity.js';
@@ -15,7 +16,7 @@ import { UpdateProductInput } from './dto/update-product.input.js';
 import { Product } from './entities/product.entity.js';
 
 // Con este rol, "borrar" es un borrado real cuando la referencia está limpia (ver deleteReference).
-const HARD_DELETE_ROLE = 'SUPER_ADMIN';
+const HARD_DELETE_ROLE = RoleCode.SUPER_ADMIN;
 
 // Puntaje de similitud de trigramas (0 a 1) a partir del cual dos nombres se consideran "la
 // misma referencia mal escrita". Elegido a mano probando con el caso real que lo motivó:

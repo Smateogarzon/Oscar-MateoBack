@@ -11,6 +11,7 @@ import type { CashActor } from '../cash-session/cash-actor.js';
 import { DiscountRequestStatus } from '../discount-request/entities/discount-request-status.enum.js';
 import { DiscountRequest } from '../discount-request/entities/discount-request.entity.js';
 import { IdempotencyKey } from '../idempotency/entities/idempotency-key.entity.js';
+import { InventoryReservation } from '../inventory-reservation/entities/inventory-reservation.entity.js';
 import { NotificationChannel } from '../notification/entities/notification-channel.enum.js';
 import { NotificationEntityType } from '../notification/entities/notification-entity-type.enum.js';
 import { NotificationType } from '../notification/entities/notification-type.enum.js';
@@ -20,6 +21,7 @@ import { SaleStatus } from '../sale/entities/sale-status.enum.js';
 import { Sale } from '../sale/entities/sale.entity.js';
 import type { SaleActor } from '../sale/sale-actor.js';
 import { StorePaymentMethod } from '../store-payment-method/entities/store-payment-method.entity.js';
+import { UserCompanyRole } from '../user-company-role/entities/user-company-role.entity.js';
 import { UserLocationAccess } from '../user-location-access/entities/user-location-access.entity.js';
 import { SalePayment } from './entities/sale-payment.entity.js';
 import { SalePaymentService } from './sale-payment.service.js';
@@ -99,13 +101,19 @@ function createService() {
     find: vi.fn().mockResolvedValue([]),
     update: vi.fn().mockResolvedValue(undefined),
   };
-  const txItemRepo = { existsBy: vi.fn().mockResolvedValue(true) };
+  // Las líneas de la venta: que tenga alguna (existsBy) y las de catálogo que descuentan inventario
+  // al cobrar (find; por defecto ninguna: todas las pruebas cobran líneas GENERIC).
+  const txItemRepo = { existsBy: vi.fn().mockResolvedValue(true), find: vi.fn().mockResolvedValue([]) };
   const txMethodRepo = { find: vi.fn().mockResolvedValue([cashMethod, cardMethod]) };
   // Los medios que la tienda acepta (por defecto, los dos) y el acceso del usuario a la tienda
   const txStoreMethodRepo = {
     find: vi.fn().mockResolvedValue([{ paymentMethodId: 'method-cash' }, { paymentMethodId: 'method-card' }]),
   };
   const accessRepo = { existsBy: vi.fn().mockResolvedValue(true) };
+  // ¿Es super admin? (hasStoreAccess lo deja pasar a todas las tiendas): por defecto, no.
+  const platformRoleRepo = { existsBy: vi.fn().mockResolvedValue(false) };
+  // Soltar lo que la venta tenía apartado (releaseReservations) antes de descontar.
+  const txReservationRepo = { delete: vi.fn().mockResolvedValue(undefined) };
   const txSaleRepo = {
     save: vi.fn(async (value: object) => ({ ...value })),
     // Lo que un reintento con la misma clave vuelve a cargar por su id
@@ -179,15 +187,22 @@ function createService() {
                 ? txStoreMethodRepo
                 : entity === UserLocationAccess
                   ? accessRepo
+                  : entity === UserCompanyRole
+                  ? platformRoleRepo
                   : entity === IdempotencyKey
                     ? keyRepo
                     : entity === Sale
                       ? txSaleRepo
-                      : undefined,
+                      : entity === InventoryReservation
+                        ? txReservationRepo
+                        : undefined,
   };
   const dataSource = {
     transaction: vi.fn(async (fn: (manager: unknown) => unknown) => fn(manager)),
   };
+
+  // Al cobrar, la venta suelta lo que ella misma tenía apartado y descuenta de esa bodega.
+  const reservations = { findForSource: vi.fn().mockResolvedValue([]) };
 
   const service = new SalePaymentService(
     paymentRepo as never,
@@ -198,9 +213,11 @@ function createService() {
     notifications as never,
     inventoryBalances as never,
     inventoryMovements as never,
+    reservations as never,
   );
   return {
     service,
+    reservations,
     paymentRepo,
     txPaymentRepo,
     txRequestRepo,

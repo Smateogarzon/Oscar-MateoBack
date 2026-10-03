@@ -1,6 +1,7 @@
-// De qué documento salió el movimiento o la reserva (sourceId apunta a él). Todavía no hay
-// pedidos internos ni corredores (fase siguiente): PURCHASE_ORDER, TRANSFER_REQUEST y
-// RUNNER_ASSIGNMENT están aquí para cuando existan, pero nada los usa todavía.
+// De qué documento salió el movimiento o la reserva (sourceId apunta a él). PURCHASE_ORDER lo usa
+// la recepción de una orden de compra (PurchaseOrderReceivingService) y TRANSFER_REQUEST los
+// movimientos de un pedido interno (InternalOrderService). RUNNER_ASSIGNMENT queda para cuando haya
+// asignación de corredores; nada lo usa todavía.
 export enum InventorySourceType {
   SALE = 'SALE',
   SALE_RETURN = 'SALE_RETURN',

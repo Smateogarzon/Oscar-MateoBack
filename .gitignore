@@ -1,6 +1,8 @@
 # compiled output
 /dist
 /build
+# caché de la compilación incremental de tsc (nest build la regenera en cada build)
+*.tsbuildinfo
 
 # dependencies
 /node_modules

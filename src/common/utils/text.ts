@@ -7,3 +7,8 @@
 export const SAFE_TEXT_PATTERN = /^[^\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]*$/;
 
 export const SAFE_TEXT_MESSAGE = 'El texto no puede tener caracteres de control';
+
+// El nombre completo de una persona, como se muestra en avisos y listas ("Camila Rojas").
+export function fullName(person: { firstName: string; lastName: string }): string {
+  return `${person.firstName} ${person.lastName}`.trim();
+}

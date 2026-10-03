@@ -3,7 +3,6 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Decimal } from 'decimal.js';
 import { DataSource, EntityManager, Repository } from 'typeorm';
 import { Incident } from '../incident/entities/incident.entity.js';
-import { InventorySide } from '../inventory-balance/entities/inventory-side.enum.js';
 import { InventoryLocationService } from '../inventory-location/inventory-location.service.js';
 import { InventoryMovementType } from '../inventory-movement/entities/inventory-movement-type.enum.js';
 import { InventorySourceType } from '../inventory-movement/entities/inventory-source-type.enum.js';
@@ -138,7 +137,6 @@ export class WriteOffService {
         await this.inventoryMovements.recordInTransaction(manager, companyId, userId, {
           productVariantId: item.productVariantId,
           fromLocationId: stockLocation.id,
-          side: InventorySide.PAIR,
           quantity: item.quantity,
           type: InventoryMovementType.ADJUSTMENT,
           sourceType: InventorySourceType.MANUAL_ADJUSTMENT,

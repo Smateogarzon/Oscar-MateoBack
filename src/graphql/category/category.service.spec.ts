@@ -1,3 +1,4 @@
+import { IsNull } from 'typeorm';
 import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
 import { RecordStatus } from '../../common/enums/record-status.enum.js';
 import { IdempotencyKey } from '../idempotency/entities/idempotency-key.entity.js';
@@ -63,7 +64,8 @@ describe('CategoryService', () => {
 
       await service.findAll(COMPANY, undefined, null);
       expect(repo.find).toHaveBeenCalledWith({
-        where: { companyId: COMPANY, parentId: null },
+        // Una raíz se busca con IsNull(): el `null` literal no es un valor de columna para TypeORM.
+        where: { companyId: COMPANY, parentId: IsNull() },
         order: { name: 'ASC' },
       });
 

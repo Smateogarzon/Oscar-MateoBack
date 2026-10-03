@@ -6,6 +6,8 @@ import bcrypt from 'bcryptjs';
 import { DataSource, In, Repository } from 'typeorm';
 import { isPlatformRole } from '../../common/access/platform-role.js';
 import { RecordStatus } from '../../common/enums/record-status.enum.js';
+import { RoleCode } from '../../common/enums/role-code.enum.js';
+import { PASSWORD_SALT_ROUNDS } from '../../common/utils/password.js';
 import { Role } from '../role/entities/role.entity.js';
 import { UserCompanyRole } from '../user-company-role/entities/user-company-role.entity.js';
 import { User } from '../user/entities/user.entity.js';
@@ -13,8 +15,6 @@ import { UserService } from '../user/user.service.js';
 import { ADMIN_TOKEN_TTL, DEFAULT_TOKEN_TTL } from './auth-cookie.constants.js';
 import { LoginInput } from './dto/login.input.js';
 import type { JwtPayload } from './interface/jwt-payload.interface.js';
-
-const ADMIN_ROLE_CODE = 'ADMIN';
 
 // Contra la fuerza bruta por cuenta: tras 5 contraseñas equivocadas seguidas para un mismo correo (en
 // 15 minutos) ese correo queda bloqueado 15 minutos. Se cuenta igual para un correo que existe que para
@@ -24,7 +24,6 @@ const MAX_FAILED_LOGINS = 5;
 const FAILURE_WINDOW_MS = 15 * 60 * 1000;
 const LOGIN_LOCK_MS = 15 * 60 * 1000;
 const MAX_TRACKED_EMAILS = 5000;
-const PASSWORD_SALT_ROUNDS = 10;
 
 // Un hash cualquiera para comparar cuando el correo no existe o la cuenta no está activa: así una
 // respuesta de "credenciales inválidas" tarda lo mismo exista o no el correo (si no, el tiempo delataba
@@ -89,7 +88,7 @@ export class AuthService {
     if (roleIds.length === 0) return false;
 
     const roles = await this.roleRepository.findBy({ id: In(roleIds) });
-    return roles.some((role) => role.code === ADMIN_ROLE_CODE || isPlatformRole(role));
+    return roles.some((role) => role.code === RoleCode.ADMIN || isPlatformRole(role));
   }
 
   // El token de una sesión nueva de este usuario, y si dura menos (administradores). Lo usan el inicio de

@@ -9,7 +9,6 @@ import { runIdempotent } from '../idempotency/idempotency.js';
 import { Product } from '../product/entities/product.entity.js';
 import { Size } from '../size/entities/size.entity.js';
 import { CreateProductVariantInput } from './dto/create-product-variant.input.js';
-import { ProductVariantSearchResultObjectType } from './dto/product-variant-search-result.object-type.js';
 import { UpdateProductVariantInput } from './dto/update-product-variant.input.js';
 import { ProductVariant } from './entities/product-variant.entity.js';
 
@@ -17,11 +16,6 @@ export interface ProductVariantFilter {
   productId?: string;
   status?: RecordStatus;
 }
-
-// Mínimo de letras para buscar: con menos, cualquier texto encaja con medio catálogo.
-const SEARCH_MIN_LENGTH = 2;
-// Cuántos resultados como máximo muestra el buscador de Ventas de una vez.
-const SEARCH_LIMIT = 20;
 
 // La unidad que de verdad se vende (ver product-variant.entity.ts). Todo se hace dentro de la
 // empresa activa: color y talla son del catálogo compartido (existir alcanza), producto tiene que
@@ -49,41 +43,6 @@ export class ProductVariantService {
     const variant = await this.variantRepository.findOneBy({ id, companyId });
     if (!variant) throw new NotFoundException(`Variante ${id} no encontrada`);
     return variant;
-  }
-
-  // El buscador de Ventas: por referencia o nombre del producto, o por SKU (lo que entra al
-  // escanear un código de barras). Solo variantes activas de un producto activo, de esta empresa.
-  async search(companyId: string, text: string): Promise<ProductVariantSearchResultObjectType[]> {
-    const term = text.trim();
-    if (term.length < SEARCH_MIN_LENGTH) return [];
-
-    const rows: Array<{
-      id: string;
-      productId: string;
-      productName: string;
-      reference: string;
-      sku: string;
-      colorName: string;
-      sizeName: string;
-      price: string;
-      imageUrl: string | null;
-    }> = await this.variantRepository.manager.query(
-      `SELECT pv.id AS "id", p.id AS "productId", p.name AS "productName", p.reference AS "reference",
-              pv.sku AS "sku", c.name AS "colorName", s.name AS "sizeName", pv.price AS "price", pv."imageUrl" AS "imageUrl"
-         FROM product_variants pv
-         JOIN products p ON p.id = pv."productId"
-         JOIN colors c ON c.id = pv."colorId"
-         JOIN sizes s ON s.id = pv."sizeId"
-        WHERE pv."companyId" = $1::uuid
-          AND pv.status = $2::record_status
-          AND p.status = $2::record_status
-          AND (p.name ILIKE '%' || $3 || '%' OR p.reference ILIKE '%' || $3 || '%' OR pv.sku ILIKE '%' || $3 || '%')
-        ORDER BY p.name ASC, pv.sku ASC
-        LIMIT ${SEARCH_LIMIT}`,
-      [companyId, RecordStatus.ACTIVE, term],
-    );
-
-    return rows.map((row) => ({ ...row, price: new Decimal(row.price) }));
   }
 
   async create(

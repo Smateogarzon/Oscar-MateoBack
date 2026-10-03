@@ -3,7 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, EntityManager, type FindOptionsWhere, IsNull, Not, Repository } from 'typeorm';
 import { RecordStatus } from '../../common/enums/record-status.enum.js';
 import { definedFields } from '../../common/utils/defined-fields.js';
-import { slugify } from '../../common/utils/slugify.js';
+import { uniqueSlug } from '../../common/utils/slugify.js';
 import { runIdempotent } from '../idempotency/idempotency.js';
 import { CreateCategoryInput } from './dto/create-category.input.js';
 import { UpdateCategoryInput } from './dto/update-category.input.js';
@@ -194,16 +194,10 @@ export class CategoryService {
     name: string,
     excludeId?: string,
   ): Promise<string> {
+    // Las categorías son de cada empresa: el slug no se repite dentro de la empresa.
     const repo = manager.getRepository(Category);
-    const base = slugify(name, SLUG_MAX_LENGTH);
-    let candidate = base;
-    for (
-      let suffix = 2;
-      await repo.existsBy({ companyId, slug: candidate, ...(excludeId && { id: Not(excludeId) }) });
-      suffix++
-    ) {
-      candidate = `${base}-${suffix}`.slice(0, SLUG_MAX_LENGTH);
-    }
-    return candidate;
+    return uniqueSlug(name, SLUG_MAX_LENGTH, (slug) =>
+      repo.existsBy({ companyId, slug, ...(excludeId && { id: Not(excludeId) }) }),
+    );
   }
 }

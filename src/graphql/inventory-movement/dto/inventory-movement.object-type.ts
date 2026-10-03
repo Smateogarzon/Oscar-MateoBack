@@ -1,8 +1,6 @@
 import { Decimal } from 'decimal.js';
 import { Field, ID, ObjectType, registerEnumType } from '@nestjs/graphql';
 import { ImmutableObjectType } from '../../../common/dto/immutable.object-type.js';
-import '../../inventory-balance/entities/inventory-side.enum-type.js';
-import { InventorySide } from '../../inventory-balance/entities/inventory-side.enum.js';
 import { InventoryMovementType } from '../entities/inventory-movement-type.enum.js';
 import { InventorySourceType } from '../entities/inventory-source-type.enum.js';
 
@@ -28,9 +26,6 @@ export class InventoryMovementObjectType extends ImmutableObjectType {
 
   @Field(() => ID, { nullable: true })
   toLocationId: string | null;
-
-  @Field(() => InventorySide)
-  side: InventorySide;
 
   @Field(() => Decimal)
   quantity: Decimal;

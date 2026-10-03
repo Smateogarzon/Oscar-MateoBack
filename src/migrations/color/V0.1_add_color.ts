@@ -1,4 +1,5 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
+import { assertDestructiveDownAllowed } from '../../config/destructive-down.js';
 
 export class AddColor1790691651162 implements MigrationInterface {
   name = 'AddColor1790691651162';
@@ -8,6 +9,7 @@ export class AddColor1790691651162 implements MigrationInterface {
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
+    assertDestructiveDownAllowed(this.name);
     await queryRunner.query(`DROP TABLE "colors"`);
   }
 }

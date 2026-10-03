@@ -1,11 +1,12 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { INestApplication } from '@nestjs/common';
 import request from 'supertest';
-import { App } from 'supertest/types';
 import { AppModule } from './../src/app.module.js';
 
-describe('AppController (e2e)', () => {
-  let app: INestApplication<App>;
+// La app entera levantada (con la base del .env): es la misma comprobación que hace el despliegue
+// para saber que el servidor ya responde (deploy/deploy.sh, `{ ping }`).
+describe('App (e2e)', () => {
+  let app: INestApplication;
 
   beforeEach(async () => {
     const moduleFixture: TestingModule = await Test.createTestingModule({
@@ -16,11 +17,12 @@ describe('AppController (e2e)', () => {
     await app.init();
   });
 
-  it('/ (GET)', () => {
+  it('answers the readiness query of the deploy', () => {
     return request(app.getHttpServer())
-      .get('/')
+      .post('/graphql')
+      .send({ query: '{ ping }' })
       .expect(200)
-      .expect('Hello World!');
+      .expect({ data: { ping: 'pong' } });
   });
 
   afterEach(async () => {

@@ -1,7 +1,9 @@
 import { NotFoundException } from '@nestjs/common';
 import { In, IsNull, Not } from 'typeorm';
+import { PLATFORM_ROLE } from '../../common/access/platform-role.js';
 import { RecordStatus } from '../../common/enums/record-status.enum.js';
 import { RealtimeEventKind } from '../../realtime/realtime-event.js';
+import { Permission } from '../permission/entities/permission.entity.js';
 import { RolePermission } from '../role-permission/entities/role-permission.entity.js';
 import { RoleScope } from '../role/entities/role-scope.enum.js';
 import { UserCompanyRole } from '../user-company-role/entities/user-company-role.entity.js';
@@ -66,6 +68,8 @@ function createService() {
   const txUserRepo = {
     findOneBy: vi.fn().mockResolvedValue({ id: 'cashier-1', firstName: 'Camila', lastName: 'Rojas' }),
   };
+  // ¿El permiso existe y está activo en el catálogo? Por defecto, sí.
+  const txPermissionRepo = { existsBy: vi.fn().mockResolvedValue(true) };
   const txRolePermissionRepo = { find: vi.fn().mockResolvedValue([]) };
   const txMembershipRepo = { find: vi.fn().mockResolvedValue([]) };
   // El UPDATE de "marcar todo como leído" es un solo query builder, no fila por fila
@@ -86,6 +90,8 @@ function createService() {
           ? txNotificationRepo
           : entity === User
             ? txUserRepo
+            : entity === Permission
+              ? txPermissionRepo
             : entity === RolePermission
               ? txRolePermissionRepo
               : entity === UserCompanyRole
@@ -110,6 +116,7 @@ function createService() {
     txUserNotificationRepo,
     txNotificationRepo,
     txUserRepo,
+    txPermissionRepo,
     txRolePermissionRepo,
     txMembershipRepo,
     updateBuilder,
@@ -376,7 +383,7 @@ describe('NotificationService', () => {
   });
 
   describe('findUserIdsWithPermission', () => {
-    it('finds the active members of the company whose active, non-platform role has the permission', async () => {
+    it('finds the active members of the company whose active role has the permission, plus its platform members', async () => {
       const { service, txRolePermissionRepo, txMembershipRepo, manager } = createService();
       txRolePermissionRepo.find.mockResolvedValue([{ roleId: 'role-1' }, { roleId: 'role-2' }]);
       txMembershipRepo.find.mockResolvedValue([
@@ -394,23 +401,23 @@ describe('NotificationService', () => {
       expect(txRolePermissionRepo.find).toHaveBeenCalledWith({
         where: {
           companyId: COMPANY,
-          permission: { code: 'sales.approve_discount', status: RecordStatus.ACTIVE },
+          permission: { code: 'sales.approve_discount' },
           role: { status: RecordStatus.ACTIVE, scope: Not(RoleScope.GLOBAL) },
         },
       });
+      const activeMember = { companyId: COMPANY, status: RecordStatus.ACTIVE, user: { status: RecordStatus.ACTIVE } };
       expect(txMembershipRepo.find).toHaveBeenCalledWith({
-        where: {
-          companyId: COMPANY,
-          roleId: In(['role-1', 'role-2']),
-          status: RecordStatus.ACTIVE,
-          user: { status: RecordStatus.ACTIVE },
-        },
+        where: [
+          { ...activeMember, role: { ...PLATFORM_ROLE, status: RecordStatus.ACTIVE } },
+          { ...activeMember, roleId: In(['role-1', 'role-2']) },
+        ],
       });
       expect(userIds).toEqual(['admin-1', 'admin-2']);
     });
 
-    it('is empty, without looking for members, when no role has the permission', async () => {
+    it('with no company role holding the permission, still finds the platform members (the super admin has every permission)', async () => {
       const { service, txMembershipRepo, manager } = createService();
+      txMembershipRepo.find.mockResolvedValue([{ userId: 'super-1' }]);
 
       const userIds = await service.findUserIdsWithPermission(
         manager as never,
@@ -418,7 +425,43 @@ describe('NotificationService', () => {
         'sales.approve_return' as never,
       );
 
+      expect(userIds).toEqual(['super-1']);
+      expect(txMembershipRepo.find).toHaveBeenCalledWith({
+        where: [
+          {
+            companyId: COMPANY,
+            status: RecordStatus.ACTIVE,
+            user: { status: RecordStatus.ACTIVE },
+            role: { ...PLATFORM_ROLE, status: RecordStatus.ACTIVE },
+          },
+        ],
+      });
+    });
+
+    it('narrows the company roles to a scope, but keeps the platform members', async () => {
+      const { service, txRolePermissionRepo, manager } = createService();
+
+      await service.findUserIdsWithPermission(manager as never, COMPANY, 'suppliers.manage_purchase_orders' as never, {
+        scope: RoleScope.COMPANY,
+      });
+
+      expect(txRolePermissionRepo.find).toHaveBeenCalledWith({
+        where: {
+          companyId: COMPANY,
+          permission: { code: 'suppliers.manage_purchase_orders' },
+          role: { status: RecordStatus.ACTIVE, scope: RoleScope.COMPANY },
+        },
+      });
+    });
+
+    it('nobody has a permission that is not active in the catalog, not even the super admin', async () => {
+      const { service, txPermissionRepo, txRolePermissionRepo, txMembershipRepo, manager } = createService();
+      txPermissionRepo.existsBy.mockResolvedValue(false);
+
+      const userIds = await service.findUserIdsWithPermission(manager as never, COMPANY, 'sales.approve_return' as never);
+
       expect(userIds).toEqual([]);
+      expect(txRolePermissionRepo.find).not.toHaveBeenCalled();
       expect(txMembershipRepo.find).not.toHaveBeenCalled();
     });
   });

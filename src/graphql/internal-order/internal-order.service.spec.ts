@@ -10,7 +10,6 @@ import { InternalOrderItem } from './entities/internal-order-item.entity.js';
 import { InternalOrderOrigin } from './entities/internal-order-origin.enum.js';
 import { InternalOrderStatus } from './entities/internal-order-status.enum.js';
 import { InternalOrderType } from './entities/internal-order-type.enum.js';
-import { InternalOrder } from './entities/internal-order.entity.js';
 import { InternalOrderService } from './internal-order.service.js';
 
 const claimKey = (sql: string) =>

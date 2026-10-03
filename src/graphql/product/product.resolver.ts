@@ -5,6 +5,7 @@ import { CurrentCompanyAccess, CurrentCompanyId } from '../../common/decorators/
 import { CurrentUser } from '../../common/decorators/current-user.decorator.js';
 import { IdempotencyKeyHeader } from '../../common/decorators/idempotency-key.decorator.js';
 import {
+  RequireAnyPermission,
   RequireCompanyMembership,
   RequirePermissions,
 } from '../../common/decorators/permissions.decorator.js';
@@ -50,8 +51,9 @@ export class ProductResolver {
     return this.productService.findSimilarByName(companyId, name);
   }
 
+  // Crear una referencia: el administrador, o el proveedor (que no edita ni borra, solo da de alta).
   @Mutation(() => ProductObjectType)
-  @RequirePermissions(PermissionCode.INVENTORY_MANAGE_PRODUCTS)
+  @RequireAnyPermission(PermissionCode.INVENTORY_MANAGE_PRODUCTS, PermissionCode.SUPPLIERS_CREATE_REFERENCES)
   createProduct(
     @CurrentCompanyId() companyId: string,
     @CurrentUser() currentUser: JwtPayload,

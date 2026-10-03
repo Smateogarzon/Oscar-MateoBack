@@ -1,19 +1,13 @@
 import { UseGuards } from '@nestjs/common';
-import { Args, ID, Mutation, Query, Resolver } from '@nestjs/graphql';
+import { Args, ID, Parent, Query, ResolveField, Resolver } from '@nestjs/graphql';
 import { CurrentCompanyId } from '../../common/decorators/current-company.decorator.js';
-import { CurrentUser } from '../../common/decorators/current-user.decorator.js';
-import { IdempotencyKeyHeader } from '../../common/decorators/idempotency-key.decorator.js';
-import {
-  RequireCompanyMembership,
-  RequirePermissions,
-} from '../../common/decorators/permissions.decorator.js';
-import { PermissionCode } from '../../common/enums/permission-code.enum.js';
+import { RequireCompanyMembership } from '../../common/decorators/permissions.decorator.js';
+import { fullName } from '../../common/utils/text.js';
 import { CsrfGuard } from '../../common/guards/csrf.guard.js';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard.js';
 import { PermissionsGuard } from '../../common/guards/permissions.guard.js';
-import type { JwtPayload } from '../auth/interface/jwt-payload.interface.js';
-import { CreateInventoryReservationInput } from './dto/create-inventory-reservation.input.js';
 import { InventoryReservationObjectType } from './dto/inventory-reservation.object-type.js';
+import { InventoryReservation } from './entities/inventory-reservation.entity.js';
 import { InventoryReservationService } from './inventory-reservation.service.js';
 
 @Resolver(() => InventoryReservationObjectType)
@@ -37,24 +31,12 @@ export class InventoryReservationResolver {
     return this.inventoryReservationService.findOne(companyId, id);
   }
 
-  @Mutation(() => InventoryReservationObjectType)
-  @RequirePermissions(PermissionCode.INVENTORY_MANAGE_PRODUCTS)
-  createInventoryReservation(
-    @CurrentCompanyId() companyId: string,
-    @CurrentUser() currentUser: JwtPayload,
-    @Args('input') input: CreateInventoryReservationInput,
-    @IdempotencyKeyHeader() idempotencyKey?: string,
-  ) {
-    return this.inventoryReservationService.create(companyId, currentUser.sub, input, idempotencyKey);
+  // Quién la tiene apartada, con nombre: es lo que hay que mostrarle al vendedor que se encuentra el
+  // último par bloqueado. Sale de la relación que ya trae la consulta, sin ir otra vez a la base.
+  @ResolveField(() => String, { nullable: true })
+  reservedByName(@Parent() reservation: InventoryReservation): string | null {
+    const user = reservation.reservedByUser;
+    return user ? fullName(user) : null;
   }
 
-  @Mutation(() => Boolean)
-  @RequirePermissions(PermissionCode.INVENTORY_MANAGE_PRODUCTS)
-  async releaseInventoryReservation(
-    @CurrentCompanyId() companyId: string,
-    @Args('id', { type: () => ID }) id: string,
-  ) {
-    await this.inventoryReservationService.release(companyId, id);
-    return true;
-  }
 }

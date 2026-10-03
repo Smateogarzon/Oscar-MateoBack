@@ -1,4 +1,5 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
+import { assertDestructiveDownAllowed } from '../../config/destructive-down.js';
 
 // Permisos del módulo de devoluciones y su reparto inicial, en cada empresa que exista:
 //   sales.return          registrar una devolución y entregar el reembolso (Cajero, Administrador)
@@ -23,6 +24,7 @@ export class SeedReturnPermissions1789810000000 implements MigrationInterface {
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
+    assertDestructiveDownAllowed(this.name);
     await queryRunner.query(`
       DELETE FROM "role_permissions" WHERE "permissionId" IN (
         SELECT "id" FROM "permissions" WHERE "code" IN ('sales.return', 'sales.approve_return')

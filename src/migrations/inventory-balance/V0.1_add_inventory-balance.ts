@@ -1,4 +1,5 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
+import { assertDestructiveDownAllowed } from '../../config/destructive-down.js';
 
 export class AddInventoryBalance1790691651170 implements MigrationInterface {
   name = 'AddInventoryBalance1790691651170';
@@ -13,6 +14,7 @@ export class AddInventoryBalance1790691651170 implements MigrationInterface {
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
+    assertDestructiveDownAllowed(this.name);
     await queryRunner.query(`ALTER TABLE "inventory_balances" DROP CONSTRAINT "FK_dac6813b9de84275bca844bbb1f"`);
     await queryRunner.query(`ALTER TABLE "inventory_balances" DROP CONSTRAINT "FK_78e47b812764018e448a899509d"`);
     await queryRunner.query(`DROP INDEX "public"."IDX_c93b1932ba4077b4e4e504210e"`);
