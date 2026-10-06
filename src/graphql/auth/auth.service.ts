@@ -6,6 +6,8 @@ import bcrypt from 'bcryptjs';
 import { DataSource, In, Repository } from 'typeorm';
 import { isPlatformRole } from '../../common/access/platform-role.js';
 import { RecordStatus } from '../../common/enums/record-status.enum.js';
+import { AuditLogService } from '../../audit/audit-log.service.js';
+import { AuditAction } from '../../audit/entities/audit-action.enum.js';
 import { Role } from '../role/entities/role.entity.js';
 import { UserCompanyRole } from '../user-company-role/entities/user-company-role.entity.js';
 import { User } from '../user/entities/user.entity.js';
@@ -56,6 +58,7 @@ export class AuthService {
     @InjectRepository(UserCompanyRole)
     private readonly userCompanyRoleRepository: Repository<UserCompanyRole>,
     private readonly dataSource: DataSource,
+    private readonly auditLogService: AuditLogService,
   ) {}
 
   private async validateCredentials(
@@ -116,14 +119,39 @@ export class AuthService {
 
     // update() no toca el objeto en memoria: se guarda el acceso de ahora pero `user`
     // conserva el anterior, que es el que tiene sentido mostrar como "último acceso".
-    await this.dataSource.transaction((manager) =>
-      manager.getRepository(User).update(user.id, { lastLoginAt: new Date() }),
-    );
+    // No pasa por AuditLogSubscriber (es un .update(), no un .save()): por eso LOGIN se
+    // registra a mano, en la misma transacción.
+    await this.dataSource.transaction(async (manager) => {
+      await manager.getRepository(User).update(user.id, { lastLoginAt: new Date() });
+      await this.auditLogService.record(manager, {
+        companyId: null,
+        userId: user.id,
+        action: AuditAction.LOGIN,
+        entityType: User.name,
+        entityId: user.id,
+        oldValues: null,
+        newValues: null,
+        description: 'Inicio de sesión',
+      });
+    });
 
     return { accessToken, user, isAdmin };
   }
 
-  logout(): boolean {
+  // No hay nada que deshacer en la base de datos (el token simplemente expira; las cookies las
+  // borra el resolver), así que no hay un .save()/.remove() del que AuditLogSubscriber pueda
+  // colgarse. Se registra a mano.
+  async logout(userId: string): Promise<boolean> {
+    await this.auditLogService.record(this.dataSource.manager, {
+      companyId: null,
+      userId,
+      action: AuditAction.LOGOUT,
+      entityType: User.name,
+      entityId: userId,
+      oldValues: null,
+      newValues: null,
+      description: 'Cierre de sesión',
+    });
     return true;
   }
 

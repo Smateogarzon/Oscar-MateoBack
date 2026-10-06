@@ -5,7 +5,7 @@ import { DecimalScalar } from './common/scalars/decimal.scalar.js';
 import { join } from 'node:path';
 import { LoggerModule } from 'nestjs-pino';
 import { Module, RequestMethod } from '@nestjs/common';
-import { APP_FILTER, APP_GUARD } from '@nestjs/core';
+import { APP_FILTER, APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { ApolloDriver, type ApolloDriverConfig } from '@nestjs/apollo';
 import { GraphQLModule } from '@nestjs/graphql';
@@ -57,6 +57,8 @@ import { graphqlContext, wsOnClose, wsOnConnect, wsOnSubscribe } from './realtim
 import { StorageModule } from './common/storage/storage.module.js';
 import { UploadModule } from './uploads/upload.module.js';
 import { PosHardwareModule } from './pos-hardware/pos-hardware.module.js';
+import { AuditModule } from './audit/audit.module.js';
+import { AuditContextInterceptor } from './audit/audit-context.interceptor.js';
 
 const { validationRules, plugins } = new ApolloArmor().protect();
 
@@ -173,6 +175,7 @@ const { validationRules, plugins } = new ApolloArmor().protect();
     SaleReturnModule,
     NotificationModule,
     IdempotencyModule,
+    AuditModule,
     RealtimeModule,
     StorageModule,
     UploadModule,
@@ -186,6 +189,7 @@ const { validationRules, plugins } = new ApolloArmor().protect();
     GraphqlLoggingPlugin,
     { provide: APP_GUARD, useClass: GqlThrottlerGuard },
     { provide: APP_FILTER, useClass: GqlAllExceptionsFilter },
+    { provide: APP_INTERCEPTOR, useClass: AuditContextInterceptor },
   ],
 })
 export class AppModule {}

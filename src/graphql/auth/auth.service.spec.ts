@@ -13,10 +13,12 @@ function createService() {
   const userCompanyRoleRepository = { find: vi.fn().mockResolvedValue([]) };
   const userRepository = { update: vi.fn().mockResolvedValue(undefined) };
   const dataSource = {
+    manager: {},
     transaction: vi.fn(async (fn: (manager: unknown) => unknown) =>
       fn({ getRepository: () => userRepository }),
     ),
   };
+  const auditLogService = { record: vi.fn().mockResolvedValue(undefined) };
 
   const service = new AuthService(
     userService as never,
@@ -24,6 +26,7 @@ function createService() {
     roleRepository as never,
     userCompanyRoleRepository as never,
     dataSource as never,
+    auditLogService as never,
   );
 
   return {
@@ -33,6 +36,7 @@ function createService() {
     roleRepository,
     userCompanyRoleRepository,
     userRepository,
+    auditLogService,
   };
 }
 
@@ -139,6 +143,35 @@ describe('AuthService', () => {
         lastLoginAt: expect.any(Date),
       });
       expect(result.user.lastLoginAt).toBe(previousLoginAt);
+    });
+
+    it('records a LOGIN audit entry in the same transaction as the login timestamp', async () => {
+      const { service, userService, auditLogService } = createService();
+      userService.findByEmail.mockResolvedValue(await activeUser());
+
+      await service.login({ email: 'ana@example.com', password: rawPassword });
+
+      expect(auditLogService.record).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          userId: 'user-1',
+          companyId: null,
+          action: 'LOGIN',
+          entityType: 'User',
+          entityId: 'user-1',
+        }),
+      );
+    });
+
+    it('does not record a LOGIN audit entry when the login fails', async () => {
+      const { service, userService, auditLogService } = createService();
+      userService.findByEmail.mockResolvedValue(await activeUser());
+
+      await expect(
+        service.login({ email: 'ana@example.com', password: 'wrong' }),
+      ).rejects.toThrow(UnauthorizedException);
+
+      expect(auditLogService.record).not.toHaveBeenCalled();
     });
 
     it('signs a 24h token for a user without the ADMIN role', async () => {
@@ -558,9 +591,26 @@ describe('AuthService', () => {
   });
 
   describe('logout', () => {
-    it('returns true', () => {
+    it('returns true', async () => {
       const { service } = createService();
-      expect(service.logout()).toBe(true);
+      await expect(service.logout('user-1')).resolves.toBe(true);
+    });
+
+    it('records a LOGOUT audit entry for that user', async () => {
+      const { service, auditLogService } = createService();
+
+      await service.logout('user-1');
+
+      expect(auditLogService.record).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          userId: 'user-1',
+          companyId: null,
+          action: 'LOGOUT',
+          entityType: 'User',
+          entityId: 'user-1',
+        }),
+      );
     });
   });
 });
