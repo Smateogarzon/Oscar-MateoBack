@@ -1,4 +1,5 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
+import { assertDestructiveDownAllowed } from '../../config/destructive-down.js';
 
 export class AddSize1790691651164 implements MigrationInterface {
   name = 'AddSize1790691651164';
@@ -8,6 +9,7 @@ export class AddSize1790691651164 implements MigrationInterface {
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
+    assertDestructiveDownAllowed(this.name);
     await queryRunner.query(`DROP TABLE "sizes"`);
   }
 }

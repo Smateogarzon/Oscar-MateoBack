@@ -5,8 +5,8 @@ import { DataSource, EntityManager, Repository } from 'typeorm';
 import { PermissionCode } from '../../common/enums/permission-code.enum.js';
 import { InventoryBalance } from '../inventory-balance/entities/inventory-balance.entity.js';
 import { lockOrCreateInventoryBalance } from '../inventory-balance/lock-inventory-balance.js';
-import type { InventorySide } from '../inventory-balance/entities/inventory-side.enum.js';
 import { InventoryLocation } from '../inventory-location/entities/inventory-location.entity.js';
+import { reservedQuantity } from '../inventory-reservation/reserved-quantity.js';
 import { runIdempotent } from '../idempotency/idempotency.js';
 import { NotificationEntityType } from '../notification/entities/notification-entity-type.enum.js';
 import { NotificationType } from '../notification/entities/notification-type.enum.js';
@@ -26,11 +26,23 @@ export interface InventoryMovementFilter {
 // Lo mismo que `CreateInventoryMovementInput`, pero con `quantity` ya convertida a Decimal: lo usa
 // `recordInTransaction`, para quien ya la tiene como Decimal (una línea de venta) y no quiere ir y
 // volver a texto solo para que el servicio la vuelva a convertir.
+// Las reglas de un movimiento que no necesitan la base: hacia dónde va y cuánto.
+function assertMovementShape(params: Pick<RecordMovementParams, 'fromLocationId' | 'toLocationId' | 'quantity'>): void {
+  if (!params.fromLocationId && !params.toLocationId) {
+    throw new BadRequestException('Un movimiento necesita al menos un origen o un destino');
+  }
+  if (params.fromLocationId && params.fromLocationId === params.toLocationId) {
+    throw new BadRequestException('El origen y el destino no pueden ser el mismo');
+  }
+  if (params.quantity.lessThanOrEqualTo(0)) {
+    throw new BadRequestException('La cantidad debe ser mayor que cero');
+  }
+}
+
 export interface RecordMovementParams {
   productVariantId: string;
   fromLocationId?: string | null;
   toLocationId?: string | null;
-  side: InventorySide;
   quantity: Decimal;
   type: InventoryMovementType;
   sourceType: InventorySourceType;
@@ -78,6 +90,22 @@ export class InventoryMovementService {
     input: CreateInventoryMovementInput,
     idempotencyKey?: string,
   ): Promise<InventoryMovement> {
+    const params: RecordMovementParams = {
+      productVariantId: input.productVariantId,
+      fromLocationId: input.fromLocationId,
+      toLocationId: input.toLocationId,
+      quantity: new Decimal(input.quantity),
+      type: input.type,
+      sourceType: input.sourceType,
+      sourceId: input.sourceId,
+      sourceNumber: input.sourceNumber,
+      notes: input.notes,
+      position: input.position,
+      minStock: input.minStock,
+    };
+    // Lo que se ve sin ir a la base se rechaza antes de abrir la transacción.
+    assertMovementShape(params);
+
     return this.dataSource.transaction((manager) =>
       runIdempotent(
         manager,
@@ -89,21 +117,7 @@ export class InventoryMovementService {
           input,
           resourceType: 'inventoryMovement',
         },
-        () =>
-          this.recordInTransaction(manager, companyId, userId, {
-            productVariantId: input.productVariantId,
-            fromLocationId: input.fromLocationId,
-            toLocationId: input.toLocationId,
-            side: input.side,
-            quantity: new Decimal(input.quantity),
-            type: input.type,
-            sourceType: input.sourceType,
-            sourceId: input.sourceId,
-            sourceNumber: input.sourceNumber,
-            notes: input.notes,
-            position: input.position,
-            minStock: input.minStock,
-          }),
+        () => this.recordInTransaction(manager, companyId, userId, params),
         (id) => manager.getRepository(InventoryMovement).findOneByOrFail({ id }),
       ),
     );
@@ -119,15 +133,8 @@ export class InventoryMovementService {
     userId: string,
     params: RecordMovementParams,
   ): Promise<InventoryMovement> {
-    if (!params.fromLocationId && !params.toLocationId) {
-      throw new BadRequestException('Un movimiento necesita al menos un origen o un destino');
-    }
-    if (params.fromLocationId && params.fromLocationId === params.toLocationId) {
-      throw new BadRequestException('El origen y el destino no pueden ser el mismo');
-    }
-    if (params.quantity.lessThanOrEqualTo(0)) {
-      throw new BadRequestException('La cantidad debe ser mayor que cero');
-    }
+    // Quien llama desde su propia transacción (una venta, una recepción) pasa por la misma regla.
+    assertMovementShape(params);
 
     await this.assertProductVariant(manager, companyId, params.productVariantId);
     if (params.fromLocationId) await this.assertInventoryLocation(manager, companyId, params.fromLocationId);
@@ -139,14 +146,23 @@ export class InventoryMovementService {
     const locationIds = [...new Set([params.fromLocationId, params.toLocationId].filter(Boolean))].sort() as string[];
     const balances = new Map<string, InventoryBalance>();
     for (const locationId of locationIds) {
-      balances.set(locationId, await lockOrCreateInventoryBalance(manager, params.productVariantId, locationId, params.side));
+      balances.set(locationId, await lockOrCreateInventoryBalance(manager, params.productVariantId, locationId));
     }
 
     if (params.fromLocationId) {
       const fromBalance = balances.get(params.fromLocationId)!;
-      if (fromBalance.quantity.lessThan(params.quantity)) {
+      // Lo apartado no se puede sacar: una reserva solo significa algo si de verdad protege sus
+      // unidades de que otro se las lleve. Cuenta TODO lo apartado, sin excepción por documento: el
+      // origen del movimiento puede venir del cliente (recordInventoryMovement) y no puede servir para
+      // saltarse lo que aparta otra venta. Quien mueve lo que él mismo apartó suelta antes su reserva
+      // en la misma transacción (ver SalePaymentService).
+      const reserved = await reservedQuantity(manager, params.productVariantId, params.fromLocationId);
+      const available = fromBalance.quantity.minus(reserved);
+      if (available.lessThan(params.quantity)) {
         throw new ConflictException(
-          `No hay suficiente existencia: hay ${fromBalance.quantity.toFixed(2)} y se pidieron ${params.quantity.toFixed(2)}`,
+          reserved.greaterThan(0)
+            ? `No hay suficiente existencia disponible: hay ${fromBalance.quantity.toFixed(2)} pero ${reserved.toFixed(2)} están apartados y se pidieron ${params.quantity.toFixed(2)}`
+            : `No hay suficiente existencia: hay ${fromBalance.quantity.toFixed(2)} y se pidieron ${params.quantity.toFixed(2)}`,
         );
       }
       const beforeQuantity = fromBalance.quantity;
@@ -165,7 +181,6 @@ export class InventoryMovementService {
         productVariantId: params.productVariantId,
         fromLocationId: params.fromLocationId ?? null,
         toLocationId: params.toLocationId ?? null,
-        side: params.side,
         quantity: params.quantity,
         type: params.type,
         sourceType: params.sourceType,

@@ -1,4 +1,5 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
+import { assertDestructiveDownAllowed } from '../../config/destructive-down.js';
 
 // Debajo de esta cantidad la existencia de la balanza se considera baja (para alertas de
 // agotamiento, aún por construir). Por balanza (variante × cajón × lado), igual que position: null
@@ -11,6 +12,7 @@ export class AddInventoryBalanceMinStock1790800000000 implements MigrationInterf
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
+    assertDestructiveDownAllowed(this.name);
     await queryRunner.query(`ALTER TABLE "inventory_balances" DROP COLUMN "minStock"`);
   }
 }

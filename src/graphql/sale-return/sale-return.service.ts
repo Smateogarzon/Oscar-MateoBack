@@ -14,7 +14,6 @@ import { CashActor } from '../cash-session/cash-actor.js';
 import { CashSessionService } from '../cash-session/cash-session.service.js';
 import { DocumentSequenceService } from '../document-sequence/document-sequence.service.js';
 import { runIdempotent } from '../idempotency/idempotency.js';
-import { InventorySide } from '../inventory-balance/entities/inventory-side.enum.js';
 import { InventoryLocationService } from '../inventory-location/inventory-location.service.js';
 import { InventoryMovementType } from '../inventory-movement/entities/inventory-movement-type.enum.js';
 import { InventorySourceType } from '../inventory-movement/entities/inventory-source-type.enum.js';
@@ -28,6 +27,7 @@ import { validatePaymentMethods } from '../payment-method/payment-method-validat
 import { SaleItemType } from '../sale/entities/sale-item-type.enum.js';
 import { SaleItem } from '../sale/entities/sale-item.entity.js';
 import { Sale } from '../sale/entities/sale.entity.js';
+import { loadSaleNumber } from '../sale/sale-number-of.js';
 import { canReadSale, SaleActor } from '../sale/sale-actor.js';
 import { SaleService } from '../sale/sale.service.js';
 import { CompleteReturnRefundInput } from './dto/complete-return-refund.input.js';
@@ -157,14 +157,9 @@ export class SaleReturnService {
     return saleReturn;
   }
 
-  // El número de la venta original, para mostrarlo en la lista sin pedir todas las ventas. Las listas
-  // ya traen la venta cargada; una devolución suelta (el resultado de una mutación) la busca aquí.
-  async saleNumberOf(saleReturn: SaleReturn): Promise<string | null> {
-    if (saleReturn.sale) return saleReturn.sale.saleNumber;
-    const sale = await this.dataSource
-      .getRepository(Sale)
-      .findOne({ where: { id: saleReturn.saleId }, select: { id: true, saleNumber: true } });
-    return sale?.saleNumber ?? null;
+  // El número de la venta original, para la lista (ver sale-number-of.ts).
+  saleNumberOf(saleReturn: SaleReturn): Promise<string | null> {
+    return loadSaleNumber(this.dataSource, saleReturn);
   }
 
   // Las líneas devueltas, en el orden en que se registraron.
@@ -738,7 +733,6 @@ export class SaleReturnService {
       await this.inventoryMovements.recordInTransaction(manager, saleReturn.companyId, actorId, {
         productVariantId: item.saleItem.productVariantId!,
         toLocationId: returnsLocation.id,
-        side: InventorySide.PAIR,
         quantity: item.quantity,
         type: InventoryMovementType.RETURN,
         sourceType: InventorySourceType.SALE_RETURN,

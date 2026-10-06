@@ -2,7 +2,6 @@ import { Field, ID, InputType } from '@nestjs/graphql';
 import { IsEnum, IsOptional, IsString, IsUUID, Matches, MaxLength } from 'class-validator';
 import { Trim } from '../../../common/decorators/trim.decorator.js';
 import { QUANTITY_PATTERN } from '../../../common/utils/money.js';
-import { InventorySide } from '../../inventory-balance/entities/inventory-side.enum.js';
 import { InventoryMovementType } from '../entities/inventory-movement-type.enum.js';
 import { InventorySourceType } from '../entities/inventory-source-type.enum.js';
 
@@ -29,10 +28,6 @@ export class CreateInventoryMovementInput {
   @IsOptional()
   @IsUUID()
   toLocationId?: string;
-
-  @Field(() => InventorySide)
-  @IsEnum(InventorySide)
-  side: InventorySide;
 
   // Debe ser mayor que cero, ej: "2" o "1.5"
   @Field()

@@ -1,5 +1,6 @@
 import { Field, InputType } from '@nestjs/graphql';
-import { IsNotEmpty, IsOptional, IsString, IsUrl, MaxLength } from 'class-validator';
+import { IsEmail, IsNotEmpty, IsOptional, IsString, IsUrl, MaxLength } from 'class-validator';
+import { NormalizeEmail } from '../../../common/decorators/normalize-email.decorator.js';
 import { Trim } from '../../../common/decorators/trim.decorator.js';
 
 @InputType()
@@ -21,6 +22,13 @@ export class UpdateUserInput {
   @MaxLength(80)
   lastName?: string;
 
+  @Field({ nullable: true })
+  @IsOptional()
+  @NormalizeEmail()
+  @IsEmail()
+  @MaxLength(150)
+  email?: string;
+
   // `null` BORRA el teléfono (antes no se podía quitar: el campo vacío se mandaba como "no cambiar")
   @Field(() => String, { nullable: true })
   @IsOptional()
@@ -28,6 +36,14 @@ export class UpdateUserInput {
   @IsString()
   @MaxLength(30)
   phone?: string | null;
+
+  @Field({ nullable: true })
+  @IsOptional()
+  @Trim()
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(30)
+  documentNumber?: string;
 
   @Field({ nullable: true })
   @IsOptional()

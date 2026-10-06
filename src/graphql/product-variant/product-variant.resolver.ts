@@ -4,6 +4,7 @@ import { CurrentCompanyId } from '../../common/decorators/current-company.decora
 import { CurrentUser } from '../../common/decorators/current-user.decorator.js';
 import { IdempotencyKeyHeader } from '../../common/decorators/idempotency-key.decorator.js';
 import {
+  RequireAnyPermission,
   RequireCompanyMembership,
   RequirePermissions,
 } from '../../common/decorators/permissions.decorator.js';
@@ -15,7 +16,6 @@ import { PermissionsGuard } from '../../common/guards/permissions.guard.js';
 import type { JwtPayload } from '../auth/interface/jwt-payload.interface.js';
 import { CreateProductVariantInput } from './dto/create-product-variant.input.js';
 import { ProductVariantObjectType } from './dto/product-variant.object-type.js';
-import { ProductVariantSearchResultObjectType } from './dto/product-variant-search-result.object-type.js';
 import { UpdateProductVariantInput } from './dto/update-product-variant.input.js';
 import { ProductVariantService } from './product-variant.service.js';
 
@@ -40,15 +40,9 @@ export class ProductVariantResolver {
     return this.productVariantService.findOne(companyId, id);
   }
 
-  // El buscador de Ventas: para el carrito, mientras se teclea o se escanea un código de barras.
-  @Query(() => [ProductVariantSearchResultObjectType])
-  @RequireCompanyMembership()
-  searchProductVariants(@CurrentCompanyId() companyId: string, @Args('search') search: string) {
-    return this.productVariantService.search(companyId, search);
-  }
-
+  // Igual que createProduct: el administrador o el proveedor pueden dar de alta una variante.
   @Mutation(() => ProductVariantObjectType)
-  @RequirePermissions(PermissionCode.INVENTORY_MANAGE_PRODUCTS)
+  @RequireAnyPermission(PermissionCode.INVENTORY_MANAGE_PRODUCTS, PermissionCode.SUPPLIERS_CREATE_REFERENCES)
   createProductVariant(
     @CurrentCompanyId() companyId: string,
     @CurrentUser() currentUser: JwtPayload,

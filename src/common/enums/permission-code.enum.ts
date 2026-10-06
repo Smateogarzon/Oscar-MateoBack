@@ -4,6 +4,14 @@
 export enum PermissionCode {
   USERS_MANAGE = 'users.manage',
   SETTINGS_MANAGE = 'settings.manage',
+  // Las tres secciones del menú que todavía no tienen pantalla propia: ninguna operación las
+  // exige todavía. Están en el catálogo para que cada empresa decida, en "Roles y permisos", qué
+  // roles ven el dashboard, la sección Pedidos y los reportes; cuando se construya cada pantalla,
+  // es con estos códigos con los que se sirve. Ver TODOS los pedidos de la empresa sigue siendo
+  // ORDERS_VIEW_ALL: ORDERS_VIEW es solo entrar a la sección.
+  DASHBOARD_VIEW = 'dashboard.view',
+  ORDERS_VIEW = 'orders.view',
+  REPORTS_VIEW = 'reports.view',
   SALES_CREATE = 'sales.create',
   SALES_VIEW = 'sales.view',
   // Ver el histórico de ventas de TODOS los cajeros y vendedores; sin él, cada quien ve solo las
@@ -27,9 +35,14 @@ export enum PermissionCode {
   // el Administrador y el Bodeguero de cada empresa (quien recibe mercancía nueva es quien más lo
   // usa), además del super administrador.
   INVENTORY_MANAGE_PRODUCTS = 'inventory.manage_products',
-  // Solo ver el inventario (existencias, traslados), sin modificar nada: lo tienen Bodega, Vendedor
+  // Solo ver el inventario (existencias), sin modificar nada: lo tienen Bodega, Vendedor
   // y Caja. Todo lo que cambia el inventario sigue pidiendo INVENTORY_MANAGE_PRODUCTS (solo Admin).
   INVENTORY_VIEW = 'inventory.view',
+  // El módulo de Transferencias completo: ver los traslados entre tiendas y bodegas Y registrarlos.
+  // Es el único permiso que los habilita (no hace falta INVENTORY_MANAGE_PRODUCTS): quien no lo
+  // tiene no ve ni la tarjeta ni el historial, y el servidor le rechaza el movimiento TRANSFER.
+  // Por defecto solo Administrador y super administrador. Nace en V1.4_seed_inventory_transfer_permission.
+  INVENTORY_TRANSFER = 'inventory.transfer',
 
   // Los siguientes ya existían en la base desde la semilla original (V0.2, antes de que existiera
   // ningún módulo que los usara) y ya tienen reparto por rol (Vendedor/Bodega/Corredor/Proveedor):
@@ -52,7 +65,21 @@ export enum PermissionCode {
   INVENTORY_REQUEST_ADJUSTMENT = 'inventory.request_adjustment',
   INVENTORY_RESOLVE_ADJUSTMENTS = 'inventory.resolve_adjustments',
   INVENTORY_APPROVE_WRITEOFF = 'inventory.approve_writeoff',
-  // El proveedor, sobre SU PROPIA orden de compra: confirmarla y registrar que la entregó.
-  SUPPLIERS_CONFIRM_PURCHASE_ORDER = 'suppliers.confirm_purchase_order',
+  // Armar una orden de compra y enviarla. Lo tienen el Administrador (le pide al proveedor) y el
+  // Proveedor (arma la orden de lo que va a entregar): el proveedor solo puede armarla a su nombre
+  // y solo toca las suyas, lo revisa el servidor. Antes esto lo gobernaba
+  // INVENTORY_MANAGE_PRODUCTS, que mezclaba comprar con manejar el inventario: dárselo al proveedor
+  // le habría abierto además los movimientos de inventario. Nace en
+  // V1.6_seed_purchase_order_manage_permission.
+  SUPPLIERS_MANAGE_PURCHASE_ORDERS = 'suppliers.manage_purchase_orders',
+  // El proveedor, sobre SU PROPIA orden de compra: contarla y despacharla. Ya no hay un paso de
+  // "confirmar" aparte (revisar la orden es parte de despacharla), así que
+  // suppliers.confirm_purchase_order se retira del catálogo en
+  // V1.7_rework_purchase_order_permissions. Quien recibe la mercancía es el bodeguero, con
+  // WAREHOUSE_FULFILL_ORDERS: el proveedor ya no se firma a sí mismo la llegada.
   SUPPLIERS_REGISTER_DELIVERY = 'suppliers.register_delivery',
+  // El proveedor da de alta referencias nuevas (producto + variante) sin necesitar
+  // INVENTORY_MANAGE_PRODUCTS, que además le permitiría mover inventario por fuera de una orden de
+  // compra. Nace en V1.3_seed_supplier_create_references_permission.
+  SUPPLIERS_CREATE_REFERENCES = 'suppliers.create_references',
 }

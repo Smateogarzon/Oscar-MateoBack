@@ -1,23 +1,19 @@
-import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
+import { ConflictException, NotFoundException } from '@nestjs/common';
 import { Decimal } from 'decimal.js';
 import { InventoryBalance } from '../inventory-balance/entities/inventory-balance.entity.js';
-import { InventorySide } from '../inventory-balance/entities/inventory-side.enum.js';
 import { InventoryLocation } from '../inventory-location/entities/inventory-location.entity.js';
-import { IdempotencyKey } from '../idempotency/entities/idempotency-key.entity.js';
-import { fingerprintOf } from '../idempotency/idempotency.js';
 import { InventorySourceType } from '../inventory-movement/entities/inventory-source-type.enum.js';
 import { ProductVariant } from '../product-variant/entities/product-variant.entity.js';
 import { InventoryReservationService } from './inventory-reservation.service.js';
-
-const claimKey = (sql: string) =>
-  sql.includes('INSERT INTO "idempotency_keys"') ? [{ id: 'claim-1' }] : [];
 
 function createService() {
   const repo = { find: vi.fn().mockResolvedValue([]), findOne: vi.fn(), delete: vi.fn() };
   const txReservationRepo = {
     create: vi.fn((value: unknown) => value),
     save: vi.fn(async (value: object) => ({ id: 'reservation-1', ...value })),
-    findOneByOrFail: vi.fn(),
+    // Lo que el documento ya tenía apartado, para syncForSource.
+    findBy: vi.fn().mockResolvedValue([]),
+    delete: vi.fn().mockResolvedValue(undefined),
   };
   const variantRepo = { existsBy: vi.fn().mockResolvedValue(true) };
   const invLocationRepo = { existsBy: vi.fn().mockResolvedValue(true) };
@@ -26,18 +22,12 @@ function createService() {
       id: 'bal-1',
       productVariantId: 'variant-1',
       inventoryLocationId: 'inv-loc-1',
-      side: InventorySide.PAIR,
       quantity: new Decimal('10'),
     }),
   };
-  const idempotencyRepo = { findOneBy: vi.fn().mockResolvedValue(null) };
   // Por defecto nada reservado todavía; cada prueba de "ya hay reservas" lo ajusta.
   const queryMock = vi.fn(async (sql: string) =>
-    sql.includes('idempotency_keys')
-      ? claimKey(sql)
-      : sql.includes('inventory_balances')
-        ? []
-        : [{ sum: '0' }],
+    sql.includes('inventory_balances') ? [] : [{ sum: '0' }],
   );
   const manager = {
     getRepository: (entity: unknown) =>
@@ -47,49 +37,41 @@ function createService() {
           ? invLocationRepo
           : entity === InventoryBalance
             ? balanceRepo
-            : entity === IdempotencyKey
-              ? idempotencyRepo
-              : txReservationRepo,
+            : txReservationRepo,
     query: queryMock,
   };
-  const dataSource = {
-    transaction: vi.fn(async (fn: (manager: unknown) => unknown) => fn(manager)),
+  // Elegir bodega es de InventoryBalanceService; aquí solo importa cuál devuelve.
+  const balances = {
+    findStockLocationForSale: vi.fn().mockResolvedValue('inv-loc-1'),
   };
-  const service = new InventoryReservationService(repo as never, dataSource as never);
-  return {
-    service,
-    repo,
-    txReservationRepo,
-    variantRepo,
-    invLocationRepo,
-    balanceRepo,
-    idempotencyRepo,
-    manager,
-    queryMock,
-    dataSource,
-  };
+  const service = new InventoryReservationService(repo as never, balances as never);
+  return { service, repo, txReservationRepo, variantRepo, invLocationRepo, balanceRepo, manager, queryMock, balances };
 }
 
 const COMPANY = 'company-1';
 const USER = 'user-1';
-const input = {
+const SALE = { sourceType: InventorySourceType.SALE, sourceId: 'sale-1', reservedBy: USER };
+
+const reserveParams = (overrides: Record<string, unknown> = {}) => ({
   productVariantId: 'variant-1',
   inventoryLocationId: 'inv-loc-1',
-  side: InventorySide.PAIR,
-  quantity: '4',
+  quantity: new Decimal('4'),
   sourceType: InventorySourceType.SALE,
   sourceId: 'sale-1',
-};
+  reservedBy: USER,
+  ...overrides,
+});
 
 describe('InventoryReservationService', () => {
   describe('findAll', () => {
-    it('only lists reservations of variants that belong to the company', async () => {
+    it('only lists reservations of variants that belong to the company, with who holds them', async () => {
       const { service, repo } = createService();
 
       await service.findAll(COMPANY);
 
       expect(repo.find).toHaveBeenCalledWith({
         where: { productVariant: { companyId: COMPANY } },
+        relations: { reservedByUser: true },
         order: { createdAt: 'ASC' },
       });
     });
@@ -104,134 +86,162 @@ describe('InventoryReservationService', () => {
     });
   });
 
-  describe('create', () => {
-    it('rejects a quantity of zero, before touching the database', async () => {
-      const { service, dataSource } = createService();
+  describe('reserveInTransaction', () => {
+    it('reserves the amount when it fits in what is available, noting who holds it', async () => {
+      const { service, manager, txReservationRepo } = createService();
 
-      await expect(service.create(COMPANY, USER, { ...input, quantity: '0' })).rejects.toThrow(
-        BadRequestException,
-      );
-      expect(dataSource.transaction).not.toHaveBeenCalled();
-    });
-
-    it('reserves the amount when it fits in what is available', async () => {
-      const { service, txReservationRepo } = createService();
-
-      const reservation = await service.create(COMPANY, USER, input);
+      const reservation = await service.reserveInTransaction(manager as never, COMPANY, reserveParams());
 
       expect(txReservationRepo.create).toHaveBeenCalledWith({
         productVariantId: 'variant-1',
         inventoryLocationId: 'inv-loc-1',
-        side: InventorySide.PAIR,
         quantity: expect.any(Decimal),
         sourceType: InventorySourceType.SALE,
         sourceId: 'sale-1',
         sourceNumber: null,
+        reservedBy: USER,
       });
       expect(txReservationRepo.create.mock.calls[0][0].quantity.toFixed(2)).toBe('4.00');
       expect(reservation.id).toBe('reservation-1');
     });
 
+    it('locks the balance before reading it, so two reservations at once never promise the same unit', async () => {
+      const { service, manager, balanceRepo } = createService();
+
+      await service.reserveInTransaction(manager as never, COMPANY, reserveParams());
+
+      expect(balanceRepo.findOne).toHaveBeenCalledWith(
+        expect.objectContaining({ lock: { mode: 'pessimistic_write' } }),
+      );
+    });
+
     it('discounts what is already reserved before deciding if it fits', async () => {
-      const { service, queryMock, txReservationRepo } = createService();
+      const { service, manager, queryMock, txReservationRepo } = createService();
       queryMock.mockImplementation(async (sql: string) =>
-        sql.includes('idempotency_keys')
-          ? []
-          : sql.includes('inventory_balances')
-            ? []
-            : [{ sum: '7' }],
+        sql.includes('inventory_balances') ? [] : [{ sum: '7' }],
       );
 
       // Balanza de 10, ya reservados 7: quedan 3 disponibles, alcanza para pedir 3 pero no para 4.
-      await expect(service.create(COMPANY, USER, { ...input, quantity: '3' })).resolves.toBeDefined();
-      await expect(service.create(COMPANY, USER, { ...input, quantity: '4' })).rejects.toThrow(
-        ConflictException,
-      );
+      await expect(
+        service.reserveInTransaction(manager as never, COMPANY, reserveParams({ quantity: new Decimal('3') })),
+      ).resolves.toBeDefined();
+      await expect(
+        service.reserveInTransaction(manager as never, COMPANY, reserveParams({ quantity: new Decimal('4') })),
+      ).rejects.toThrow(ConflictException);
       expect(txReservationRepo.save).toHaveBeenCalledTimes(1);
     });
 
     it('rejects when the balance itself does not have enough, even with nothing else reserved', async () => {
-      const { service, balanceRepo, txReservationRepo } = createService();
+      const { service, manager, balanceRepo, txReservationRepo } = createService();
       balanceRepo.findOne.mockResolvedValue({
         id: 'bal-1',
         productVariantId: 'variant-1',
         inventoryLocationId: 'inv-loc-1',
-        side: InventorySide.PAIR,
         quantity: new Decimal('2'),
       });
 
-      await expect(service.create(COMPANY, USER, { ...input, quantity: '3' })).rejects.toThrow(
-        ConflictException,
-      );
+      await expect(
+        service.reserveInTransaction(manager as never, COMPANY, reserveParams({ quantity: new Decimal('3') })),
+      ).rejects.toThrow(ConflictException);
       expect(txReservationRepo.save).not.toHaveBeenCalled();
     });
 
     it('rejects a variant of another company', async () => {
-      const { service, variantRepo, txReservationRepo } = createService();
+      const { service, manager, variantRepo, txReservationRepo } = createService();
       variantRepo.existsBy.mockResolvedValue(false);
 
-      await expect(service.create(COMPANY, USER, input)).rejects.toThrow(NotFoundException);
+      await expect(service.reserveInTransaction(manager as never, COMPANY, reserveParams())).rejects.toThrow(
+        NotFoundException,
+      );
       expect(txReservationRepo.save).not.toHaveBeenCalled();
     });
 
     it('rejects an inventory location of another company', async () => {
-      const { service, invLocationRepo, txReservationRepo } = createService();
+      const { service, manager, invLocationRepo, txReservationRepo } = createService();
       invLocationRepo.existsBy.mockResolvedValue(false);
 
-      await expect(service.create(COMPANY, USER, input)).rejects.toThrow(NotFoundException);
+      await expect(service.reserveInTransaction(manager as never, COMPANY, reserveParams())).rejects.toThrow(
+        NotFoundException,
+      );
       expect(txReservationRepo.save).not.toHaveBeenCalled();
-    });
-
-    describe('with an idempotency key', () => {
-      it('claims the key in the same transaction as the reservation, before saving anything', async () => {
-        const { service, manager, dataSource, txReservationRepo } = createService();
-
-        await service.create(COMPANY, USER, input, 'key-1');
-
-        expect(dataSource.transaction).toHaveBeenCalledTimes(1);
-        expect(manager.query).toHaveBeenNthCalledWith(
-          1,
-          expect.stringContaining('INSERT INTO "idempotency_keys"'),
-          [COMPANY, USER, 'createInventoryReservation', 'key-1', fingerprintOf(input)],
-        );
-        expect(manager.query.mock.invocationCallOrder[0]).toBeLessThan(
-          txReservationRepo.save.mock.invocationCallOrder[0],
-        );
-      });
-
-      it('a repeated request gets back the same reservation, without reserving twice', async () => {
-        const { service, idempotencyRepo, txReservationRepo, balanceRepo } = createService();
-        idempotencyRepo.findOneBy.mockResolvedValue({
-          fingerprint: fingerprintOf(input),
-          resourceId: 'reservation-1',
-        });
-        txReservationRepo.findOneByOrFail.mockResolvedValue({ id: 'reservation-1', ...input });
-
-        const reservation = await service.create(COMPANY, USER, input, 'key-1');
-
-        expect(reservation.id).toBe('reservation-1');
-        expect(balanceRepo.findOne).not.toHaveBeenCalled();
-        expect(txReservationRepo.save).not.toHaveBeenCalled();
-      });
     });
   });
 
-  describe('release', () => {
-    it('deletes the reservation', async () => {
-      const { service, repo } = createService();
-      repo.findOne.mockResolvedValue({ id: 'reservation-1' });
+  // Lo que mantiene a la venta y lo apartado siempre iguales: es lo que bloquea el último par para el
+  // vendedor que lo tomó primero.
+  describe('syncForSource', () => {
+    it('reserves what the document asks for, at the location with the most available', async () => {
+      const { service, manager, txReservationRepo, balances } = createService();
 
-      await service.release(COMPANY, 'reservation-1');
+      await service.syncForSource(manager as never, COMPANY, SALE, new Map([['variant-1', new Decimal('2')]]));
 
-      expect(repo.delete).toHaveBeenCalledWith('reservation-1');
+      expect(balances.findStockLocationForSale).toHaveBeenCalledWith(
+        manager,
+        COMPANY,
+        'variant-1',
+        expect.any(Decimal),
+      );
+      expect(txReservationRepo.create).toHaveBeenCalledWith(
+        expect.objectContaining({ productVariantId: 'variant-1', inventoryLocationId: 'inv-loc-1', reservedBy: USER }),
+      );
     });
 
-    it('cannot release a reservation of a variant of another company', async () => {
-      const { service, repo } = createService();
-      repo.findOne.mockResolvedValue(null);
+    it('leaves an unchanged reservation alone: it does not let go of the unit and take it again', async () => {
+      const { service, manager, txReservationRepo } = createService();
+      txReservationRepo.findBy.mockResolvedValue([
+        { id: 'res-1', productVariantId: 'variant-1', quantity: new Decimal('2') },
+      ]);
 
-      await expect(service.release(COMPANY, 'missing')).rejects.toThrow(NotFoundException);
-      expect(repo.delete).not.toHaveBeenCalled();
+      await service.syncForSource(manager as never, COMPANY, SALE, new Map([['variant-1', new Decimal('2')]]));
+
+      expect(txReservationRepo.delete).not.toHaveBeenCalled();
+      expect(txReservationRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('re-reserves when the quantity changed', async () => {
+      const { service, manager, txReservationRepo } = createService();
+      txReservationRepo.findBy.mockResolvedValue([
+        { id: 'res-1', productVariantId: 'variant-1', quantity: new Decimal('2') },
+      ]);
+
+      await service.syncForSource(manager as never, COMPANY, SALE, new Map([['variant-1', new Decimal('5')]]));
+
+      expect(txReservationRepo.delete).toHaveBeenCalledWith(['res-1']);
+      expect(txReservationRepo.create.mock.calls[0][0].quantity.toFixed(2)).toBe('5.00');
+    });
+
+    it('releases what the document no longer asks for, so the product frees up at once', async () => {
+      const { service, manager, txReservationRepo } = createService();
+      txReservationRepo.findBy.mockResolvedValue([
+        { id: 'res-1', productVariantId: 'variant-1', quantity: new Decimal('2') },
+      ]);
+
+      await service.syncForSource(manager as never, COMPANY, SALE, new Map());
+
+      expect(txReservationRepo.delete).toHaveBeenCalledWith(['res-1']);
+      expect(txReservationRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('adds up several lines of the same variant into one reservation', async () => {
+      const { service, manager, txReservationRepo } = createService();
+
+      await service.syncForSource(manager as never, COMPANY, SALE, new Map([['variant-1', new Decimal('3')]]));
+
+      expect(txReservationRepo.save).toHaveBeenCalledTimes(1);
+      expect(txReservationRepo.create.mock.calls[0][0].quantity.toFixed(2)).toBe('3.00');
+    });
+  });
+
+  describe('findForSource', () => {
+    it('finds what a document holds, to know which warehouse it came out of', async () => {
+      const { service, manager, txReservationRepo } = createService();
+
+      await service.findForSource(manager as never, InventorySourceType.SALE, 'sale-1');
+
+      expect(txReservationRepo.findBy).toHaveBeenCalledWith({
+        sourceType: InventorySourceType.SALE,
+        sourceId: 'sale-1',
+      });
     });
   });
 });

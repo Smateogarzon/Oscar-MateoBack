@@ -1,4 +1,5 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
+import { assertDestructiveDownAllowed } from '../../config/destructive-down.js';
 
 // Permiso del catálogo propio de cada empresa (categorías, productos y sus variantes):
 //   inventory.manage_products   crear y editar categorías, productos, colores, tallas y variantes
@@ -32,6 +33,7 @@ export class SeedInventoryProductsPermission1790400000001 implements MigrationIn
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
+    assertDestructiveDownAllowed(this.name);
     await queryRunner.query(`
       DELETE FROM "role_permissions" WHERE "permissionId" IN (
         SELECT "id" FROM "permissions" WHERE "code" = 'inventory.manage_products'

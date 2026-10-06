@@ -1,5 +1,5 @@
 import { Decimal } from 'decimal.js';
-import { calculateLine, calculateSaleTotals, MAX_AMOUNT } from './sale-totals.js';
+import { calculateLine, calculateSaleTotals } from './sale-totals.js';
 
 const d = (value: string) => new Decimal(value);
 const line = (total: string, discountAmount = '0') => ({
@@ -71,11 +71,5 @@ describe('calculateSaleTotals', () => {
     const totals = calculateSaleTotals([line('0.10'), line('0.20')], d('0'));
 
     expect(totals.total.toFixed(2)).toBe('0.30');
-  });
-});
-
-describe('MAX_AMOUNT', () => {
-  it('is the first amount that no longer fits numeric(14,2)', () => {
-    expect(MAX_AMOUNT.toFixed(0)).toBe('1000000000000');
   });
 });

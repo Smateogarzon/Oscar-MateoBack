@@ -18,6 +18,7 @@ import { PaymentMethod } from '../payment-method/entities/payment-method.entity.
 import { SaleItem } from '../sale/entities/sale-item.entity.js';
 import { Sale } from '../sale/entities/sale.entity.js';
 import type { SaleActor } from '../sale/sale-actor.js';
+import { UserCompanyRole } from '../user-company-role/entities/user-company-role.entity.js';
 import { UserLocationAccess } from '../user-location-access/entities/user-location-access.entity.js';
 import { RefundPayment } from './entities/refund-payment.entity.js';
 import { SaleReturnItem } from './entities/sale-return-item.entity.js';
@@ -193,6 +194,8 @@ function createService() {
     [PaymentMethod, txMethodRepo],
     [Sale, txSaleRepo],
     [UserLocationAccess, txAccessRepo],
+    // ¿Es super admin? (hasStoreAccess lo deja pasar a todas las tiendas): por defecto, no.
+    [UserCompanyRole, { existsBy: vi.fn().mockResolvedValue(false) }],
     [IdempotencyKey, txKeyRepo],
   ]);
   const manager = {

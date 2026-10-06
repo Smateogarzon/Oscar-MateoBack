@@ -7,7 +7,7 @@ export class UpdateCommon1790220768423 implements MigrationInterface {
     await queryRunner.query(`DROP INDEX "public"."IDX_store_payment_methods_store_method"`);
   }
 
-  public async down(queryRunner: QueryRunner): Promise<void> {
-
-  }
+  // Vacío a propósito: el CREATE INDEX que deshace este DROP está en el down de
+  // store-payment-method/V0.2_update_store-payment-method (el generador repartía el par entre dos archivos).
+  public async down(_queryRunner: QueryRunner): Promise<void> {}
 }

@@ -3,6 +3,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { CashSessionModule } from '../cash-session/cash-session.module.js';
 import { InventoryBalanceModule } from '../inventory-balance/inventory-balance.module.js';
 import { InventoryMovementModule } from '../inventory-movement/inventory-movement.module.js';
+import { InventoryReservationModule } from '../inventory-reservation/inventory-reservation.module.js';
 import { NotificationModule } from '../notification/notification.module.js';
 import { SaleModule } from '../sale/sale.module.js';
 import { SaleReturnModule } from '../sale-return/sale-return.module.js';
@@ -19,6 +20,7 @@ import { SalePaymentService } from './sale-payment.service.js';
     NotificationModule,
     InventoryBalanceModule,
     InventoryMovementModule,
+    InventoryReservationModule,
   ],
   providers: [SalePaymentService, SalePaymentResolver],
   exports: [SalePaymentService],

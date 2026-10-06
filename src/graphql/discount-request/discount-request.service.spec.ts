@@ -16,6 +16,7 @@ import { SaleItem } from '../sale/entities/sale-item.entity.js';
 import { SaleStatus } from '../sale/entities/sale-status.enum.js';
 import { Sale } from '../sale/entities/sale.entity.js';
 import type { SaleActor } from '../sale/sale-actor.js';
+import { UserCompanyRole } from '../user-company-role/entities/user-company-role.entity.js';
 import { UserLocationAccess } from '../user-location-access/entities/user-location-access.entity.js';
 import { DiscountRequestService } from './discount-request.service.js';
 import { DiscountRequestItem } from './entities/discount-request-item.entity.js';
@@ -142,6 +143,8 @@ function createService() {
     [SaleItem, txItemRepo],
     [Sale, txSaleRepo],
     [UserLocationAccess, txAccessRepo],
+    // ¿Es super admin? (hasStoreAccess lo deja pasar a todas las tiendas): por defecto, no.
+    [UserCompanyRole, { existsBy: vi.fn().mockResolvedValue(false) }],
     [IdempotencyKey, txKeyRepo],
   ]);
   const manager = {

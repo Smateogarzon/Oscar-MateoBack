@@ -1,7 +1,8 @@
 import 'dotenv/config';
 import { createInterface } from 'node:readline/promises';
-import bcrypt from 'bcryptjs';
 import { RecordStatus } from '../common/enums/record-status.enum.js';
+import { RoleCode } from '../common/enums/role-code.enum.js';
+import { hashPassword } from '../common/utils/password.js';
 import dataSource from '../data-source.js';
 import { Company } from '../graphql/company/entities/company.entity.js';
 import { Role } from '../graphql/role/entities/role.entity.js';
@@ -10,10 +11,7 @@ import { User } from '../graphql/user/entities/user.entity.js';
 
 // Rol de plataforma (alcance GLOBAL): ninguna empresa lo ve en sus listas ni puede asignarlo;
 // por eso este es el único lugar donde se crea un super admin.
-const SUPER_ADMIN_ROLE_CODE = 'SUPER_ADMIN';
 const MIN_PASSWORD_LENGTH = 8;
-// Debe coincidir con PASSWORD_SALT_ROUNDS de user.service.ts.
-const PASSWORD_SALT_ROUNDS = 10;
 
 async function main(): Promise<void> {
   await dataSource.initialize();
@@ -45,10 +43,10 @@ async function main(): Promise<void> {
 
       const role = await manager
         .getRepository(Role)
-        .findOneBy({ code: SUPER_ADMIN_ROLE_CODE });
+        .findOneBy({ code: RoleCode.SUPER_ADMIN });
       if (!role) {
         throw new Error(
-          `No existe el rol ${SUPER_ADMIN_ROLE_CODE}. Corre primero: npm run migration:run`,
+          `No existe el rol ${RoleCode.SUPER_ADMIN}. Corre primero: npm run migration:run`,
         );
       }
 
@@ -67,7 +65,7 @@ async function main(): Promise<void> {
           firstName,
           lastName,
           email,
-          passwordHash: await bcrypt.hash(password, PASSWORD_SALT_ROUNDS),
+          passwordHash: await hashPassword(password),
           status: RecordStatus.ACTIVE,
           // El operador eligió la contraseña él mismo; no hay nada que forzarlo a cambiar.
           mustChangePassword: false,

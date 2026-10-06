@@ -10,6 +10,7 @@ import { Decimal } from 'decimal.js';
 import { DataSource, EntityManager, In, Repository } from 'typeorm';
 import { assertStoreAccess } from '../../common/access/store-access.js';
 import { RecordStatus } from '../../common/enums/record-status.enum.js';
+import { MAX_AMOUNT } from '../../common/utils/money.js';
 import { runIdempotent } from '../idempotency/idempotency.js';
 import { CashActor } from '../cash-session/cash-actor.js';
 import { CashSessionService } from '../cash-session/cash-session.service.js';
@@ -17,6 +18,9 @@ import { withdrawDiscountRequests } from '../discount-request/discount-request-c
 import { ACTIVE_DISCOUNT_REQUEST_STATUSES } from '../discount-request/entities/discount-request-status.enum.js';
 import { DiscountRequest } from '../discount-request/entities/discount-request.entity.js';
 import { DocumentSequenceService } from '../document-sequence/document-sequence.service.js';
+import { InventorySourceType } from '../inventory-movement/entities/inventory-source-type.enum.js';
+import { InventoryReservationService } from '../inventory-reservation/inventory-reservation.service.js';
+import { releaseReservations } from '../inventory-reservation/reserved-quantity.js';
 import { LocationType } from '../location/entities/location-type.enum.js';
 import { Location } from '../location/entities/location.entity.js';
 import { NotificationService } from '../notification/notification.service.js';
@@ -33,7 +37,7 @@ import { SaleItem } from './entities/sale-item.entity.js';
 import { SaleStatus } from './entities/sale-status.enum.js';
 import { Sale } from './entities/sale.entity.js';
 import { formatSaleNumber, SALE_SERIES } from './sale-number.js';
-import { calculateLine, calculateSaleTotals, MAX_AMOUNT } from './sale-totals.js';
+import { calculateLine, calculateSaleTotals } from './sale-totals.js';
 
 // Cuántas ventas devuelve el histórico de una vez: por defecto y como máximo.
 export const DEFAULT_SALES_LIMIT = 200;
@@ -67,6 +71,7 @@ export class SaleService {
     private readonly sequences: DocumentSequenceService,
     private readonly cashSessions: CashSessionService,
     private readonly notifications: NotificationService,
+    private readonly reservations: InventoryReservationService,
   ) {}
 
   // Las más recientes primero, por la fecha de la venta (cuando se cobró; si es un borrador, cuando se
@@ -307,6 +312,10 @@ export class SaleService {
             }),
           );
 
+          // Apartar va DESPUÉS de guardar la línea y dentro de su misma transacción: si lo que se
+          // acaba de agregar ya lo tiene apartado otro vendedor, esto lanza y la línea tampoco queda.
+          await this.syncReservations(manager, companyId, sale, actor.userId);
+
           return this.recalculate(manager, sale);
         },
         (id) => manager.getRepository(Sale).findOneByOrFail({ id }),
@@ -355,6 +364,9 @@ export class SaleService {
       item.total = total;
       await repo.save(item);
 
+      // Subir la cantidad aparta más (y falla si no queda disponible); bajarla suelta lo que sobra.
+      await this.syncReservations(manager, companyId, sale, actor.userId);
+
       return this.recalculate(manager, sale);
     });
   }
@@ -374,8 +386,48 @@ export class SaleService {
       if (!item) throw new NotFoundException(`Línea ${itemId} no encontrada`);
 
       await repo.delete(item.id);
+
+      // Quitar la línea suelta lo que apartaba: el producto vuelve a estar disponible para los demás
+      // al instante, sin esperar a que el vendedor cierre o abandone la venta.
+      await this.syncReservations(manager, companyId, sale, actor.userId);
+
       return this.recalculate(manager, sale);
     });
+  }
+
+  // Deja apartado exactamente lo que piden hoy las líneas de catálogo de la venta: ni más (una línea
+  // que se quitó deja de bloquear) ni menos (una que se agregó queda tomada para este vendedor). Las
+  // líneas GENERIC no son de inventario y no apartan nada.
+  //
+  // Esto es lo que resuelve la carrera por el último par: el primero que lo mete en su venta lo
+  // aparta, y al segundo se le rechaza aquí mismo, mientras arma la venta, en vez de dejarlo llegar
+  // hasta el cobro con el cliente enfrente.
+  private async syncReservations(
+    manager: EntityManager,
+    companyId: string,
+    sale: Sale,
+    reservedBy: string,
+  ): Promise<void> {
+    const items = await manager.getRepository(SaleItem).find({ where: { saleId: sale.id } });
+
+    const desired = new Map<string, Decimal>();
+    for (const item of items) {
+      if (item.type !== SaleItemType.INVENTORIED || !item.productVariantId) continue;
+      const held = desired.get(item.productVariantId) ?? new Decimal(0);
+      desired.set(item.productVariantId, held.plus(item.quantity));
+    }
+
+    await this.reservations.syncForSource(
+      manager,
+      companyId,
+      {
+        sourceType: InventorySourceType.SALE,
+        sourceId: sale.id,
+        sourceNumber: sale.saleNumber,
+        reservedBy,
+      },
+      desired,
+    );
   }
 
   // Solo se cancela una venta en borrador: una completada ya se cobró (sus pagos están en la caja) y
@@ -421,6 +473,10 @@ export class SaleService {
         actorId: actor.userId,
         note: 'Venta cancelada',
       });
+
+      // Lo que apartaba vuelve al disponible: una venta anulada no puede seguir bloqueando el último
+      // par para los demás vendedores.
+      await releaseReservations(manager, InventorySourceType.SALE, [sale.id]);
 
       sale.status = SaleStatus.CANCELLED;
       sale.cancelledBy = actor.userId;

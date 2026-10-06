@@ -9,7 +9,6 @@ import { Location } from '../location/entities/location.entity.js';
 import { ProductVariant } from '../product-variant/entities/product-variant.entity.js';
 import { WriteOffItem } from './entities/write-off-item.entity.js';
 import { WriteOffStatus } from './entities/write-off-status.enum.js';
-import { WriteOff } from './entities/write-off.entity.js';
 import { WriteOffService } from './write-off.service.js';
 
 const claimKey = (sql: string) =>

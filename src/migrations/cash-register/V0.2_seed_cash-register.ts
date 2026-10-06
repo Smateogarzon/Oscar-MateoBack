@@ -1,4 +1,5 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
+import { assertDestructiveDownAllowed } from '../../config/destructive-down.js';
 
 // Una caja para cada tienda que ya existe y todavía no tiene ninguna, con el nombre de la tienda y
 // el código C1, igual que la que nace hoy con cada tienda nueva (LocationService.create). Las
@@ -27,6 +28,7 @@ export class SeedCashRegister1790011471074 implements MigrationInterface {
 
   // Borra las cajas que creó este seed, salvo las que ya tuvieron algún turno.
   public async down(queryRunner: QueryRunner): Promise<void> {
+    assertDestructiveDownAllowed(this.name);
     await queryRunner.query(`
       DELETE FROM "cash_registers" r
       WHERE r."id" IN (SELECT md5('default-cash-register:' || l."id")::uuid FROM "locations" l)

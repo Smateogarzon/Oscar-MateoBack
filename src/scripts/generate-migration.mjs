@@ -125,10 +125,13 @@ function tablesReferencedBy(sql) {
   return tables;
 }
 
-// DROP INDEX no menciona la tabla en Postgres; se resuelve buscando el CREATE INDEX que la creó.
+// DROP INDEX no menciona la tabla en Postgres; se resuelve buscando el CREATE INDEX que la nombra:
+// en up() si el índice se recrea en la misma migración, o en down() si se está quitando uno que ya
+// existía (su down lo vuelve a crear). Sin mirar down(), el DROP caía en "common" y su CREATE
+// inverso en la carpeta del feature: el par quedaba partido entre dos archivos.
 const indexToTable = new Map();
 const createIndexRe = new RegExp(`CREATE\\s+(?:UNIQUE\\s+)?INDEX\\s+${ID}\\s+ON\\s+${ID}`);
-for (const q of upQueries) {
+for (const q of [...upQueries, ...downQueries]) {
   const m = q.sql.match(createIndexRe);
   if (m) indexToTable.set(m[1], m[2]);
 }
@@ -219,9 +222,26 @@ function visit(feature, stack = new Set()) {
 }
 for (const feature of allFeatures) visit(feature);
 
+// El timestamp más alto de las migraciones que ya existen. Las escritas a mano llevan timestamps
+// redondos que a veces van por delante del reloj: una migración nueva con Date.now() quedaría
+// ordenada ANTES que ellas y, en una base vacía (CI, un equipo nuevo), correría antes que algo de
+// lo que depende. TypeORM lee los últimos 13 dígitos de `name`.
+function latestMigrationTimestamp() {
+  let latest = 0;
+  for (const entry of readdirSync(migrationsRoot, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const featureDir = join(migrationsRoot, entry.name);
+    for (const file of readdirSync(featureDir).filter((f) => f.endsWith('.ts'))) {
+      const match = readFileSync(join(featureDir, file), 'utf8').match(/name\s*=\s*'[^']*(\d{13})'/);
+      if (match) latest = Math.max(latest, Number(match[1]));
+    }
+  }
+  return latest;
+}
+
 // --- 6. Un archivo de migración por feature, cada uno en su propia carpeta ---
 rmSync(generatedPath);
-const baseTimestamp = Date.now();
+const baseTimestamp = Math.max(Date.now(), latestMigrationTimestamp() + 1);
 
 order.forEach((feature, index) => {
   // TypeORM a veces repite el mismo CREATE/DROP TYPE una vez por cada tabla que usa

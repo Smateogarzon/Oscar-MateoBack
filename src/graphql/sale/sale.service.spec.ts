@@ -15,6 +15,7 @@ import {
 } from '../discount-request/entities/discount-request-status.enum.js';
 import { DiscountRequest } from '../discount-request/entities/discount-request.entity.js';
 import { IdempotencyKey } from '../idempotency/entities/idempotency-key.entity.js';
+import { InventoryReservation } from '../inventory-reservation/entities/inventory-reservation.entity.js';
 import { LocationType } from '../location/entities/location-type.enum.js';
 import { Location } from '../location/entities/location.entity.js';
 import { NotificationChannel } from '../notification/entities/notification-channel.enum.js';
@@ -68,7 +69,9 @@ function createService() {
     findOneBy: vi.fn().mockResolvedValue({ id: 'store-1', name: 'Tienda centro', status: RecordStatus.ACTIVE }),
   };
   const accessRepo = { existsBy: vi.fn().mockResolvedValue(true) };
-  const membershipRepo = { existsBy: vi.fn().mockResolvedValue(true) };
+  // La membresía del vendedor (por defecto, sí es miembro). Con `role` en la condición es la pregunta
+  // de hasStoreAccess, "¿es super admin?": por defecto, no.
+  const membershipRepo = { existsBy: vi.fn(async (where: { role?: unknown }) => where.role === undefined) };
   const userRepo = { existsBy: vi.fn().mockResolvedValue(true) };
   const sequences = { next: vi.fn().mockResolvedValue(7) };
   const cashSessions = {
@@ -108,6 +111,9 @@ function createService() {
     return [];
   });
 
+  // Soltar lo que la venta tenía apartado (releaseReservations), al anularla.
+  const txReservationRepo = { delete: vi.fn().mockResolvedValue(undefined) };
+
   const manager = {
     query,
     getRepository: (entity: unknown) =>
@@ -125,11 +131,16 @@ function createService() {
                   ? txRequestRepo
                   : entity === IdempotencyKey
                     ? keyRepo
-                    : txSaleRepo,
+                    : entity === InventoryReservation
+                      ? txReservationRepo
+                      : txSaleRepo,
   };
   const dataSource = {
     transaction: vi.fn(async (fn: (manager: unknown) => unknown) => fn(manager)),
   };
+
+  // Apartar lo que la venta va tomando: lo propio se prueba en InventoryReservationService.
+  const reservations = { syncForSource: vi.fn().mockResolvedValue(undefined) };
 
   const service = new SaleService(
     saleRepo as never,
@@ -138,9 +149,11 @@ function createService() {
     sequences as never,
     cashSessions as never,
     notifications as never,
+    reservations as never,
   );
   return {
     service,
+    reservations,
     listQuery,
     saleRepo,
     saleItemRepo,

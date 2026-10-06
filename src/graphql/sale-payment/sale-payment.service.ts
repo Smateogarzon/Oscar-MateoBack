@@ -10,10 +10,11 @@ import { withdrawDiscountRequests } from '../discount-request/discount-request-c
 import { DiscountRequestStatus } from '../discount-request/entities/discount-request-status.enum.js';
 import { runIdempotent } from '../idempotency/idempotency.js';
 import { InventoryBalanceService } from '../inventory-balance/inventory-balance.service.js';
-import { InventorySide } from '../inventory-balance/entities/inventory-side.enum.js';
 import { InventoryMovementType } from '../inventory-movement/entities/inventory-movement-type.enum.js';
 import { InventorySourceType } from '../inventory-movement/entities/inventory-source-type.enum.js';
 import { InventoryMovementService } from '../inventory-movement/inventory-movement.service.js';
+import { InventoryReservationService } from '../inventory-reservation/inventory-reservation.service.js';
+import { releaseReservations } from '../inventory-reservation/reserved-quantity.js';
 import { NotificationService } from '../notification/notification.service.js';
 import { validatePaymentMethods } from '../payment-method/payment-method-validation.js';
 import { SaleItemType } from '../sale/entities/sale-item-type.enum.js';
@@ -48,6 +49,7 @@ export class SalePaymentService {
     private readonly notifications: NotificationService,
     private readonly inventoryBalances: InventoryBalanceService,
     private readonly inventoryMovements: InventoryMovementService,
+    private readonly reservations: InventoryReservationService,
   ) {}
 
   // En el orden en que se registraron. La empresa y quién puede verlos se comprueban a través de la
@@ -225,18 +227,32 @@ export class SalePaymentService {
     // bodega, el cobro entero se revierte. Las líneas GENERIC no tocan inventario.
     const items = await manager.getRepository(SaleItem).find({ where: { saleId: sale.id } });
     const inventoried = items.filter((item) => item.type === SaleItemType.INVENTORIED && item.productVariantId);
+
+    // La venta viene apartando lo suyo desde que se armó (SaleService.syncReservations): se descuenta
+    // de la MISMA bodega donde quedó apartado, no de la que más tenga hoy, que podría ser otra.
+    const held = await this.reservations.findForSource(manager, InventorySourceType.SALE, sale.id);
+    const heldByVariant = new Map(held.map((reservation) => [reservation.productVariantId, reservation]));
+
+    // Y se suelta lo propio antes de mover: si no, la venta se bloquearía a sí misma al descontar
+    // (lo apartado no se puede sacar; ver InventoryMovementService). Lo que apartan OTRAS ventas en
+    // curso sigue en pie y sí protege sus unidades.
+    await releaseReservations(manager, InventorySourceType.SALE, [sale.id]);
+
     for (const item of inventoried) {
-      const stockLocation = await this.inventoryBalances.findStockLocationForSale(
-        manager,
-        companyId,
-        item.productVariantId!,
-        item.quantity,
-        InventorySide.PAIR,
-      );
+      // Sin reserva solo quedan los borradores de antes de que las ventas apartaran: se elige bodega
+      // como se hacía entonces.
+      const reserved = heldByVariant.get(item.productVariantId!);
+      const fromLocationId =
+        reserved?.inventoryLocationId ??
+        (await this.inventoryBalances.findStockLocationForSale(
+          manager,
+          companyId,
+          item.productVariantId!,
+          item.quantity,
+        ));
       await this.inventoryMovements.recordInTransaction(manager, companyId, actor.userId, {
         productVariantId: item.productVariantId!,
-        fromLocationId: stockLocation.id,
-        side: InventorySide.PAIR,
+        fromLocationId,
         quantity: item.quantity,
         type: InventoryMovementType.SALE,
         sourceType: InventorySourceType.SALE,

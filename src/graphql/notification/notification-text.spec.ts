@@ -18,13 +18,34 @@ describe('CHANNEL_OF_TYPE', () => {
 });
 
 describe('buildNotificationText', () => {
-  it.each(Object.values(NotificationType))('writes a title and a message for %s', (type) => {
+  // La existencia baja es un aviso del sistema, no de una persona: no lleva quién lo hizo (ver abajo).
+  const typesWithActor = Object.values(NotificationType).filter((type) => type !== NotificationType.INVENTORY_LOW_STOCK);
+
+  it.each(typesWithActor)('writes a title and a message for %s', (type) => {
     const { title, message } = buildNotificationText(type, params);
 
     expect(title.length).toBeGreaterThan(0);
     expect(title.length).toBeLessThanOrEqual(150);
     expect(message).toContain('Camila Rojas');
     expect(message).toContain('VTA-000125');
+  });
+
+  it('says which product ran low, where and how much is left, without an actor', () => {
+    const low = buildNotificationText(NotificationType.INVENTORY_LOW_STOCK, {
+      ...params,
+      reference: 'Air Force 1 (AF1-BL-40)',
+      quantity: '2',
+      minStock: '3',
+      locationName: 'Bodega central',
+    });
+    expect(low.title).toBe('Existencia baja');
+    expect(low.message).toContain('Air Force 1');
+    expect(low.message).toContain('Bodega central');
+    expect(low.message).toContain('quedaron 2 unidades (mínimo 3)');
+    expect(low.message).not.toContain('Camila Rojas');
+
+    const out = buildNotificationText(NotificationType.INVENTORY_LOW_STOCK, { ...params, quantity: '0', outOfStock: true });
+    expect(out.message).toContain('se agotó');
   });
 
   it('says who asked and for which sale', () => {

@@ -277,6 +277,13 @@ describe.skipIf(!dbAvailable)('Candados contables (Postgres real)', () => {
   describe('la llave explícita', () => {
     it('deja borrar cuando se pide permiso a propósito, y vuelve a bloquear al soltarlo', async () => {
       await client.query('SAVEPOINT llave');
+      // Un segundo movimiento del turno: es el que tiene que seguir protegido al soltar la llave (un
+      // DELETE que no encuentra filas no dispara un trigger de fila, así que sin él no se probaría nada).
+      await client.query(
+        `INSERT INTO cash_movements ("cashSessionId", type, reason, amount, description, "createdBy")
+         SELECT "cashSessionId", type, reason, amount, description, "createdBy" FROM cash_movements WHERE id = $1`,
+        [movementId],
+      );
       await client.query(`SET LOCAL app.ledger_override = 'ON'`);
       await client.query(`DELETE FROM cash_movements WHERE id = $1`, [movementId]);
       const { rows } = await client.query(

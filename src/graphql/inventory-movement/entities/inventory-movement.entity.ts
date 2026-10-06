@@ -4,7 +4,6 @@ import { ImmutableEntity } from '../../../common/entities/immutable.entity.js';
 import { decimalTransformer } from '../../../common/transformers/decimal.transformer.js';
 import { Company } from '../../company/entities/company.entity.js';
 import { InventoryLocation } from '../../inventory-location/entities/inventory-location.entity.js';
-import { InventorySide } from '../../inventory-balance/entities/inventory-side.enum.js';
 import { ProductVariant } from '../../product-variant/entities/product-variant.entity.js';
 import { User } from '../../user/entities/user.entity.js';
 import { InventoryMovementType } from './inventory-movement-type.enum.js';
@@ -49,9 +48,6 @@ export class InventoryMovement extends ImmutableEntity {
   @ManyToOne(() => InventoryLocation, { nullable: true })
   @JoinColumn({ name: 'toLocationId' })
   toLocation: InventoryLocation | null;
-
-  @Column({ type: 'enum', enum: InventorySide, enumName: 'inventory_side' })
-  side: InventorySide;
 
   @Column({ type: 'numeric', precision: 12, scale: 2, transformer: decimalTransformer })
   quantity: Decimal;
