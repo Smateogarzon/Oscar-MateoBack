@@ -14,14 +14,20 @@ import { CashActor } from '../cash-session/cash-actor.js';
 import { CashSessionService } from '../cash-session/cash-session.service.js';
 import { DocumentSequenceService } from '../document-sequence/document-sequence.service.js';
 import { runIdempotent } from '../idempotency/idempotency.js';
+import { InventoryLocationService } from '../inventory-location/inventory-location.service.js';
+import { InventoryMovementType } from '../inventory-movement/entities/inventory-movement-type.enum.js';
+import { InventorySourceType } from '../inventory-movement/entities/inventory-source-type.enum.js';
+import { InventoryMovementService } from '../inventory-movement/inventory-movement.service.js';
 import { NotificationChannel } from '../notification/entities/notification-channel.enum.js';
 import { NotificationEntityType } from '../notification/entities/notification-entity-type.enum.js';
 import { NotificationType } from '../notification/entities/notification-type.enum.js';
 import { NotificationService } from '../notification/notification.service.js';
 import { PaymentMethodType } from '../payment-method/entities/payment-method-type.enum.js';
 import { validatePaymentMethods } from '../payment-method/payment-method-validation.js';
+import { SaleItemType } from '../sale/entities/sale-item-type.enum.js';
 import { SaleItem } from '../sale/entities/sale-item.entity.js';
 import { Sale } from '../sale/entities/sale.entity.js';
+import { loadSaleNumber } from '../sale/sale-number-of.js';
 import { canReadSale, SaleActor } from '../sale/sale-actor.js';
 import { SaleService } from '../sale/sale.service.js';
 import { CompleteReturnRefundInput } from './dto/complete-return-refund.input.js';
@@ -50,6 +56,12 @@ export const MAX_RETURNS_LIMIT = 1000;
 // modifica. La empresa de una devolución es la suya, y una de otra empresa se responde como si no
 // existiera.
 //
+// El inventario se repone justo cuando el producto cambia de manos de verdad: al completar un
+// REFUND puro, o al aplicar un EXCHANGE (ver restockReturnedItems) — nunca al pedirla ni al
+// aprobarla, que siguen siendo solo papeleo. Entra a la ubicación RETURNS de la tienda de la venta
+// original (se crea sola la primera vez), no directo a la bodega vendible: alguien decide a mano,
+// con un traspaso, si lo devuelto vuelve a venderse o se manda a DAMAGED.
+//
 // Bloqueos, siempre en este orden: venta (la original al pedirla, la nueva al cobrar un cambio) →
 // devolución → turno de caja. Pedir una devolución bloquea la venta original, y así dos pedidos a la
 // vez no devuelven las mismas unidades; lo demás bloquea solo la devolución.
@@ -73,6 +85,8 @@ export class SaleReturnService {
     private readonly sequences: DocumentSequenceService,
     private readonly cashSessions: CashSessionService,
     private readonly notifications: NotificationService,
+    private readonly inventoryLocations: InventoryLocationService,
+    private readonly inventoryMovements: InventoryMovementService,
   ) {}
 
   // Las más recientes primero, acotadas: `limit` (500 por defecto, 1000 máximo) con `offset`. Quien no ve
@@ -143,14 +157,9 @@ export class SaleReturnService {
     return saleReturn;
   }
 
-  // El número de la venta original, para mostrarlo en la lista sin pedir todas las ventas. Las listas
-  // ya traen la venta cargada; una devolución suelta (el resultado de una mutación) la busca aquí.
-  async saleNumberOf(saleReturn: SaleReturn): Promise<string | null> {
-    if (saleReturn.sale) return saleReturn.sale.saleNumber;
-    const sale = await this.dataSource
-      .getRepository(Sale)
-      .findOne({ where: { id: saleReturn.saleId }, select: { id: true, saleNumber: true } });
-    return sale?.saleNumber ?? null;
+  // El número de la venta original, para la lista (ver sale-number-of.ts).
+  saleNumberOf(saleReturn: SaleReturn): Promise<string | null> {
+    return loadSaleNumber(this.dataSource, saleReturn);
   }
 
   // Las líneas devueltas, en el orden en que se registraron.
@@ -532,6 +541,14 @@ export class SaleReturnService {
             ),
           );
 
+          // Repone inventario solo aquí, y solo si es un REFUND puro: en un cambio (EXCHANGE) lo
+          // devuelto ya se repuso en applyExchange, en el momento en que de verdad cambió de manos
+          // (ahí puede quedar PARTIAL_REFUND esperando esta misma función para la diferencia en
+          // dinero, pero el producto físico ya volvió entonces, no ahora).
+          if (saleReturn.resolution === SaleReturnResolution.REFUND) {
+            await this.restockReturnedItems(manager, actor.userId, saleReturn);
+          }
+
           saleReturn.refundAmount = refunded;
           saleReturn.status = SaleReturnStatus.COMPLETED;
           saleReturn.completedAt = new Date();
@@ -568,12 +585,17 @@ export class SaleReturnService {
   // crédito de lo devuelto. Si el crédito alcanzó para todo lo devuelto, la devolución termina; si
   // sobró (el cambio era por algo más barato), pasa a PARTIAL_REFUND y sigue aprobada hasta que se
   // entregue la diferencia en dinero. Pública porque SalePaymentService la usa.
-  applyExchange(
+  async applyExchange(
     manager: EntityManager,
     saleReturn: SaleReturn,
     sale: Sale,
     credit: Decimal,
   ): Promise<SaleReturn> {
+    // Aquí es cuando el cliente entrega lo viejo y se lleva lo nuevo: se repone sin importar si
+    // falta cobrar una diferencia (PARTIAL_REFUND), porque esa diferencia es solo dinero, el
+    // producto ya volvió.
+    await this.restockReturnedItems(manager, sale.cashierId, saleReturn);
+
     saleReturn.replacementSaleId = sale.id;
     if (credit.lessThan(saleReturn.totalReturned)) {
       saleReturn.resolution = SaleReturnResolution.PARTIAL_REFUND;
@@ -675,6 +697,49 @@ export class SaleReturnService {
       throw new BadRequestException('No hay nada que devolver: el valor de lo devuelto es cero');
     }
     return { items, totalReturned };
+  }
+
+  // Pone en la ubicación RETURNS de la tienda de la venta original lo que el cliente devolvió
+  // físicamente: un movimiento RETURN (ver InventoryMovementType) por cada línea de catálogo de la
+  // devolución. Las líneas GENERIC (sin productVariantId, p.ej. un cargo de servicio) no tocan
+  // inventario, igual que al cobrar (ver SalePaymentService.completeInTransaction). Cae en la
+  // misma zona de cuarentena para cualquier tienda (InventoryLocationService.findOrCreateReturnsLocation):
+  // de ahí se traspasa a bodega vendible a mano, con la función de traspasos que ya existe, no se
+  // vende solo por reaparecer.
+  private async restockReturnedItems(
+    manager: EntityManager,
+    actorId: string,
+    saleReturn: SaleReturn,
+  ): Promise<void> {
+    const originalSale = await manager.getRepository(Sale).findOneBy({ id: saleReturn.saleId });
+    if (!originalSale) throw new NotFoundException('No se encontró la venta original de la devolución');
+
+    const items = await manager.getRepository(SaleReturnItem).find({
+      where: { saleReturnId: saleReturn.id },
+      relations: { saleItem: true },
+    });
+    const inventoried = items.filter(
+      (item) => item.saleItem.type === SaleItemType.INVENTORIED && item.saleItem.productVariantId,
+    );
+    if (inventoried.length === 0) return;
+
+    const returnsLocation = await this.inventoryLocations.findOrCreateReturnsLocation(
+      manager,
+      saleReturn.companyId,
+      originalSale.storeId,
+    );
+
+    for (const item of inventoried) {
+      await this.inventoryMovements.recordInTransaction(manager, saleReturn.companyId, actorId, {
+        productVariantId: item.saleItem.productVariantId!,
+        toLocationId: returnsLocation.id,
+        quantity: item.quantity,
+        type: InventoryMovementType.RETURN,
+        sourceType: InventorySourceType.SALE_RETURN,
+        sourceId: saleReturn.id,
+        sourceNumber: saleReturn.returnNumber,
+      });
+    }
   }
 
   private async lock(manager: EntityManager, companyId: string, id: string): Promise<SaleReturn> {

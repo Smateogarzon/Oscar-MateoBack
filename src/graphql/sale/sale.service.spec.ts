@@ -15,6 +15,7 @@ import {
 } from '../discount-request/entities/discount-request-status.enum.js';
 import { DiscountRequest } from '../discount-request/entities/discount-request.entity.js';
 import { IdempotencyKey } from '../idempotency/entities/idempotency-key.entity.js';
+import { InventoryReservation } from '../inventory-reservation/entities/inventory-reservation.entity.js';
 import { LocationType } from '../location/entities/location-type.enum.js';
 import { Location } from '../location/entities/location.entity.js';
 import { NotificationChannel } from '../notification/entities/notification-channel.enum.js';
@@ -62,13 +63,15 @@ function createService() {
     existsBy: vi.fn().mockResolvedValue(false),
     // Las solicitudes activas de la venta que se retiran al cancelarla (ninguna por defecto)
     find: vi.fn().mockResolvedValue([]),
-    update: vi.fn().mockResolvedValue(undefined),
+    save: vi.fn().mockResolvedValue(undefined),
   };
   const locationRepo = {
     findOneBy: vi.fn().mockResolvedValue({ id: 'store-1', name: 'Tienda centro', status: RecordStatus.ACTIVE }),
   };
   const accessRepo = { existsBy: vi.fn().mockResolvedValue(true) };
-  const membershipRepo = { existsBy: vi.fn().mockResolvedValue(true) };
+  // La membresía del vendedor (por defecto, sí es miembro). Con `role` en la condición es la pregunta
+  // de hasStoreAccess, "¿es super admin?": por defecto, no.
+  const membershipRepo = { existsBy: vi.fn(async (where: { role?: unknown }) => where.role === undefined) };
   const userRepo = { existsBy: vi.fn().mockResolvedValue(true) };
   const sequences = { next: vi.fn().mockResolvedValue(7) };
   const cashSessions = {
@@ -108,6 +111,12 @@ function createService() {
     return [];
   });
 
+  // Soltar lo que la venta tenía apartado (releaseReservations), al anularla.
+  const txReservationRepo = {
+    find: vi.fn().mockResolvedValue([]),
+    remove: vi.fn().mockResolvedValue(undefined),
+  };
+
   const manager = {
     query,
     getRepository: (entity: unknown) =>
@@ -125,11 +134,16 @@ function createService() {
                   ? txRequestRepo
                   : entity === IdempotencyKey
                     ? keyRepo
-                    : txSaleRepo,
+                    : entity === InventoryReservation
+                      ? txReservationRepo
+                      : txSaleRepo,
   };
   const dataSource = {
     transaction: vi.fn(async (fn: (manager: unknown) => unknown) => fn(manager)),
   };
+
+  // Apartar lo que la venta va tomando: lo propio se prueba en InventoryReservationService.
+  const reservations = { syncForSource: vi.fn().mockResolvedValue(undefined) };
 
   const service = new SaleService(
     saleRepo as never,
@@ -138,9 +152,11 @@ function createService() {
     sequences as never,
     cashSessions as never,
     notifications as never,
+    reservations as never,
   );
   return {
     service,
+    reservations,
     listQuery,
     saleRepo,
     saleItemRepo,
@@ -1206,15 +1222,16 @@ describe('SaleService', () => {
       // Busca las activas (pendiente o aprobada) de esa venta y las cancela por su id
       expect(txRequestRepo.find).toHaveBeenCalledWith({
         where: { saleId: In(['sale-1']), status: In(ACTIVE_DISCOUNT_REQUEST_STATUSES) },
+        lock: { mode: 'pessimistic_write' },
       });
-      expect(txRequestRepo.update).toHaveBeenCalledWith(
-        { id: In(['req-1']) },
+      expect(txRequestRepo.save).toHaveBeenCalledWith([
         expect.objectContaining({
+          id: 'req-1',
           status: DiscountRequestStatus.CANCELLED,
           resolvedBy: 'admin-1',
           resolutionNotes: 'Venta cancelada',
         }),
-      );
+      ]);
     });
 
     it('tells whoever was looking at the pending request: the notice is read and their screen refreshes', async () => {
@@ -1253,10 +1270,9 @@ describe('SaleService', () => {
 
       await service.cancel(COMPANY, ADMIN_CANCEL, 'sale-1', { reason: 'X' });
 
-      expect(txRequestRepo.update).toHaveBeenCalledWith(
-        { id: In(['req-1']) },
-        expect.objectContaining({ status: DiscountRequestStatus.CANCELLED }),
-      );
+      expect(txRequestRepo.save).toHaveBeenCalledWith([
+        expect.objectContaining({ id: 'req-1', status: DiscountRequestStatus.CANCELLED }),
+      ]);
       expect(notifications.markEntityRead).not.toHaveBeenCalled();
       expect(notifications.signalChange).toHaveBeenCalledTimes(1);
     });
@@ -1268,7 +1284,7 @@ describe('SaleService', () => {
 
       await service.cancel(COMPANY, ADMIN_CANCEL, 'sale-1', { reason: 'X' });
 
-      expect(txRequestRepo.update).not.toHaveBeenCalled();
+      expect(txRequestRepo.save).not.toHaveBeenCalled();
       expect(notifications.findUserIdsWithPermission).not.toHaveBeenCalled();
       expect(notifications.signalChange).not.toHaveBeenCalled();
     });
@@ -1305,7 +1321,7 @@ describe('SaleService', () => {
         service.cancel(COMPANY, { userId: CASHIER, canCancelAny: false }, 'sale-1', { reason: 'X' }),
       ).rejects.toThrow(ForbiddenException);
       expect(txSaleRepo.save).not.toHaveBeenCalled();
-      expect(txRequestRepo.update).not.toHaveBeenCalled();
+      expect(txRequestRepo.save).not.toHaveBeenCalled();
     });
 
     it('cannot reach a sale of another company', async () => {
@@ -1316,7 +1332,7 @@ describe('SaleService', () => {
         NotFoundException,
       );
       expect(txSaleRepo.save).not.toHaveBeenCalled();
-      expect(txRequestRepo.update).not.toHaveBeenCalled();
+      expect(txRequestRepo.save).not.toHaveBeenCalled();
     });
 
     it('does not cancel a sale twice', async () => {
@@ -1327,7 +1343,7 @@ describe('SaleService', () => {
         ConflictException,
       );
       expect(txSaleRepo.save).not.toHaveBeenCalled();
-      expect(txRequestRepo.update).not.toHaveBeenCalled();
+      expect(txRequestRepo.save).not.toHaveBeenCalled();
     });
 
     it('does not cancel a completed sale: it was already paid', async () => {
@@ -1338,7 +1354,7 @@ describe('SaleService', () => {
         ConflictException,
       );
       expect(txSaleRepo.save).not.toHaveBeenCalled();
-      expect(txRequestRepo.update).not.toHaveBeenCalled();
+      expect(txRequestRepo.save).not.toHaveBeenCalled();
     });
 
     it('asks for a reason that is not just blank spaces, before touching the database', async () => {

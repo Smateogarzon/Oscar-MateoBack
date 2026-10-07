@@ -20,7 +20,7 @@ const request = (id: string, status: DiscountRequestStatus, saleId = 'sale-1') =
 function createMocks() {
   const requestRepo = {
     find: vi.fn().mockResolvedValue([]),
-    update: vi.fn().mockResolvedValue(undefined),
+    save: vi.fn().mockResolvedValue(undefined),
   };
   const manager = {
     getRepository: vi.fn((entity: unknown) => (entity === DiscountRequest ? requestRepo : undefined)),
@@ -190,17 +190,25 @@ describe('withdrawDiscountRequests', () => {
 
     expect(requestRepo.find).toHaveBeenCalledWith({
       where: { saleId: In(['sale-1', 'sale-2']), status: In(ACTIVE) },
+      lock: { mode: 'pessimistic_write' },
     });
-    expect(requestRepo.update).toHaveBeenCalledTimes(1);
-    expect(requestRepo.update).toHaveBeenCalledWith(
-      { id: In(['req-1', 'req-2']) },
-      {
+    expect(requestRepo.save).toHaveBeenCalledTimes(1);
+    expect(requestRepo.save).toHaveBeenCalledWith([
+      expect.objectContaining({
+        id: 'req-1',
         status: DiscountRequestStatus.CANCELLED,
         resolvedBy: 'cashier-1',
         resolvedAt: expect.any(Date),
         resolutionNotes: 'La venta se canceló',
-      },
-    );
+      }),
+      expect.objectContaining({
+        id: 'req-2',
+        status: DiscountRequestStatus.CANCELLED,
+        resolvedBy: 'cashier-1',
+        resolvedAt: expect.any(Date),
+        resolutionNotes: 'La venta se canceló',
+      }),
+    ]);
   });
 
   it('then clears the notices of what it cancelled, as whoever made the change', async () => {
@@ -236,10 +244,10 @@ describe('withdrawDiscountRequests', () => {
 
     await withdrawDiscountRequests(manager as never, notifications as never, params);
 
-    expect(requestRepo.update.mock.invocationCallOrder[0]).toBeLessThan(
+    expect(requestRepo.save.mock.invocationCallOrder[0]).toBeLessThan(
       notifications.markEntityRead.mock.invocationCallOrder[0],
     );
-    expect(requestRepo.update.mock.invocationCallOrder[0]).toBeLessThan(
+    expect(requestRepo.save.mock.invocationCallOrder[0]).toBeLessThan(
       notifications.signalChange.mock.invocationCallOrder[0],
     );
   });
@@ -254,6 +262,7 @@ describe('withdrawDiscountRequests', () => {
 
     expect(requestRepo.find).toHaveBeenCalledWith({
       where: { saleId: In(['sale-1', 'sale-2']), status: In([DiscountRequestStatus.PENDING]) },
+      lock: { mode: 'pessimistic_write' },
     });
   });
 
@@ -263,7 +272,7 @@ describe('withdrawDiscountRequests', () => {
 
     await withdrawDiscountRequests(manager as never, notifications as never, params);
 
-    expect(requestRepo.update).not.toHaveBeenCalled();
+    expect(requestRepo.save).not.toHaveBeenCalled();
     expect(notifications.findUserIdsWithPermission).not.toHaveBeenCalled();
     expect(notifications.markEntityRead).not.toHaveBeenCalled();
     expect(notifications.signalChange).not.toHaveBeenCalled();
@@ -275,7 +284,7 @@ describe('withdrawDiscountRequests', () => {
     await withdrawDiscountRequests(manager as never, notifications as never, { ...params, saleIds: [] });
 
     expect(manager.getRepository).not.toHaveBeenCalled();
-    expect(requestRepo.update).not.toHaveBeenCalled();
+    expect(requestRepo.save).not.toHaveBeenCalled();
     expect(notifications.signalChange).not.toHaveBeenCalled();
   });
 });

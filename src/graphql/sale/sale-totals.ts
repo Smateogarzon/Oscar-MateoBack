@@ -1,16 +1,13 @@
 import { Decimal } from 'decimal.js';
+import { roundMoney } from '../../common/utils/money.js';
 
-// Toda la aritmética de dinero de una venta, con Decimal y sin punto flotante. Se redondea a
-// centavos "mitad hacia arriba" y de forma explícita, sin depender de la configuración global.
-const CENTS = 2;
-
-// numeric(14,2) guarda hasta 999999999999.99: un monto de un billón o más no cabe.
-export const MAX_AMOUNT = new Decimal('1e12');
+// Toda la aritmética de dinero de una venta, con Decimal y sin punto flotante (los centavos, con
+// roundMoney).
 
 // Valor de una línea: cantidad × precio unitario (redondeado a centavos) y ese valor menos el
 // descuento de la línea.
 export function calculateLine(quantity: Decimal, unitPrice: Decimal, discountAmount: Decimal) {
-  const gross = quantity.times(unitPrice).toDecimalPlaces(CENTS, Decimal.ROUND_HALF_UP);
+  const gross = roundMoney(quantity.times(unitPrice));
   return { gross, total: gross.minus(discountAmount) };
 }
 

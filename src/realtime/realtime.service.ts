@@ -1,5 +1,6 @@
-import { HttpException, HttpStatus, Injectable, Logger } from '@nestjs/common';
+import { HttpException, HttpStatus, Injectable, Logger, Optional } from '@nestjs/common';
 import type { EntityManager, QueryRunner } from 'typeorm';
+import { PushService, type PushPayload } from '../push/push.service.js';
 import { RealtimeBus } from './realtime-bus.js';
 import type { RealtimeEvent } from './realtime-event.js';
 import { openStream, type StreamOptions } from './realtime-stream.js';
@@ -17,20 +18,33 @@ export const MAX_STREAMS_PER_USER = 20;
 export class RealtimeService {
   private readonly logger = new Logger(RealtimeService.name);
 
-  constructor(private readonly bus: RealtimeBus) {}
+  // El aviso del sistema (web push) es opcional: sin el módulo de push, el tiempo real sigue igual.
+  constructor(
+    private readonly bus: RealtimeBus,
+    @Optional() private readonly push?: PushService,
+  ) {}
 
   // Reparte los eventos ya. NUNCA lanza: avisar en vivo es un extra, y que falle no puede deshacer
   // (ni hacer fallar) lo que originó el aviso.
   publish(events: RealtimeEvent[]): void {
     for (const event of events) {
+      // El texto del aviso del sistema no viaja por el bus: va aparte, a los dispositivos de la persona.
+      const { push, ...signal } = event;
       try {
-        this.bus.publish(event);
+        this.bus.publish(signal);
       } catch (error) {
         this.logger.error(
           `No se pudo repartir un evento en vivo (${event.kind}): ${error instanceof Error ? error.message : String(error)}`,
         );
       }
+      if (push) this.sendPush(event.companyId, event.userId, push);
     }
+  }
+
+  // Manda el aviso del sistema sin esperarlo: si falla, no hay nada que deshacer.
+  private sendPush(companyId: string, userId: string, payload: PushPayload): void {
+    if (!this.push) return;
+    void this.push.dispatch(companyId, userId, payload).catch(() => undefined);
   }
 
   // Los eventos que nacen dentro de una transacción solo se reparten si esa transacción se

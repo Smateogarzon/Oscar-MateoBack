@@ -1,7 +1,7 @@
-import { UseGuards } from '@nestjs/common';
+import { ForbiddenException, UseGuards } from '@nestjs/common';
 import { Args, ID, Mutation, Query, Resolver } from '@nestjs/graphql';
 import { accessActor } from '../../common/access/access-actor.js';
-import type { CompanyAccess } from '../../common/access/company-access.js';
+import { type CompanyAccess, isCompanyAdmin } from '../../common/access/company-access.js';
 import {
   CurrentCompanyAccess,
   CurrentCompanyId,
@@ -86,6 +86,11 @@ export class UserResolver {
     @Args('id', { type: () => ID }) id: string,
     @Args('input') input: UpdateUserInput,
   ) {
+    // El correo (con el que se entra) y el documento (la contraseña inicial) solo los cambia un
+    // administrador; quien solo tiene users.manage edita los demás datos. El front ni los manda.
+    if ((input.email !== undefined || input.documentNumber !== undefined) && !isCompanyAdmin(access)) {
+      throw new ForbiddenException('Solo un administrador puede cambiar el correo o el documento de un usuario');
+    }
     return this.userService.update(companyId, accessActor(currentUser.sub, access), id, input);
   }
 

@@ -32,4 +32,22 @@ export const envValidationSchema = Joi.object({
   AWS_S3_BUCKET: Joi.string().required(),
   QZ_PRIVATE_KEY_B64: Joi.string().base64().required(),
   QZ_CERTIFICATE_B64: Joi.string().base64().required(),
+  // Avisos del sistema (web push, ver src/push). Las llaves VAPID las genera la empresa una vez; en
+  // producción son obligatorias, y en desarrollo, sin ellas, el aviso del sistema simplemente no sale.
+  VAPID_PUBLIC_KEY: Joi.when('NODE_ENV', {
+    is: 'production',
+    then: Joi.string().required(),
+    otherwise: Joi.string().allow('').optional(),
+  }),
+  VAPID_PRIVATE_KEY: Joi.when('NODE_ENV', {
+    is: 'production',
+    then: Joi.string().required(),
+    otherwise: Joi.string().allow('').optional(),
+  }),
+  // Dirección de contacto que los servicios de push pueden usar: `mailto:` o `https:`.
+  VAPID_SUBJECT: Joi.when('NODE_ENV', {
+    is: 'production',
+    then: Joi.string().pattern(/^(mailto:|https:)/).required(),
+    otherwise: Joi.string().allow('').optional(),
+  }),
 });

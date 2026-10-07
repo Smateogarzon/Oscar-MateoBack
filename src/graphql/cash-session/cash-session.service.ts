@@ -9,6 +9,8 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Decimal } from 'decimal.js';
 import { DataSource, EntityManager, FindOptionsWhere, In, Repository } from 'typeorm';
 import { type CompanyAccess, loadCompanyAccess } from '../../common/access/company-access.js';
+import { PLATFORM_ROLE } from '../../common/access/platform-role.js';
+import { hasStoreAccess } from '../../common/access/store-access.js';
 import { PermissionCode } from '../../common/enums/permission-code.enum.js';
 import { RecordStatus } from '../../common/enums/record-status.enum.js';
 import { mapPostgresWriteError } from '../../common/utils/postgres-error.js';
@@ -21,6 +23,9 @@ import {
 import { DiscountRequestStatus } from '../discount-request/entities/discount-request-status.enum.js';
 import { DiscountRequest } from '../discount-request/entities/discount-request.entity.js';
 import { runIdempotent } from '../idempotency/idempotency.js';
+import { InternalOrderService } from '../internal-order/internal-order.service.js';
+import { InventorySourceType } from '../inventory-movement/entities/inventory-source-type.enum.js';
+import { releaseReservations } from '../inventory-reservation/reserved-quantity.js';
 import { LocationType } from '../location/entities/location-type.enum.js';
 import { Location } from '../location/entities/location.entity.js';
 import { NotificationChannel } from '../notification/entities/notification-channel.enum.js';
@@ -31,6 +36,7 @@ import { SaleStatus } from '../sale/entities/sale-status.enum.js';
 import { Sale } from '../sale/entities/sale.entity.js';
 import { SalePayment } from '../sale-payment/entities/sale-payment.entity.js';
 import { RefundPayment } from '../sale-return/entities/refund-payment.entity.js';
+import { UserCompanyRole } from '../user-company-role/entities/user-company-role.entity.js';
 import { UserLocationAccess } from '../user-location-access/entities/user-location-access.entity.js';
 import { User } from '../user/entities/user.entity.js';
 import { CashActor } from './cash-actor.js';
@@ -76,9 +82,11 @@ export interface OpenedCashSession {
 
 // La empresa de un turno es la de la tienda de su caja: todo se hace dentro de la empresa activa y
 // un turno de otra empresa se responde como si no existiera.
-// El administrador abre el turno de una caja para UN cajero y lo cierra; el cajero asignado es el
-// único que cobra y mueve dinero en él. Cada cajero ve los turnos que se le asignaron; quien abre y
-// cierra turnos, o tiene el permiso de ver todo (CashActor.canViewAll), ve los de todos.
+// El administrador abre el turno de una caja para UN cajero y lo cierra; el cajero asignado es quien
+// normalmente cobra y mueve dinero en él, pero quien abre y cierra turnos (CashActor.canManageShifts,
+// permiso cash.open_close_shift) también puede intervenir cualquier turno sin asignárselo primero.
+// Cada cajero ve los turnos que se le asignaron; quien abre y cierra turnos, o tiene el permiso de
+// ver todo (CashActor.canViewAll), ve los de todos.
 // Toda operación que cambia un turno lo bloquea (`lockOpen`) hasta que termina su transacción: si
 // además toca una venta, la venta se bloquea ANTES (ver SalePaymentService.complete), y así nunca
 // se cruzan dos operaciones.
@@ -89,6 +97,7 @@ export class CashSessionService {
     private readonly cashSessionRepository: Repository<CashSession>,
     private readonly dataSource: DataSource,
     private readonly notifications: NotificationService,
+    private readonly internalOrders: InternalOrderService,
   ) {}
 
   // Los más recientes primero, acotados: `limit` (300 por defecto, 1000 máximo) con `offset`. Un turno
@@ -138,23 +147,36 @@ export class CashSessionService {
   }
 
   // A quién se le puede dar el turno de una caja de esta tienda: usuarios activos, con acceso activo
-  // a la tienda (Configuración → Personal por ubicación) y con un rol que les dé el permiso de cobrar.
-  // Son las mismas condiciones con las que `open` acepta al cajero, así que quien aparece en esta
-  // lista no será rechazado por permisos. (Que ya tenga otro turno abierto sí lo dice `open`: eso
-  // cambia en cada momento y no es una cualidad de la persona.)
+  // a la tienda (Configuración → Personal por ubicación, o el super admin, que entra a todas; ver
+  // hasStoreAccess) y con un rol que les dé el permiso de cobrar. Son las mismas condiciones con las
+  // que `open` acepta al cajero, así que quien aparece en esta lista no será rechazado por permisos.
+  // (Que ya tenga otro turno abierto sí lo dice `open`: eso cambia en cada momento y no es una
+  // cualidad de la persona.)
   async findCashierCandidates(companyId: string, storeId: string): Promise<User[]> {
     const store = await this.dataSource
       .getRepository(Location)
       .findOneBy({ id: storeId, companyId, type: LocationType.STORE });
     if (!store) throw new NotFoundException(`Tienda ${storeId} no encontrada`);
 
-    const withAccess = await this.dataSource.getRepository(UserLocationAccess).find({
-      where: { locationId: store.id, status: RecordStatus.ACTIVE, user: { status: RecordStatus.ACTIVE } },
-      relations: { user: true },
-    });
+    const [withAccess, platformMembers] = await Promise.all([
+      this.dataSource.getRepository(UserLocationAccess).find({
+        where: { locationId: store.id, status: RecordStatus.ACTIVE, user: { status: RecordStatus.ACTIVE } },
+        relations: { user: true },
+      }),
+      this.dataSource.getRepository(UserCompanyRole).find({
+        where: {
+          companyId,
+          status: RecordStatus.ACTIVE,
+          role: { ...PLATFORM_ROLE, status: RecordStatus.ACTIVE },
+          user: { status: RecordStatus.ACTIVE },
+        },
+        relations: { user: true },
+      }),
+    ]);
+    const users = new Map([...withAccess, ...platformMembers].map(({ user }) => [user.id, user]));
 
     const verdicts = await Promise.all(
-      withAccess.map(async ({ user }) =>
+      [...users.values()].map(async (user) =>
         canCollect(await loadCompanyAccess(this.dataSource, user.id, companyId)) ? user : null,
       ),
     );
@@ -240,16 +262,12 @@ export class CashSessionService {
       throw new BadRequestException('Esa cuenta no está activa, así que no puede ser el cajero del turno');
     }
 
-    // El cajero trabaja en la tienda de la caja (Configuración → Personal por ubicación). El
+    // El cajero trabaja en la tienda de la caja (Configuración → Personal por ubicación), con la misma
+    // regla con la que después cobra (hasStoreAccess: el super admin entra a todas). El
     // administrador que abre el turno no necesita ese acceso. Se comprueba con la caja ya
     // bloqueada: si otro administrador le está quitando el acceso, espera a que termine y ve el
     // resultado (quitarlo mientras se abre el turno dejaría a un cajero cobrando sin acceso).
-    const cashierHasAccess = await manager.getRepository(UserLocationAccess).existsBy({
-      userId: input.cashierId,
-      locationId: register.storeId,
-      status: RecordStatus.ACTIVE,
-    });
-    if (!cashierHasAccess) {
+    if (!(await hasStoreAccess(manager, input.cashierId, register.storeId))) {
       throw new BadRequestException('El cajero no tiene acceso a la tienda de esta caja');
     }
 
@@ -308,8 +326,8 @@ export class CashSessionService {
   }
 
   // Cierra el turno con el efectivo contado. El servidor calcula lo esperado (y con el turno
-  // bloqueado, así ningún cobro ni movimiento entra a medias) y la diferencia; si hay diferencia,
-  // hacen falta las notas. Lo cierra el administrador, cualquiera, no solo quien lo abrió. Las
+  // bloqueado, así ningún cobro ni movimiento entra a medias) y la diferencia. Lo cierra el
+  // administrador, cualquiera, no solo quien lo abrió. Las
   // ventas en borrador que queden sin cobrar se borran: solo se cobran en su turno, y este ya no
   // las puede recibir. Con `idempotencyKey`, repetir la petición devuelve el turno ya cerrado en vez de
   // fallar con "el turno ya está cerrado".
@@ -344,11 +362,6 @@ export class CashSessionService {
 
           const { expectedCash } = await this.buildSummary(manager, session);
           const difference = counted.minus(expectedCash);
-          if (!difference.isZero() && !notes) {
-            throw new BadRequestException(
-              `Lo contado (${counted.toFixed(2)}) no coincide con lo esperado (${expectedCash.toFixed(2)}): explica la diferencia en las notas`,
-            );
-          }
 
           session.status = CashSessionStatus.CLOSED;
           session.closedBy = actor.userId;
@@ -420,11 +433,25 @@ export class CashSessionService {
     ]);
     await clearDiscountRequestNotices(manager, this.notifications, companyId, requests, actorId);
 
+    // Lo que apartaban se suelta: un borrador que se descarta no puede dejar bloqueado el último par
+    // para los demás vendedores del día siguiente.
+    await releaseReservations(manager, InventorySourceType.SALE, saleIds);
+    // Los borradores que cobraban una orden de venta: la orden sigue por cobrar (otro turno la toma).
+    for (const draft of drafts) {
+      if (draft.internalOrderId) {
+        await this.internalOrders.restoreAfterSaleDiscarded(manager, companyId, draft.internalOrderId, actorId);
+      }
+    }
+
     // Las líneas primero: las filas de descuento por línea (discount_request_items) se van con
     // ellas en cascada, y así ya no queda nada que impida borrar las solicitudes.
     await manager.getRepository(SaleItem).delete({ saleId: In(saleIds) });
-    await manager.getRepository(DiscountRequest).delete({ saleId: In(saleIds) });
-    await manager.getRepository(Sale).delete({ id: In(saleIds) });
+    const allRequests = await manager.getRepository(DiscountRequest).find({
+      where: { saleId: In(saleIds) },
+      lock: { mode: 'pessimistic_write' },
+    });
+    await manager.getRepository(DiscountRequest).remove(allRequests);
+    await manager.getRepository(Sale).remove(drafts);
   }
 
   // El código del turno, para el administrador que lo tiene que dar al cajero. Solo de un turno
@@ -482,18 +509,19 @@ export class CashSessionService {
   }
 
   // Trae el turno bloqueado hasta que la transacción termine, para que cobre o mueva dinero SU
-  // cajero: el asignado, nadie más (un solo cajero por caja), tampoco el administrador que lo abrió:
-  // si tiene que cobrar, se asigna como cajero. Exige que el turno siga abierto. Devuelve el turno con
-  // su caja (`cashRegister`) cargada. Es pública porque SaleService, CashMovementService,
-  // SalePaymentService y SaleReturnService la usan: todo lo que cambia un turno ocurre con el turno
-  // bloqueado, y por eso un cierre nunca deja pasar un cobro a medias.
+  // cajero: el asignado, nadie más (un solo cajero por caja) — salvo quien abre y cierra turnos
+  // (CashActor.canManageShifts), que interviene cualquier turno sin asignárselo. Exige que el turno
+  // siga abierto. Devuelve el turno con su caja (`cashRegister`) cargada. Es pública porque
+  // SaleService, CashMovementService, SalePaymentService y SaleReturnService la usan: todo lo que
+  // cambia un turno ocurre con el turno bloqueado, y por eso un cierre nunca deja pasar un cobro a
+  // medias.
   lockOpen(
     manager: EntityManager,
     companyId: string,
     id: string,
     actor: CashActor,
   ): Promise<CashSession> {
-    return this.lock(manager, companyId, id, actor.userId);
+    return this.lock(manager, companyId, id, actor.canManageShifts ? null : actor.userId);
   }
 
   // Lo mismo, pero para el administrador que cierra el turno o cambia su código: cualquier turno

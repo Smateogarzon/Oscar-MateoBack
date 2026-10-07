@@ -1,4 +1,5 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
+import { assertDestructiveDownAllowed } from '../../config/destructive-down.js';
 
 // Un permiso de caja que faltaba: cash.view_all, ver el historial de TODOS los turnos y movimientos
 // de caja; sin él, cada cajero ve solo los turnos que se le asignaron.
@@ -30,6 +31,7 @@ export class SeedCashPermissions1789790000000 implements MigrationInterface {
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
+    assertDestructiveDownAllowed(this.name);
     await queryRunner.query(`
       DELETE FROM "role_permissions" WHERE "permissionId" IN (
         SELECT "id" FROM "permissions" WHERE "code" = 'cash.view_all'

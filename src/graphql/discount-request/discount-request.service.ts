@@ -17,6 +17,7 @@ import { NotificationType } from '../notification/entities/notification-type.enu
 import { NotificationService } from '../notification/notification.service.js';
 import { SaleItem } from '../sale/entities/sale-item.entity.js';
 import { Sale } from '../sale/entities/sale.entity.js';
+import { loadSaleNumber } from '../sale/sale-number-of.js';
 import { canReadSale, SaleActor } from '../sale/sale-actor.js';
 import { SaleService } from '../sale/sale.service.js';
 import { ApproveDiscountRequestInput } from './dto/approve-discount-request.input.js';
@@ -107,15 +108,9 @@ export class DiscountRequestService {
     return request;
   }
 
-  // El número de la venta, para mostrarlo en la lista sin pedir todas las ventas: null mientras la venta
-  // es un borrador (todavía no tiene número). Las listas ya traen la venta cargada; una solicitud suelta
-  // (el resultado de una mutación) la busca aquí.
-  async saleNumberOf(request: DiscountRequest): Promise<string | null> {
-    if (request.sale) return request.sale.saleNumber;
-    const sale = await this.dataSource
-      .getRepository(Sale)
-      .findOne({ where: { id: request.saleId }, select: { id: true, saleNumber: true } });
-    return sale?.saleNumber ?? null;
+  // El número de la venta, para la lista (ver sale-number-of.ts).
+  saleNumberOf(request: DiscountRequest): Promise<string | null> {
+    return loadSaleNumber(this.dataSource, request);
   }
 
   // Los montos por línea de una solicitud; vacío si es sobre toda la venta.

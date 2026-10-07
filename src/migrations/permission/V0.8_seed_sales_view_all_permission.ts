@@ -1,4 +1,5 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
+import { assertDestructiveDownAllowed } from '../../config/destructive-down.js';
 
 // Un permiso de ventas que faltaba: sales.view_all, ver el histórico de ventas de TODOS los
 // cajeros y vendedores; sin él, cada quien ve solo las que cobró o las que vendió (ver
@@ -31,6 +32,7 @@ export class SeedSalesViewAllPermission1789820000000 implements MigrationInterfa
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
+    assertDestructiveDownAllowed(this.name);
     await queryRunner.query(`
       DELETE FROM "role_permissions" WHERE "permissionId" IN (
         SELECT "id" FROM "permissions" WHERE "code" = 'sales.view_all'

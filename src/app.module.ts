@@ -5,15 +5,13 @@ import { DecimalScalar } from './common/scalars/decimal.scalar.js';
 import { join } from 'node:path';
 import { LoggerModule } from 'nestjs-pino';
 import { Module, RequestMethod } from '@nestjs/common';
-import { APP_FILTER, APP_GUARD } from '@nestjs/core';
+import { APP_FILTER, APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { ApolloDriver, type ApolloDriverConfig } from '@nestjs/apollo';
 import { GraphQLModule } from '@nestjs/graphql';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ThrottlerModule, seconds } from '@nestjs/throttler';
 import { ApolloArmor } from '@escape.tech/graphql-armor';
-import { AppController } from './app.controller.js';
-import { AppService } from './app.service.js';
 import { AppResolver } from './app.resolver.js';
 import { GqlThrottlerGuard } from './common/guards/gql-throttler.guard.js';
 import { GqlAllExceptionsFilter } from './common/filters/gql-all-exceptions.filter.js';
@@ -27,6 +25,20 @@ import { UserModule } from './graphql/user/user.module.js';
 import { UserCompanyRoleModule } from './graphql/user-company-role/user-company-role.module.js';
 import { RolePermissionModule } from './graphql/role-permission/role-permission.module.js';
 import { UserLocationAccessModule } from './graphql/user-location-access/user-location-access.module.js';
+import { BrandModule } from './graphql/brand/brand.module.js';
+import { CategoryModule } from './graphql/category/category.module.js';
+import { ColorModule } from './graphql/color/color.module.js';
+import { SizeModule } from './graphql/size/size.module.js';
+import { ProductModule } from './graphql/product/product.module.js';
+import { ProductVariantModule } from './graphql/product-variant/product-variant.module.js';
+import { InventoryLocationModule } from './graphql/inventory-location/inventory-location.module.js';
+import { InventoryBalanceModule } from './graphql/inventory-balance/inventory-balance.module.js';
+import { InventoryMovementModule } from './graphql/inventory-movement/inventory-movement.module.js';
+import { InventoryReservationModule } from './graphql/inventory-reservation/inventory-reservation.module.js';
+import { IncidentModule } from './graphql/incident/incident.module.js';
+import { WriteOffModule } from './graphql/write-off/write-off.module.js';
+import { PurchaseOrderModule } from './graphql/purchase-order/purchase-order.module.js';
+import { InternalOrderModule } from './graphql/internal-order/internal-order.module.js';
 import { SaleModule } from './graphql/sale/sale.module.js';
 import { DiscountRequestModule } from './graphql/discount-request/discount-request.module.js';
 import { PaymentMethodModule } from './graphql/payment-method/payment-method.module.js';
@@ -39,10 +51,13 @@ import { SaleReturnModule } from './graphql/sale-return/sale-return.module.js';
 import { NotificationModule } from './graphql/notification/notification.module.js';
 import { IdempotencyModule } from './graphql/idempotency/idempotency.module.js';
 import { RealtimeModule } from './realtime/realtime.module.js';
+import { PushModule } from './push/push.module.js';
 import { graphqlContext, wsOnClose, wsOnConnect, wsOnSubscribe } from './realtime/ws-context.js';
 import { StorageModule } from './common/storage/storage.module.js';
 import { UploadModule } from './uploads/upload.module.js';
 import { PosHardwareModule } from './pos-hardware/pos-hardware.module.js';
+import { AuditModule } from './audit/audit.module.js';
+import { AuditContextInterceptor } from './audit/audit-context.interceptor.js';
 
 const { validationRules, plugins } = new ApolloArmor().protect();
 
@@ -134,6 +149,20 @@ const { validationRules, plugins } = new ApolloArmor().protect();
     UserCompanyRoleModule,
     RolePermissionModule,
     UserLocationAccessModule,
+    BrandModule,
+    CategoryModule,
+    ColorModule,
+    SizeModule,
+    ProductModule,
+    ProductVariantModule,
+    InventoryLocationModule,
+    InventoryBalanceModule,
+    InventoryMovementModule,
+    InventoryReservationModule,
+    IncidentModule,
+    WriteOffModule,
+    PurchaseOrderModule,
+    InternalOrderModule,
     SaleModule,
     DiscountRequestModule,
     PaymentMethodModule,
@@ -145,19 +174,20 @@ const { validationRules, plugins } = new ApolloArmor().protect();
     SaleReturnModule,
     NotificationModule,
     IdempotencyModule,
+    AuditModule,
     RealtimeModule,
+    PushModule,
     StorageModule,
     UploadModule,
     PosHardwareModule,
   ],
-  controllers: [AppController],
   providers: [
-    AppService,
     AppResolver,
     DecimalScalar,
     GraphqlLoggingPlugin,
     { provide: APP_GUARD, useClass: GqlThrottlerGuard },
     { provide: APP_FILTER, useClass: GqlAllExceptionsFilter },
+    { provide: APP_INTERCEPTOR, useClass: AuditContextInterceptor },
   ],
 })
 export class AppModule {}

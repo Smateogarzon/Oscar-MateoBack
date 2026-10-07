@@ -13,6 +13,8 @@ import type { AccessActor } from '../../common/access/access-actor.js';
 import {
   assertHoldsPermissions,
   assertStillHasAdmin,
+  GRANT_MESSAGE,
+  TOUCH_MESSAGE,
   countCompanyAdmins,
   lockCompany,
   permissionCodesOfRole,
@@ -21,6 +23,7 @@ import {
 import { isPlatformRole, PLATFORM_ROLE } from '../../common/access/platform-role.js';
 import { RecordStatus } from '../../common/enums/record-status.enum.js';
 import { definedFields } from '../../common/utils/defined-fields.js';
+import { hashPassword } from '../../common/utils/password.js';
 import { mapPostgresWriteError } from '../../common/utils/postgres-error.js';
 import { CashSessionStatus } from '../cash-session/entities/cash-session-status.enum.js';
 import { CashSession } from '../cash-session/entities/cash-session.entity.js';
@@ -31,11 +34,6 @@ import { ChangePasswordInput } from './dto/change-password.input.js';
 import { CreateUserInput } from './dto/create-user.input.js';
 import { UpdateUserInput } from './dto/update-user.input.js';
 import { User } from './entities/user.entity.js';
-
-const PASSWORD_SALT_ROUNDS = 10;
-
-const GRANT_MESSAGE = 'No puedes dar un rol con permisos que tú no tienes';
-const TOUCH_MESSAGE = 'No puedes modificar a alguien con más permisos que tú';
 
 // `users` es una tabla común a todas las empresas: un usuario "es de" una empresa cuando
 // tiene una membresía en ella (user_company_roles). Lo que se lista, se lee o se modifica
@@ -141,7 +139,7 @@ export class UserService {
               throw new ConflictException('Ya existe un usuario con ese número de documento');
             }
 
-            const passwordHash = await bcrypt.hash(documentNumber, PASSWORD_SALT_ROUNDS);
+            const passwordHash = await hashPassword(documentNumber);
 
             const user = await repo.save(
               repo.create({
@@ -183,11 +181,32 @@ export class UserService {
   ): Promise<User> {
     await this.findManageable(companyId, actor, id);
 
-    return this.dataSource.transaction(async (manager) => {
-      const user = await this.lockUser(manager, id);
-      Object.assign(user, definedFields(input));
-      return manager.getRepository(User).save(user);
-    });
+    const { email: rawEmail, documentNumber: rawDocumentNumber, ...rest } = input;
+    const email = rawEmail !== undefined ? rawEmail.trim().toLowerCase() : undefined;
+    const documentNumber = rawDocumentNumber !== undefined ? rawDocumentNumber.trim() : undefined;
+
+    try {
+      return await this.dataSource.transaction(async (manager) => {
+        const repo = manager.getRepository(User);
+        const user = await this.lockUser(manager, id);
+
+        if (email !== undefined) {
+          const existing = await repo.findOneBy({ email });
+          if (existing && existing.id !== id) {
+            throw new ConflictException(`Ya existe un usuario con el email ${email}`);
+          }
+        }
+        // La cédula es la contraseña inicial: dos cuentas con la misma tendrían la misma clave.
+        if (documentNumber !== undefined && (await repo.existsBy({ documentNumber, id: Not(id) }))) {
+          throw new ConflictException('Ya existe un usuario con ese número de documento');
+        }
+
+        Object.assign(user, definedFields({ ...rest, email, documentNumber }));
+        return repo.save(user);
+      });
+    } catch (error) {
+      throw mapPostgresWriteError(error, email !== undefined ? { unique: `Ya existe un usuario con el email ${email}` } : {});
+    }
   }
 
   async deactivate(companyId: string, actor: AccessActor, id: string): Promise<User> {
@@ -261,7 +280,7 @@ export class UserService {
         throw new BadRequestException('El usuario no tiene número de documento registrado');
       }
 
-      user.passwordHash = await bcrypt.hash(user.documentNumber, PASSWORD_SALT_ROUNDS);
+      user.passwordHash = await hashPassword(user.documentNumber);
       user.mustChangePassword = true;
       user.passwordChangedAt = new Date();
       return manager.getRepository(User).save(user);
@@ -292,7 +311,7 @@ export class UserService {
         );
       }
 
-      user.passwordHash = await bcrypt.hash(input.newPassword, PASSWORD_SALT_ROUNDS);
+      user.passwordHash = await hashPassword(input.newPassword);
       user.mustChangePassword = false;
       user.passwordChangedAt = new Date();
       return manager.getRepository(User).save(user);
