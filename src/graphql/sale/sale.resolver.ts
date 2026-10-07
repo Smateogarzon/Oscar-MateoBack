@@ -98,6 +98,13 @@ export class SaleResolver {
     return typeof sale.itemCount === 'number' ? sale.itemCount : this.saleService.countItems(sale.id);
   }
 
+  // El número de la orden de venta (SO) que cobró esta venta, para Caja y el recibo ("#SO-000125").
+  // Casi ninguna venta tiene orden: solo esas consultan.
+  @ResolveField(() => String, { nullable: true })
+  internalOrderNumber(@Parent() sale: SaleObjectType) {
+    return sale.internalOrderId ? this.saleService.internalOrderNumberOf(sale.internalOrderId) : null;
+  }
+
   // Las ventas cobradas de un turno, para su recibo de cierre. Autorizado igual que
   // CashMovementResolver.cashMovements (por el turno, no por sales.view): quien puede ver el
   // turno ve sus ventas.
@@ -204,6 +211,26 @@ export class SaleResolver {
     @Args('itemId', { type: () => ID }) itemId: string,
   ) {
     return this.saleService.removeItem(companyId, cashActor(currentUser.sub, access.permissionCodes), saleId, itemId);
+  }
+
+  // La caja abre el cobro de una orden de venta que el vendedor mandó a caja (ver
+  // SaleService.createFromInternalOrder). Cobrarla después es el cobro de siempre (completeSale).
+  @Mutation(() => SaleObjectType)
+  @RequireAnyPermission(PermissionCode.CASH_CHARGE_ORDERS, PermissionCode.CASH_REGISTER_PAYMENT)
+  startSaleFromInternalOrder(
+    @CurrentCompanyId() companyId: string,
+    @CurrentCompanyAccess() access: CompanyAccess,
+    @CurrentUser() currentUser: JwtPayload,
+    @Args('internalOrderId', { type: () => ID }) internalOrderId: string,
+    @Args('cashSessionId', { type: () => ID }) cashSessionId: string,
+    @IdempotencyKeyHeader() idempotencyKey?: string,
+  ) {
+    return this.saleService.createFromInternalOrder(
+      companyId,
+      cashActor(currentUser.sub, access.permissionCodes),
+      { internalOrderId, cashSessionId },
+      idempotencyKey,
+    );
   }
 
   // Anular exige `sales.cancel` (cualquier venta), salvo una excepción: quien creó una venta

@@ -26,6 +26,8 @@ import { clearShipment, overageItems, registerShipment } from './purchase-order-
 import { resolveSupplierId } from './purchase-order-supplier.js';
 import {
   announcePurchaseOrderChange,
+  notifyPurchaseOrderIncident,
+  settlePurchaseOrderIncidentNotices,
   type PurchaseOrderAnnouncement,
   type PurchaseOrderAudience,
 } from './purchase-order-watchers.js';
@@ -201,6 +203,7 @@ export class PurchaseOrderService {
           ? { type: NotificationType.PURCHASE_ORDER_OVERAGE_PENDING, to: ['PURCHASING'] }
           : { type: NotificationType.PURCHASE_ORDER_SHIPPED, to: ['PURCHASING', 'WAREHOUSE'] },
       ]);
+      if (hasIncidents) await notifyPurchaseOrderIncident(manager, this.notifications, companyId, dispatched, actorUserId);
       return dispatched;
     });
   }
@@ -265,6 +268,7 @@ export class PurchaseOrderService {
             ]
           : [{ type: NotificationType.PURCHASE_ORDER_OVERAGE_REJECTED, to: ['SUPPLIER'] }],
       );
+      await settlePurchaseOrderIncidentNotices(manager, this.notifications, resolved.id);
       return resolved;
     });
   }
@@ -300,6 +304,7 @@ export class PurchaseOrderService {
       await this.announce(manager, companyId, received, actorUserId, [
         { type: NotificationType.PURCHASE_ORDER_RECEIVED, to: ['SUPPLIER'] },
       ]);
+      if (mismatched) await notifyPurchaseOrderIncident(manager, this.notifications, companyId, received, actorUserId);
       return received;
     });
   }

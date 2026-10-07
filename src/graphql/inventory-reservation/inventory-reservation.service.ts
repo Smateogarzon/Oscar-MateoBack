@@ -115,12 +115,15 @@ export class InventoryReservationService {
   // Deja lo apartado por un documento igual a `desired` (variante → cantidad), y nada más: lo que ya
   // no está en el documento se suelta y lo que cambió de cantidad se vuelve a apartar. Se llama cada
   // vez que cambian las líneas de una venta en curso, así lo reservado y lo que se va a cobrar nunca
-  // se separan. La bodega la elige `findStockLocationForSale` (la que más disponible tenga).
+  // se separan. La bodega la elige `findStockLocationForSale` (la que más disponible tenga), salvo que
+  // venga `preferredLocationId`: una venta que cobra una orden de venta (SO) aparta en el STOCK de la
+  // tienda a la que el corredor ya trajo la mercancía, no en "la que más tenga".
   async syncForSource(
     manager: EntityManager,
     companyId: string,
     source: ReservationSourceInfo,
     desired: Map<string, Decimal>,
+    preferredLocationId?: string,
   ): Promise<void> {
     const repo = manager.getRepository(InventoryReservation);
     const existing = await repo.findBy({ sourceType: source.sourceType, sourceId: source.sourceId });
@@ -144,12 +147,9 @@ export class InventoryReservationService {
     }
 
     for (const [productVariantId, quantity] of pending) {
-      const inventoryLocationId = await this.balances.findStockLocationForSale(
-        manager,
-        companyId,
-        productVariantId,
-        quantity,
-      );
+      const inventoryLocationId =
+        preferredLocationId ??
+        (await this.balances.findStockLocationForSale(manager, companyId, productVariantId, quantity));
       await this.reserveInTransaction(manager, companyId, {
         productVariantId,
         inventoryLocationId,

@@ -78,6 +78,42 @@ const TEXTS: Record<
     title: 'Devolución cancelada',
     message: (p) => `${p.actorName} canceló la devolución ${ref(p)}.`,
   },
+  [NotificationType.PURCHASE_ORDER_INCIDENT]: {
+    title: 'Orden con incidencia',
+    message: (p) => `${p.actorName} registró una incidencia en la orden ${ref(p)}.`,
+  },
+  [NotificationType.ORDER_REQUESTED]: {
+    title: 'Orden nueva para bodega',
+    message: (p) => `${p.actorName} pidió la orden #${ref(p)}${p.locationName ? ` para ${p.locationName}` : ''}.`,
+  },
+  [NotificationType.ORDER_READY_FOR_RUNNER]: {
+    title: 'Orden lista para recoger',
+    message: (p) => `La orden #${ref(p)} está lista${p.locationName ? ` en ${p.locationName}` : ''}: ya la puede recoger un corredor.`,
+  },
+  [NotificationType.ORDER_DELIVERED]: {
+    title: 'Orden entregada',
+    message: (p) => `${p.actorName} entregó la orden #${ref(p)}${p.locationName ? ` en ${p.locationName}` : ''}.`,
+  },
+  [NotificationType.ORDER_PENDING_PAYMENT]: {
+    title: 'Orden por cobrar',
+    message: (p) => `${p.actorName} envió a caja la orden #${ref(p)}: el cliente la va a pagar.`,
+  },
+  [NotificationType.ORDER_HURRY]: {
+    title: 'Apuran una orden',
+    message: (p) => `${p.actorName} pide apurar la orden #${ref(p)}: el cliente está esperando.`,
+  },
+  [NotificationType.ORDER_STOCK_QUESTION]: {
+    title: 'Consulta de existencia',
+    message: (p) => `${p.actorName} pregunta por la existencia de la orden #${ref(p)}.`,
+  },
+  [NotificationType.ORDER_RUNNER_CALLED]: {
+    title: 'Preguntan por una orden',
+    message: (p) => `${p.actorName} pregunta por la orden #${ref(p)} que llevas.`,
+  },
+  [NotificationType.ORDER_CORRECTION]: {
+    title: 'Retorno a bodega por error',
+    message: (p) => `${p.actorName} reportó que llegó una referencia equivocada en la orden #${ref(p)}.`,
+  },
   [NotificationType.INVENTORY_LOW_STOCK]: {
     title: 'Existencia baja',
     message: (p) => {
@@ -125,6 +161,8 @@ const TYPES_WITH_NOTES = new Set<NotificationType>([
   NotificationType.RETURN_CANCELLED,
   NotificationType.PURCHASE_ORDER_CANCELLED,
   NotificationType.PURCHASE_ORDER_OVERAGE_REJECTED,
+  NotificationType.ORDER_STOCK_QUESTION,
+  NotificationType.ORDER_CORRECTION,
 ]);
 
 export function buildNotificationText(

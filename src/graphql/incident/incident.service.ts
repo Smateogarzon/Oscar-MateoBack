@@ -3,7 +3,10 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, EntityManager, Repository } from 'typeorm';
 import { Location } from '../location/entities/location.entity.js';
 import { runIdempotent } from '../idempotency/idempotency.js';
+import { NotificationService } from '../notification/notification.service.js';
 import { ProductVariant } from '../product-variant/entities/product-variant.entity.js';
+import { PurchaseOrderItem } from '../purchase-order/entities/purchase-order-item.entity.js';
+import { settlePurchaseOrderIncidentNotices } from '../purchase-order/purchase-order-watchers.js';
 import { CreateIncidentInput } from './dto/create-incident.input.js';
 import { Incident } from './entities/incident.entity.js';
 import { IncidentStatus } from './entities/incident-status.enum.js';
@@ -27,6 +30,7 @@ export class IncidentService {
     @InjectRepository(Incident)
     private readonly incidentRepository: Repository<Incident>,
     private readonly dataSource: DataSource,
+    private readonly notifications: NotificationService,
   ) {}
 
   // `supplierId` acota a las novedades de las líneas de SUS órdenes (las que nacen del recibo o del
@@ -140,7 +144,9 @@ export class IncidentService {
       incident.status = IncidentStatus.RESOLVED;
       incident.resolvedBy = userId;
       incident.resolvedAt = new Date();
-      return manager.getRepository(Incident).save(incident);
+      const saved = await manager.getRepository(Incident).save(incident);
+      await this.settlePurchaseOrderNotice(manager, saved);
+      return saved;
     });
   }
 
@@ -152,8 +158,18 @@ export class IncidentService {
       incident.status = IncidentStatus.CANCELLED;
       incident.resolvedBy = userId;
       incident.resolvedAt = new Date();
-      return manager.getRepository(Incident).save(incident);
+      const saved = await manager.getRepository(Incident).save(incident);
+      await this.settlePurchaseOrderNotice(manager, saved);
+      return saved;
     });
+  }
+
+  // Una novedad de una línea de orden de compra cerrada puede ser la última que le quedaba a la orden:
+  // entonces su aviso de "orden con incidencia" deja de estar pendiente.
+  private async settlePurchaseOrderNotice(manager: EntityManager, incident: Incident): Promise<void> {
+    if (incident.entityType !== 'PURCHASE_ORDER_ITEM') return;
+    const item = await manager.getRepository(PurchaseOrderItem).findOne({ where: { id: incident.entityId! }, select: { purchaseOrderId: true } });
+    if (item) await settlePurchaseOrderIncidentNotices(manager, this.notifications, item.purchaseOrderId);
   }
 
   private assertOpen(incident: Incident): void {

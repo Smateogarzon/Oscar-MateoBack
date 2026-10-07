@@ -23,6 +23,7 @@ import {
 import { DiscountRequestStatus } from '../discount-request/entities/discount-request-status.enum.js';
 import { DiscountRequest } from '../discount-request/entities/discount-request.entity.js';
 import { runIdempotent } from '../idempotency/idempotency.js';
+import { InternalOrderService } from '../internal-order/internal-order.service.js';
 import { InventorySourceType } from '../inventory-movement/entities/inventory-source-type.enum.js';
 import { releaseReservations } from '../inventory-reservation/reserved-quantity.js';
 import { LocationType } from '../location/entities/location-type.enum.js';
@@ -96,6 +97,7 @@ export class CashSessionService {
     private readonly cashSessionRepository: Repository<CashSession>,
     private readonly dataSource: DataSource,
     private readonly notifications: NotificationService,
+    private readonly internalOrders: InternalOrderService,
   ) {}
 
   // Los más recientes primero, acotados: `limit` (300 por defecto, 1000 máximo) con `offset`. Un turno
@@ -434,6 +436,12 @@ export class CashSessionService {
     // Lo que apartaban se suelta: un borrador que se descarta no puede dejar bloqueado el último par
     // para los demás vendedores del día siguiente.
     await releaseReservations(manager, InventorySourceType.SALE, saleIds);
+    // Los borradores que cobraban una orden de venta: la orden sigue por cobrar (otro turno la toma).
+    for (const draft of drafts) {
+      if (draft.internalOrderId) {
+        await this.internalOrders.restoreAfterSaleDiscarded(manager, companyId, draft.internalOrderId, actorId);
+      }
+    }
 
     // Las líneas primero: las filas de descuento por línea (discount_request_items) se van con
     // ellas en cascada, y así ya no queda nada que impida borrar las solicitudes.

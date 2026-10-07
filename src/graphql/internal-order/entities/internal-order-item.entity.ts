@@ -6,13 +6,16 @@ import { Incident } from '../../incident/entities/incident.entity.js';
 import { ProductVariant } from '../../product-variant/entities/product-variant.entity.js';
 import { InternalOrder } from './internal-order.entity.js';
 
-// Una línea de un pedido interno. `quantity` es lo pedido; `foundQuantity` es lo que bodega
-// encontró de verdad al alistar (null hasta entonces). Si `foundQuantity` < `quantity`,
-// InternalOrderService.markReady enlaza una novedad por `incidentId`. `unitPrice`/`discountAmount`
-// solo importan en un pedido CUSTOMER_REQUEST (lo que el cliente paga); en los demás tipos quedan
-// en null/0 y no significan nada.
+// Una línea de una versión de la orden. Las líneas vigentes son las de la versión actual de la
+// orden (`versionNumber` = InternalOrder.versionNumber); las de versiones anteriores se conservan
+// tal cual, como histórico.
+//
+// `quantity` es lo pedido. `foundQuantity` es lo que bodega encontró al alistar (o lo que bodega
+// contó al recibir una devolución); null hasta entonces. Si es menos, la línea queda con su
+// novedad (`incidentId`). `unitPrice`/`discountAmount` solo importan en una SO: es lo que el
+// cliente paga, y pasa tal cual a la venta al cobrarla.
 @Entity('internal_order_items')
-@Index(['internalOrderId'])
+@Index(['internalOrderId', 'versionNumber'])
 @Index(['productVariantId'])
 export class InternalOrderItem extends ImmutableEntity {
   @Column({ type: 'uuid' })
@@ -21,6 +24,9 @@ export class InternalOrderItem extends ImmutableEntity {
   @ManyToOne(() => InternalOrder, { nullable: false })
   @JoinColumn({ name: 'internalOrderId' })
   internalOrder: InternalOrder;
+
+  @Column({ type: 'int' })
+  versionNumber: number;
 
   @Column({ type: 'uuid' })
   productVariantId: string;
@@ -48,6 +54,7 @@ export class InternalOrderItem extends ImmutableEntity {
   @Column({ type: 'numeric', precision: 14, scale: 2, default: 0, transformer: decimalTransformer })
   discountAmount: Decimal;
 
+  // Qué es esta línea respecto a la versión anterior ("Cambio de talla: 40 → 41").
   @Column({ type: 'varchar', length: 255, nullable: true })
   notes: string | null;
 }

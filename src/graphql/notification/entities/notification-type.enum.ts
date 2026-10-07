@@ -23,6 +23,27 @@ export enum NotificationType {
   PURCHASE_ORDER_OVERAGE_REJECTED = 'PURCHASE_ORDER_OVERAGE_REJECTED',
   PURCHASE_ORDER_RECEIVED = 'PURCHASE_ORDER_RECEIVED',
   PURCHASE_ORDER_CANCELLED = 'PURCHASE_ORDER_CANCELLED',
+  // Una orden de compra llegó con una incidencia (de despacho o de recepción): va a quien arma las
+  // compras, para que la resuelva desde su bandeja (ver PurchaseOrderService.ship / receive).
+  PURCHASE_ORDER_INCIDENT = 'PURCHASE_ORDER_INCIDENT',
+  // Órdenes internas (Pedidos), canal ORDERS. Cada aviso va a quien tiene que hacer el paso
+  // siguiente (ver internal-order-watchers.ts):
+  //   ORDER_REQUESTED          bodega: llegó una orden nueva (SO, TR, RS o una sub-orden de cambio)
+  //   ORDER_READY_FOR_RUNNER   corredores: hay una orden lista para recoger (o una devolución)
+  //   ORDER_DELIVERED          quien la pidió: el corredor la entregó
+  //   ORDER_PENDING_PAYMENT    caja de esa tienda: el cliente compra, hay que cobrarla
+  //   ORDER_HURRY              bodega: el vendedor apura la orden (cliente esperando)
+  //   ORDER_STOCK_QUESTION     bodega: el vendedor pregunta por la existencia
+  //   ORDER_RUNNER_CALLED      el corredor asignado: el vendedor pregunta por la orden
+  //   ORDER_CORRECTION         corredores y bodega: llegó una referencia equivocada
+  ORDER_REQUESTED = 'ORDER_REQUESTED',
+  ORDER_READY_FOR_RUNNER = 'ORDER_READY_FOR_RUNNER',
+  ORDER_DELIVERED = 'ORDER_DELIVERED',
+  ORDER_PENDING_PAYMENT = 'ORDER_PENDING_PAYMENT',
+  ORDER_HURRY = 'ORDER_HURRY',
+  ORDER_STOCK_QUESTION = 'ORDER_STOCK_QUESTION',
+  ORDER_RUNNER_CALLED = 'ORDER_RUNNER_CALLED',
+  ORDER_CORRECTION = 'ORDER_CORRECTION',
 }
 
 export const CHANNEL_OF_TYPE: Record<NotificationType, NotificationChannel> = {
@@ -44,4 +65,13 @@ export const CHANNEL_OF_TYPE: Record<NotificationType, NotificationChannel> = {
   [NotificationType.PURCHASE_ORDER_OVERAGE_REJECTED]: NotificationChannel.PURCHASING,
   [NotificationType.PURCHASE_ORDER_RECEIVED]: NotificationChannel.PURCHASING,
   [NotificationType.PURCHASE_ORDER_CANCELLED]: NotificationChannel.PURCHASING,
+  [NotificationType.PURCHASE_ORDER_INCIDENT]: NotificationChannel.PURCHASING,
+  [NotificationType.ORDER_REQUESTED]: NotificationChannel.ORDERS,
+  [NotificationType.ORDER_READY_FOR_RUNNER]: NotificationChannel.ORDERS,
+  [NotificationType.ORDER_DELIVERED]: NotificationChannel.ORDERS,
+  [NotificationType.ORDER_PENDING_PAYMENT]: NotificationChannel.ORDERS,
+  [NotificationType.ORDER_HURRY]: NotificationChannel.ORDERS,
+  [NotificationType.ORDER_STOCK_QUESTION]: NotificationChannel.ORDERS,
+  [NotificationType.ORDER_RUNNER_CALLED]: NotificationChannel.ORDERS,
+  [NotificationType.ORDER_CORRECTION]: NotificationChannel.ORDERS,
 };

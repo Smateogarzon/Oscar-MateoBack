@@ -1,10 +1,16 @@
 import { formatDocumentNumber } from '../document-sequence/document-number.js';
+import { InternalOrderType } from './entities/internal-order-type.enum.js';
 
-// Serie del consecutivo de pedidos internos, aparte de ventas y devoluciones.
-export const INTERNAL_ORDER_SERIES = 'INTERNAL_ORDER';
+// Cada tipo de orden lleva su propio consecutivo: SO-000125 no comparte numeración con RE-000038.
+// El número no cambia entre versiones de la misma orden (la versión es aparte: "SO-000125 / v2").
+export const INTERNAL_ORDER_SERIES: Record<InternalOrderType, string> = {
+  [InternalOrderType.SO]: 'SALES_ORDER',
+  [InternalOrderType.RE]: 'RETURN_ORDER',
+  [InternalOrderType.TR]: 'TRANSFER_ORDER',
+  [InternalOrderType.RS]: 'RESTOCK_ORDER',
+};
 
-// 1 -> PED-00001. El número no cambia entre versiones del mismo pedido (ver versionNumber en la
-// entidad): una revisión reutiliza el mismo orderNumber y sube de versión.
-export function formatInternalOrderNumber(value: number): string {
-  return formatDocumentNumber('PED', value, 5);
+// (SO, 125) -> SO-000125. En pantalla va con su "#" delante.
+export function formatInternalOrderNumber(type: InternalOrderType, value: number): string {
+  return formatDocumentNumber(type, value, 6);
 }

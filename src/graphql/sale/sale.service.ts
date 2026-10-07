@@ -18,7 +18,9 @@ import { withdrawDiscountRequests } from '../discount-request/discount-request-c
 import { ACTIVE_DISCOUNT_REQUEST_STATUSES } from '../discount-request/entities/discount-request-status.enum.js';
 import { DiscountRequest } from '../discount-request/entities/discount-request.entity.js';
 import { DocumentSequenceService } from '../document-sequence/document-sequence.service.js';
+import { InventoryLocationService } from '../inventory-location/inventory-location.service.js';
 import { InventorySourceType } from '../inventory-movement/entities/inventory-source-type.enum.js';
+import { InternalOrderService } from '../internal-order/internal-order.service.js';
 import { InventoryReservationService } from '../inventory-reservation/inventory-reservation.service.js';
 import { releaseReservations } from '../inventory-reservation/reserved-quantity.js';
 import { LocationType } from '../location/entities/location-type.enum.js';
@@ -72,6 +74,8 @@ export class SaleService {
     private readonly cashSessions: CashSessionService,
     private readonly notifications: NotificationService,
     private readonly reservations: InventoryReservationService,
+    private readonly internalOrders: InternalOrderService,
+    private readonly inventoryLocations: InventoryLocationService,
   ) {}
 
   // Las más recientes primero, por la fecha de la venta (cuando se cobró; si es un borrador, cuando se
@@ -161,6 +165,10 @@ export class SaleService {
   async findItems(companyId: string, actor: SaleActor, saleId: string): Promise<SaleItem[]> {
     await this.findVisible(companyId, actor, saleId);
     return this.saleItemRepository.find({ where: { saleId }, order: { createdAt: 'ASC' } });
+  }
+
+  internalOrderNumberOf(internalOrderId: string): Promise<string | null> {
+    return this.internalOrders.numberOf(internalOrderId);
   }
 
   // Cuántas líneas tiene, para listas de ventas (la cola de "Ventas en curso") que no necesitan
@@ -417,6 +425,11 @@ export class SaleService {
       desired.set(item.productVariantId, held.plus(item.quantity));
     }
 
+    // Una venta que cobra una orden de venta aparta en la tienda a la que llegó la mercancía.
+    const preferredLocationId = sale.internalOrderId
+      ? (await this.inventoryLocations.findStockLocation(manager, companyId, sale.storeId)).id
+      : undefined;
+
     await this.reservations.syncForSource(
       manager,
       companyId,
@@ -427,6 +440,93 @@ export class SaleService {
         reservedBy,
       },
       desired,
+      preferredLocationId,
+    );
+  }
+
+  // La caja abre el cobro de una orden de venta (SO) que el vendedor dejó pendiente de pago: un
+  // borrador ligado a la orden (internalOrderId), con el vendedor que la pidió y las mismas líneas de
+  // catálogo, precio y descuento de su versión vigente. Lo que la orden tenía apartado en la tienda
+  // pasa a la venta, en el mismo STOCK. Si la orden ya tiene un borrador abierto (el mismo cajero
+  // volvió a abrirla), se devuelve ese en vez de crear otro.
+  async createFromInternalOrder(
+    companyId: string,
+    actor: CashActor,
+    input: { internalOrderId: string; cashSessionId: string },
+    idempotencyKey?: string,
+  ): Promise<Sale> {
+    return this.dataSource.transaction((manager) =>
+      runIdempotent(
+        manager,
+        { companyId, userId: actor.userId, operation: 'createSaleFromInternalOrder', key: idempotencyKey, input, resourceType: 'sale' },
+        async () => {
+          const { order, items } = await this.internalOrders.lockForCheckout(manager, companyId, input.internalOrderId);
+
+          const open = await manager.getRepository(Sale).findOne({
+            where: { companyId, internalOrderId: order.id, status: SaleStatus.DRAFT },
+            lock: { mode: 'pessimistic_write' },
+          });
+          if (open) {
+            if (open.cashierId !== actor.userId) {
+              throw new ConflictException(`Otra caja ya está cobrando la orden #${order.orderNumber}`);
+            }
+            return open;
+          }
+
+          await assertStoreAccess(manager, actor.userId, order.destinationLocationId);
+          const session = await this.cashSessions.lockOpen(manager, companyId, input.cashSessionId, actor);
+          if (session.cashRegister.storeId !== order.destinationLocationId) {
+            throw new ConflictException(`La orden #${order.orderNumber} es de otra tienda: se cobra en una caja de esa tienda`);
+          }
+
+          const repo = manager.getRepository(Sale);
+          const sale = await repo.save(
+            repo.create({
+              companyId,
+              storeId: order.destinationLocationId,
+              internalOrderId: order.id,
+              sellerId: order.requestedBy,
+              cashierId: actor.userId,
+              cashSessionId: session.id,
+              saleNumber: null,
+              subtotal: new Decimal(0),
+              discountTotal: new Decimal(0),
+              generalDiscount: new Decimal(0),
+              total: new Decimal(0),
+              status: SaleStatus.DRAFT,
+            }),
+          );
+
+          const itemRepo = manager.getRepository(SaleItem);
+          for (const item of items) {
+            const quantity = item.foundQuantity ?? item.quantity;
+            if (quantity.lessThanOrEqualTo(0)) continue;
+            const unitPrice = item.unitPrice ?? item.productVariant.price;
+            const discountAmount = item.discountAmount;
+            const variant = item.productVariant;
+            await itemRepo.save(
+              itemRepo.create({
+                saleId: sale.id,
+                type: SaleItemType.INVENTORIED,
+                productVariantId: item.productVariantId,
+                description: `${variant.product.name} · ${variant.color.name} / ${variant.size.name}`.slice(0, 180),
+                sku: variant.sku,
+                quantity,
+                unitPrice,
+                discountAmount,
+                total: calculateLine(quantity, unitPrice, discountAmount).total,
+              }),
+            );
+          }
+
+          // Lo apartado para el cliente pasa de la orden a la venta, sin soltarlo en el medio a nadie
+          // más: las dos cosas van en esta misma transacción.
+          await this.internalOrders.releaseForSale(manager, order, actor.userId);
+          await this.syncReservations(manager, companyId, sale, actor.userId);
+          return this.recalculate(manager, sale);
+        },
+        (id) => manager.getRepository(Sale).findOneByOrFail({ id }),
+      ),
     );
   }
 
@@ -477,6 +577,10 @@ export class SaleService {
       // Lo que apartaba vuelve al disponible: una venta anulada no puede seguir bloqueando el último
       // par para los demás vendedores.
       await releaseReservations(manager, InventorySourceType.SALE, [sale.id]);
+      // Si cobraba una orden de venta, la orden sigue por cobrar y vuelve a apartar lo suyo.
+      if (sale.internalOrderId) {
+        await this.internalOrders.restoreAfterSaleDiscarded(manager, companyId, sale.internalOrderId, actor.userId);
+      }
 
       sale.status = SaleStatus.CANCELLED;
       sale.cancelledBy = actor.userId;

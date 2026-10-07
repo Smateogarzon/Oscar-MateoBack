@@ -61,12 +61,17 @@ function createService() {
     findStockLocation: vi.fn().mockResolvedValue({ id: 'inv-loc-stock-1' }),
     findOrCreateRunnerLocation: vi.fn().mockResolvedValue({ id: 'inv-loc-runner-1' }),
   };
+  const notifications = {
+    findUserIdsWithPermission: vi.fn().mockResolvedValue([]),
+    signalChange: vi.fn(),
+  };
   const service = new InternalOrderService(
     repo as never,
     dataSource as never,
     sequences as never,
     inventoryMovements as never,
     inventoryLocations as never,
+    notifications as never,
   );
   return {
     service,
@@ -80,6 +85,7 @@ function createService() {
     sequences,
     inventoryMovements,
     inventoryLocations,
+    notifications,
     manager,
     dataSource,
   };
@@ -195,7 +201,7 @@ describe('InternalOrderService', () => {
       repo.findOneBy.mockResolvedValue(base({ status: InternalOrderStatus.ACCEPTED }));
       txOrderRepo.findOne.mockResolvedValue(base({ status: InternalOrderStatus.ACCEPTED }));
 
-      const order = await service.startPreparing(COMPANY, 'order-1');
+      const order = await service.startPreparing(COMPANY, OPERATOR, 'order-1');
 
       expect(order.status).toBe(InternalOrderStatus.PREPARING);
       expect(order.packingStartedAt).toBeInstanceOf(Date);
@@ -355,7 +361,7 @@ describe('InternalOrderService', () => {
       repo.findOneBy.mockResolvedValue(base({ status: InternalOrderStatus.RECEIVED }));
       txOrderRepo.findOne.mockResolvedValue(base({ status: InternalOrderStatus.RECEIVED }));
 
-      const order = await service.complete(COMPANY, 'order-1');
+      const order = await service.complete(COMPANY, REQUESTER, 'order-1');
 
       expect(order.status).toBe(InternalOrderStatus.COMPLETED);
     });

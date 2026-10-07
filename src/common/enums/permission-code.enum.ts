@@ -22,6 +22,9 @@ export enum PermissionCode {
   CASH_OPEN_CLOSE_SHIFT = 'cash.open_close_shift',
   CASH_REGISTER_PAYMENT = 'cash.register_payment',
   CASH_VIEW_ALL = 'cash.view_all',
+  // Cobrar en caja una orden de venta (SO) que el vendedor dejó pendiente de pago. Sembrado desde
+  // V0.2 para Caja; también lo cubre CASH_REGISTER_PAYMENT.
+  CASH_CHARGE_ORDERS = 'cash.charge_orders',
   // Registrar la devolución de una venta ya cobrada y entregar el reembolso (el cajero).
   SALES_RETURN = 'sales.return',
   // Aprobar o rechazar una devolución (el administrador).

@@ -47,7 +47,8 @@ function createService() {
   const dataSource = {
     transaction: vi.fn(async (fn: (manager: unknown) => unknown) => fn(manager)),
   };
-  const service = new IncidentService(repo as never, dataSource as never);
+  const notifications = { markEntityRead: vi.fn(async () => 0) };
+  const service = new IncidentService(repo as never, dataSource as never, notifications as never);
   return {
     service,
     repo,

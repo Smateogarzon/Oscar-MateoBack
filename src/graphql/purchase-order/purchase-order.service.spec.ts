@@ -45,6 +45,7 @@ function createService() {
     create: vi.fn((value: unknown) => value),
     save: vi.fn(async (value: object) => ({ id: 'incident-1', ...value })),
     find: vi.fn().mockResolvedValue([]),
+    count: vi.fn(async () => 0),
   };
   const manager = {
     getRepository: (entity: unknown) =>

@@ -23,6 +23,7 @@ import { SaleStatus } from '../sale/entities/sale-status.enum.js';
 import { Sale } from '../sale/entities/sale.entity.js';
 import { SaleActor } from '../sale/sale-actor.js';
 import { SaleService } from '../sale/sale.service.js';
+import { InternalOrderService } from '../internal-order/internal-order.service.js';
 import { StorePaymentMethod } from '../store-payment-method/entities/store-payment-method.entity.js';
 import { SaleReturnService } from '../sale-return/sale-return.service.js';
 import { CompleteSaleInput } from './dto/complete-sale.input.js';
@@ -44,6 +45,7 @@ export class SalePaymentService {
     private readonly salePaymentRepository: Repository<SalePayment>,
     private readonly dataSource: DataSource,
     private readonly sales: SaleService,
+    private readonly internalOrders: InternalOrderService,
     private readonly cashSessions: CashSessionService,
     private readonly returns: SaleReturnService,
     private readonly notifications: NotificationService,
@@ -268,6 +270,10 @@ export class SalePaymentService {
     const completed = await manager.getRepository(Sale).save(sale);
 
     if (exchange) await this.returns.applyExchange(manager, exchange, completed, credit);
+    // La venta cobraba una orden de venta (SO): la orden queda pagada y ligada a esta venta.
+    if (completed.internalOrderId) {
+      await this.internalOrders.markPaid(manager, companyId, completed.internalOrderId, completed, actor.userId);
+    }
     return completed;
   }
 
