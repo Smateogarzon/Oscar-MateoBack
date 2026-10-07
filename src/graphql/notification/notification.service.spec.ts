@@ -239,6 +239,13 @@ describe('NotificationService', () => {
           entityType: NotificationEntityType.DISCOUNT_REQUEST,
           entityId: 'req-1',
           at: expect.any(Date),
+          // El aviso del sistema: mismo texto que la campanita, agrupado por la solicitud.
+          push: {
+            title: 'Solicitud de descuento',
+            body: expect.stringContaining('pidió un descuento'),
+            url: expect.stringContaining('/notifications?company='),
+            tag: 'DISCOUNT_REQUEST:req-1',
+          },
         },
         expect.objectContaining({ userId: 'admin-2', kind: RealtimeEventKind.NOTIFICATION_CREATED }),
       ]);

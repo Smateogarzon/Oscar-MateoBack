@@ -1,10 +1,11 @@
-import { UseGuards } from '@nestjs/common';
+import { ForbiddenException, UseGuards } from '@nestjs/common';
 import { Args, ID, Mutation, Query, Resolver } from '@nestjs/graphql';
 import type { CompanyAccess } from '../../common/access/company-access.js';
 import { CurrentCompanyAccess, CurrentCompanyId } from '../../common/decorators/current-company.decorator.js';
 import { CurrentUser } from '../../common/decorators/current-user.decorator.js';
 import { IdempotencyKeyHeader } from '../../common/decorators/idempotency-key.decorator.js';
 import {
+  RequireAnyPermission,
   RequireCompanyMembership,
   RequirePermissions,
 } from '../../common/decorators/permissions.decorator.js';
@@ -30,13 +31,23 @@ import { PurchaseOrderService } from './purchase-order.service.js';
 const supplierScopeOf = (access: CompanyAccess, userId: string): string | undefined =>
   access.roleCodes.includes(RoleCode.SUPPLIER) ? userId : undefined;
 
+// Quién puede LEER órdenes de compra: los mismos permisos que abren la pantalla de compras
+// (ROUTE_PERMISSIONS.purchaseOrders en el front). Antes bastaba ser miembro, y un vendedor o una
+// caja podían leer costos y cantidades de los proveedores aunque no vieran la pantalla.
+const CAN_READ_PURCHASE_ORDERS = [
+  PermissionCode.SUPPLIERS_MANAGE_PURCHASE_ORDERS,
+  PermissionCode.SUPPLIERS_REGISTER_DELIVERY,
+  PermissionCode.SUPPLIERS_CREATE_REFERENCES,
+  PermissionCode.WAREHOUSE_FULFILL_ORDERS,
+];
+
 @Resolver(() => PurchaseOrderObjectType)
 @UseGuards(JwtAuthGuard, PermissionsGuard, CsrfGuard)
 export class PurchaseOrderResolver {
   constructor(private readonly purchaseOrderService: PurchaseOrderService) {}
 
   @Query(() => [PurchaseOrderObjectType])
-  @RequireCompanyMembership()
+  @RequireAnyPermission(...CAN_READ_PURCHASE_ORDERS)
   purchaseOrders(
     @CurrentCompanyId() companyId: string,
     @CurrentUser() currentUser: JwtPayload,
@@ -49,7 +60,7 @@ export class PurchaseOrderResolver {
   }
 
   @Query(() => PurchaseOrderObjectType)
-  @RequireCompanyMembership()
+  @RequireAnyPermission(...CAN_READ_PURCHASE_ORDERS)
   purchaseOrder(
     @CurrentCompanyId() companyId: string,
     @CurrentUser() currentUser: JwtPayload,
@@ -60,7 +71,7 @@ export class PurchaseOrderResolver {
   }
 
   @Query(() => [PurchaseOrderItemObjectType])
-  @RequireCompanyMembership()
+  @RequireAnyPermission(...CAN_READ_PURCHASE_ORDERS)
   purchaseOrderItems(
     @CurrentCompanyId() companyId: string,
     @CurrentUser() currentUser: JwtPayload,
@@ -125,9 +136,15 @@ export class PurchaseOrderResolver {
   resolvePurchaseOrderOverage(
     @CurrentCompanyId() companyId: string,
     @CurrentUser() currentUser: JwtPayload,
+    @CurrentCompanyAccess() access: CompanyAccess,
     @Args('id', { type: () => ID }) id: string,
     @Args('decisions', { type: () => [PurchaseOrderOverageDecisionInput] }) decisions: PurchaseOrderOverageDecisionInput[],
   ) {
+    // Un proveedor no decide sobrantes ni de los suyos: el sobrante lo autoriza la empresa. Se corta
+    // aquí (antes de cualquier consulta) para que el proveedor con el permiso no llegue al servicio.
+    if (supplierScopeOf(access, currentUser.sub)) {
+      throw new ForbiddenException('El proveedor no autoriza sobrantes: lo decide la empresa');
+    }
     return this.purchaseOrderService.resolveOverage(companyId, currentUser.sub, id, decisions);
   }
 

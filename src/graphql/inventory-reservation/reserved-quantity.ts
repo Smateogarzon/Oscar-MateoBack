@@ -32,5 +32,10 @@ export async function releaseReservations(
   sourceIds: string[],
 ): Promise<void> {
   if (sourceIds.length === 0) return;
-  await manager.getRepository(InventoryReservation).delete({ sourceType, sourceId: In(sourceIds) });
+  const repo = manager.getRepository(InventoryReservation);
+  const rows = await repo.find({
+    where: { sourceType, sourceId: In(sourceIds) },
+    lock: { mode: 'pessimistic_write' },
+  });
+  await repo.remove(rows);
 }

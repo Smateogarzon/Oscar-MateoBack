@@ -51,6 +51,7 @@ import { SaleReturnModule } from './graphql/sale-return/sale-return.module.js';
 import { NotificationModule } from './graphql/notification/notification.module.js';
 import { IdempotencyModule } from './graphql/idempotency/idempotency.module.js';
 import { RealtimeModule } from './realtime/realtime.module.js';
+import { PushModule } from './push/push.module.js';
 import { graphqlContext, wsOnClose, wsOnConnect, wsOnSubscribe } from './realtime/ws-context.js';
 import { StorageModule } from './common/storage/storage.module.js';
 import { UploadModule } from './uploads/upload.module.js';
@@ -175,6 +176,7 @@ const { validationRules, plugins } = new ApolloArmor().protect();
     IdempotencyModule,
     AuditModule,
     RealtimeModule,
+    PushModule,
     StorageModule,
     UploadModule,
     PosHardwareModule,

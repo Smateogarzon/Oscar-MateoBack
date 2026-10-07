@@ -1,6 +1,7 @@
 import type { NotificationChannel } from '../graphql/notification/entities/notification-channel.enum.js';
 import type { NotificationEntityType } from '../graphql/notification/entities/notification-entity-type.enum.js';
 import type { NotificationType } from '../graphql/notification/entities/notification-type.enum.js';
+import type { PushPayload } from '../push/push.service.js';
 
 export enum RealtimeEventKind {
   // A la persona le llegó un aviso nuevo: hay una fila más en sus notificaciones
@@ -23,4 +24,7 @@ export interface RealtimeEvent {
   entityType: NotificationEntityType | null;
   entityId: string | null;
   at: Date;
+  // Solo en un aviso guardado (NOTIFICATION_CREATED): el texto del aviso del sistema que también sale al
+  // dispositivo. No viaja por el bus: RealtimeService lo quita antes de repartir la señal.
+  push?: PushPayload;
 }

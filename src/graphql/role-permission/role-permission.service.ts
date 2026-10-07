@@ -82,7 +82,7 @@ export class RolePermissionService {
       await lockCompany(manager, companyId);
       const before = await countCompanyAdmins(manager, companyId);
 
-      await manager.getRepository(RolePermission).delete(id);
+      await manager.getRepository(RolePermission).remove(rolePermission);
 
       await assertStillHasAdmin(manager, companyId, before);
     });

@@ -27,6 +27,10 @@ const ref = (p: NotificationTextParams): string => p.reference ?? 'sin número';
 // que el tipo cuadre.
 const productRef = (p: NotificationTextParams): string => (p.reference ? `la referencia ${p.reference}` : 'una referencia');
 
+// El número de una orden de compra (OC-000123). Sin montos a propósito: el mismo texto lo ven el
+// proveedor y la empresa, y no todos deben ver cuánto vale la compra.
+const order = (p: NotificationTextParams): string => `la orden de compra ${ref(p)}`;
+
 const TEXTS: Record<
   NotificationType,
   { title: string; message: (p: NotificationTextParams) => string }
@@ -84,6 +88,34 @@ const TEXTS: Record<
         : `${productRef(p)} está baja${where}: quedaron ${left} unidades (mínimo ${p.minStock ?? '-'}).`;
     },
   },
+  [NotificationType.PURCHASE_ORDER_SENT]: {
+    title: 'Orden de compra enviada',
+    message: (p) => `${p.actorName} envió ${order(p)}.`,
+  },
+  [NotificationType.PURCHASE_ORDER_OVERAGE_PENDING]: {
+    title: 'Sobrante por autorizar',
+    message: (p) => `${p.actorName} despachó ${order(p)} con más de lo pedido. Hay que autorizar el sobrante.`,
+  },
+  [NotificationType.PURCHASE_ORDER_SHIPPED]: {
+    title: 'Orden despachada',
+    message: (p) => `${p.actorName} despachó ${order(p)}.`,
+  },
+  [NotificationType.PURCHASE_ORDER_OVERAGE_APPROVED]: {
+    title: 'Sobrante autorizado',
+    message: (p) => `${p.actorName} autorizó el sobrante de ${order(p)}.`,
+  },
+  [NotificationType.PURCHASE_ORDER_OVERAGE_REJECTED]: {
+    title: 'Sobrante rechazado',
+    message: (p) => `${p.actorName} rechazó el sobrante de ${order(p)}. Hay que volver a contar el envío.`,
+  },
+  [NotificationType.PURCHASE_ORDER_RECEIVED]: {
+    title: 'Orden recibida en bodega',
+    message: (p) => `${p.actorName} recibió en bodega ${order(p)}.`,
+  },
+  [NotificationType.PURCHASE_ORDER_CANCELLED]: {
+    title: 'Orden de compra cancelada',
+    message: (p) => `${p.actorName} canceló ${order(p)}.`,
+  },
 };
 
 const TYPES_WITH_NOTES = new Set<NotificationType>([
@@ -91,6 +123,8 @@ const TYPES_WITH_NOTES = new Set<NotificationType>([
   NotificationType.DISCOUNT_CANCELLED,
   NotificationType.RETURN_REJECTED,
   NotificationType.RETURN_CANCELLED,
+  NotificationType.PURCHASE_ORDER_CANCELLED,
+  NotificationType.PURCHASE_ORDER_OVERAGE_REJECTED,
 ]);
 
 export function buildNotificationText(

@@ -7,6 +7,8 @@ import { runIdempotent } from '../idempotency/idempotency.js';
 import { IncidentStatus } from '../incident/entities/incident-status.enum.js';
 import { Location } from '../location/entities/location.entity.js';
 import { LocationType } from '../location/entities/location-type.enum.js';
+import { NotificationEntityType } from '../notification/entities/notification-entity-type.enum.js';
+import { NotificationType } from '../notification/entities/notification-type.enum.js';
 import { NotificationService } from '../notification/notification.service.js';
 import { ProductVariant } from '../product-variant/entities/product-variant.entity.js';
 import { CreatePurchaseOrderInput } from './dto/create-purchase-order.input.js';
@@ -22,7 +24,11 @@ import { formatPurchaseOrderNumber, PURCHASE_ORDER_SERIES } from './purchase-ord
 import { PurchaseOrderReceivingService } from './purchase-order-receiving.service.js';
 import { clearShipment, overageItems, registerShipment } from './purchase-order-shipping.js';
 import { resolveSupplierId } from './purchase-order-supplier.js';
-import { signalPurchaseOrderChange } from './purchase-order-watchers.js';
+import {
+  announcePurchaseOrderChange,
+  type PurchaseOrderAnnouncement,
+  type PurchaseOrderAudience,
+} from './purchase-order-watchers.js';
 import { purchaseOrderTotals, type PricedLine } from './purchase-order-totals.js';
 
 export interface PurchaseOrderFilter {
@@ -129,7 +135,9 @@ export class PurchaseOrderService {
             ),
           );
 
-          await this.signal(manager, companyId, purchaseOrder, userId);
+          // Un borrador es privado del proveedor o del administrador que lo arma: no avisa a nadie,
+          // solo refresca las pantallas de quien ya sigue la empresa.
+          await this.announce(manager, companyId, purchaseOrder, userId);
           return purchaseOrder;
         },
         (id) => manager.getRepository(PurchaseOrder).findOneByOrFail({ id }),
@@ -153,7 +161,12 @@ export class PurchaseOrderService {
       }
       purchaseOrder.status = PurchaseOrderStatus.SENT;
       const sent = await manager.getRepository(PurchaseOrder).save(purchaseOrder);
-      await this.signal(manager, companyId, sent, actorUserId);
+      // Si la manda el administrador, la recibe el proveedor; si la manda el proveedor (su propio
+      // borrador), la reciben el administrador y la empresa.
+      const bySupplier = actorUserId === sent.supplierId;
+      await this.announce(manager, companyId, sent, actorUserId, [
+        { type: NotificationType.PURCHASE_ORDER_SENT, to: [bySupplier ? 'PURCHASING' : 'SUPPLIER'] },
+      ]);
       return sent;
     });
   }
@@ -182,7 +195,12 @@ export class PurchaseOrderService {
       purchaseOrder.shippedAt = new Date();
       purchaseOrder.hasIncidents = hasIncidents;
       const dispatched = await manager.getRepository(PurchaseOrder).save(purchaseOrder);
-      await this.signal(manager, companyId, dispatched, actorUserId);
+      // Con sobrante, bodega no la ve hasta que el administrador lo autorice: solo le toca a él.
+      await this.announce(manager, companyId, dispatched, actorUserId, [
+        hasOverage
+          ? { type: NotificationType.PURCHASE_ORDER_OVERAGE_PENDING, to: ['PURCHASING'] }
+          : { type: NotificationType.PURCHASE_ORDER_SHIPPED, to: ['PURCHASING', 'WAREHOUSE'] },
+      ]);
       return dispatched;
     });
   }
@@ -219,7 +237,8 @@ export class PurchaseOrderService {
       }
       if (decided.size !== items.length) throw new BadRequestException('Falta decidir sobre una referencia');
 
-      if ([...decided.values()].every(Boolean)) {
+      const accepted = [...decided.values()].every(Boolean);
+      if (accepted) {
         const incidentIds = items.map((item) => item.shipmentIncidentId).filter((value): value is string => value !== null);
         await closeShipmentIncidents(manager, incidentIds, actorUserId, IncidentStatus.RESOLVED);
         purchaseOrder.status = PurchaseOrderStatus.SHIPPED;
@@ -231,7 +250,21 @@ export class PurchaseOrderService {
       }
 
       const resolved = await manager.getRepository(PurchaseOrder).save(purchaseOrder);
-      await this.signal(manager, companyId, resolved, actorUserId);
+      await this.clearOveragePending(manager, id);
+      // Aceptado: el proveedor se entera y bodega ve por primera vez la orden despachada. Rechazado:
+      // solo el proveedor, que tiene que volver a contar el envío.
+      await this.announce(
+        manager,
+        companyId,
+        resolved,
+        actorUserId,
+        accepted
+          ? [
+              { type: NotificationType.PURCHASE_ORDER_OVERAGE_APPROVED, to: ['SUPPLIER'] },
+              { type: NotificationType.PURCHASE_ORDER_SHIPPED, to: ['WAREHOUSE'] },
+            ]
+          : [{ type: NotificationType.PURCHASE_ORDER_OVERAGE_REJECTED, to: ['SUPPLIER'] }],
+      );
       return resolved;
     });
   }
@@ -264,7 +297,9 @@ export class PurchaseOrderService {
       purchaseOrder.receivedAt = new Date();
       purchaseOrder.receivedBy = actorUserId;
       const received = await manager.getRepository(PurchaseOrder).save(purchaseOrder);
-      await this.signal(manager, companyId, received, actorUserId);
+      await this.announce(manager, companyId, received, actorUserId, [
+        { type: NotificationType.PURCHASE_ORDER_RECEIVED, to: ['SUPPLIER'] },
+      ]);
       return received;
     });
   }
@@ -290,25 +325,42 @@ export class PurchaseOrderService {
       if (!actor.canManagePurchasing && !isSupplier) {
         throw new ForbiddenException('Solo quien gestiona compras, o el proveedor, puede cancelar esta orden');
       }
+      const previousStatus = purchaseOrder.status;
       purchaseOrder.status = PurchaseOrderStatus.CANCELLED;
       purchaseOrder.cancelledAt = new Date();
       purchaseOrder.cancelledBy = actor.userId;
       purchaseOrder.cancellationReason = reason?.trim() || null;
       const cancelled = await manager.getRepository(PurchaseOrder).save(purchaseOrder);
-      await this.signal(manager, companyId, cancelled, actor.userId);
+      if (previousStatus === PurchaseOrderStatus.PENDING_APPROVAL) await this.clearOveragePending(manager, id);
+
+      // Quien cancela avisa a la otra parte: el proveedor si cancela la empresa, la empresa si cancela el
+      // proveedor. Bodega solo se entera si ya tenía la orden despachada (antes no la veía).
+      const audience: PurchaseOrderAudience[] = isSupplier ? ['PURCHASING'] : ['SUPPLIER'];
+      if (previousStatus === PurchaseOrderStatus.SHIPPED) audience.push('WAREHOUSE');
+      await this.announce(manager, companyId, cancelled, actor.userId, [
+        { type: NotificationType.PURCHASE_ORDER_CANCELLED, to: audience, notes: cancelled.cancellationReason },
+      ]);
       return cancelled;
     });
   }
 
-  // Avisa en vivo del cambio a quienes siguen la orden (ver purchase-order-watchers.ts). Va dentro de
-  // la transacción: la señal sale sola cuando esta se confirme, y si se deshace no sale.
-  private signal(
+  // Avisa de cada cambio (ver purchase-order-watchers.ts). Va dentro de la transacción: los avisos y
+  // las señales en vivo salen solos cuando esta se confirme, y si se deshace no sale ninguno.
+  private announce(
     manager: EntityManager,
     companyId: string,
     purchaseOrder: PurchaseOrder,
     actorId: string,
+    announcements: readonly PurchaseOrderAnnouncement[] = [],
   ): Promise<void> {
-    return signalPurchaseOrderChange(manager, this.notifications, companyId, purchaseOrder, actorId);
+    return announcePurchaseOrderChange(manager, this.notifications, companyId, purchaseOrder, actorId, announcements);
+  }
+
+  // Lo que pedía autorizar el sobrante ya no hace falta: se marca leído para quien lo tenía pendiente.
+  private async clearOveragePending(manager: EntityManager, purchaseOrderId: string): Promise<void> {
+    await this.notifications.markEntityRead(manager, NotificationEntityType.PURCHASE_ORDER, purchaseOrderId, [
+      NotificationType.PURCHASE_ORDER_OVERAGE_PENDING,
+    ]);
   }
 
   private assertSupplierActor(purchaseOrder: PurchaseOrder, actorUserId: string): void {

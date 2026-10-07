@@ -137,14 +137,17 @@ export class AuthService {
       `Inicio de sesión: usuario=${user.id} ip=${ip ?? 'desconocida'}`,
     );
 
-    // update() no toca el objeto en memoria: se guarda el acceso de ahora pero `user`
-    // conserva el anterior, que es el que tiene sentido mostrar como "último acceso".
-    // No pasa por AuditLogSubscriber (es un .update(), no un .save()): por eso LOGIN se
-    // registra a mano, en la misma transacción.
+    // Solo se guarda el acceso de ahora: `user` conserva el anterior, que es el que tiene sentido mostrar
+    // como "último acceso". Sin callListeners el subscriber de auditoría dejaría una fila UPDATE genérica
+    // por este acceso; lo cubre el registro LOGIN de abajo, en la misma transacción.
     await this.dataSource.transaction(async (manager) => {
       await manager
-        .getRepository(User)
-        .update(user.id, { lastLoginAt: new Date() });
+        .createQueryBuilder()
+        .update(User)
+        .set({ lastLoginAt: new Date() })
+        .whereInIds(user.id)
+        .callListeners(false)
+        .execute();
       await this.auditLogService.record(manager, {
         companyId: null,
         userId: user.id,

@@ -11,11 +11,18 @@ function createService() {
   const jwtService = { sign: vi.fn(() => 'signed-token') };
   const roleRepository = { findBy: vi.fn().mockResolvedValue([]) };
   const userCompanyRoleRepository = { find: vi.fn().mockResolvedValue([]) };
-  const userRepository = { update: vi.fn().mockResolvedValue(undefined) };
+  // El último acceso se guarda con un UPDATE por query builder, sin disparar la auditoría automática.
+  const updateQuery = {
+    update: vi.fn().mockReturnThis(),
+    set: vi.fn().mockReturnThis(),
+    whereInIds: vi.fn().mockReturnThis(),
+    callListeners: vi.fn().mockReturnThis(),
+    execute: vi.fn().mockResolvedValue(undefined),
+  };
   const dataSource = {
     manager: {},
     transaction: vi.fn(async (fn: (manager: unknown) => unknown) =>
-      fn({ getRepository: () => userRepository }),
+      fn({ createQueryBuilder: vi.fn(() => updateQuery) }),
     ),
   };
   const auditLogService = { record: vi.fn().mockResolvedValue(undefined) };
@@ -35,7 +42,7 @@ function createService() {
     jwtService,
     roleRepository,
     userCompanyRoleRepository,
-    userRepository,
+    updateQuery,
     auditLogService,
   };
 }
@@ -121,27 +128,27 @@ describe('AuthService', () => {
     });
 
     it('rejects a wrong password without recording a login', async () => {
-      const { service, userService, userRepository } = createService();
+      const { service, userService, updateQuery } = createService();
       userService.findByEmail.mockResolvedValue(await activeUser());
 
       await expect(
         service.login({ email: 'ana@example.com', password: 'wrong' }),
       ).rejects.toThrow(UnauthorizedException);
-      expect(userRepository.update).not.toHaveBeenCalled();
+      expect(updateQuery.execute).not.toHaveBeenCalled();
     });
 
     it('records the new login time but returns the previous one', async () => {
       const previousLoginAt = new Date('2026-09-15T15:40:00Z');
-      const { service, userService, userRepository } = createService();
+      const { service, userService, updateQuery } = createService();
       userService.findByEmail.mockResolvedValue(
         await activeUser({ lastLoginAt: previousLoginAt }),
       );
 
       const result = await service.login({ email: 'ana@example.com', password: rawPassword });
 
-      expect(userRepository.update).toHaveBeenCalledWith('user-1', {
-        lastLoginAt: expect.any(Date),
-      });
+      expect(updateQuery.set).toHaveBeenCalledWith({ lastLoginAt: expect.any(Date) });
+      expect(updateQuery.whereInIds).toHaveBeenCalledWith('user-1');
+      expect(updateQuery.callListeners).toHaveBeenCalledWith(false);
       expect(result.user.lastLoginAt).toBe(previousLoginAt);
     });
 
@@ -382,7 +389,7 @@ describe('AuthService', () => {
 
       it('blocks the email after five wrong passwords in a row, even for the right password', async () => {
         controlClock();
-        const { service, userService, userRepository } = createService();
+        const { service, userService, updateQuery } = createService();
         userService.findByEmail.mockResolvedValue(await activeUser());
         await failLogins(service, 5);
 
@@ -396,7 +403,7 @@ describe('AuthService', () => {
         expect((error as HttpException).message).toContain('Demasiados intentos fallidos');
         // Ni siquiera se busca al usuario ni se compara la contraseña
         expect(userService.findByEmail).toHaveBeenCalledTimes(5);
-        expect(userRepository.update).not.toHaveBeenCalled();
+        expect(updateQuery.execute).not.toHaveBeenCalled();
       });
 
       it('keeps the lock for fifteen minutes and then lets the email try again', async () => {
@@ -581,12 +588,12 @@ describe('AuthService', () => {
     });
 
     it('only signs: it neither checks credentials nor records a login', async () => {
-      const { service, userService, userRepository } = createService();
+      const { service, userService, updateQuery } = createService();
 
       await service.issueSession(user);
 
       expect(userService.findByEmail).not.toHaveBeenCalled();
-      expect(userRepository.update).not.toHaveBeenCalled();
+      expect(updateQuery.execute).not.toHaveBeenCalled();
     });
   });
 

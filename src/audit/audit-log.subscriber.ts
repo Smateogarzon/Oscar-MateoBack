@@ -14,10 +14,11 @@ import { currentAuditActor } from './audit-context.js';
 import { AuditAction } from './entities/audit-action.enum.js';
 import { AuditLogService } from './audit-log.service.js';
 
-// Registro automático de auditoría: escucha TODOS los guardados de TypeORM (.save()/.remove(),
-// no .update()/.delete() por query builder — esos no pasan por aquí, ver AuthService.login) y
-// descarta los que no estén en AUDITABLE_ENTITIES. Se registra como suscriptor igual que
-// RealtimeOutboxSubscriber (ver realtime/realtime-outbox.subscriber.ts).
+// Registro automático de auditoría: escucha los eventos de TypeORM y descarta los de entidades que no
+// están en AUDITABLE_ENTITIES. Con .save()/.remove() llega cada fila con su antes y su después. Un
+// .update()/.delete() por query builder llega una sola vez por sentencia, sin id ni valores anteriores:
+// por eso el código de negocio carga las filas y las guarda o borra una por una. Se registra como
+// suscriptor igual que RealtimeOutboxSubscriber (ver realtime/realtime-outbox.subscriber.ts).
 //
 // Escribe con event.manager, el EntityManager de la MISMA transacción que el cambio que audita:
 // si esa transacción se deshace, la fila de auditoría se deshace con ella. Por eso, a propósito,

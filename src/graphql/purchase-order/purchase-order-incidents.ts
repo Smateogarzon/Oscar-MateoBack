@@ -93,7 +93,16 @@ export async function closeShipmentIncidents(
   status: IncidentStatus.RESOLVED | IncidentStatus.CANCELLED,
 ): Promise<void> {
   if (incidentIds.length === 0) return;
-  await manager
-    .getRepository(Incident)
-    .update({ id: In([...incidentIds]) }, { status, resolvedBy: actorUserId, resolvedAt: new Date() });
+  const repo = manager.getRepository(Incident);
+  const incidents = await repo.find({
+    where: { id: In([...incidentIds]) },
+    lock: { mode: 'pessimistic_write' },
+  });
+  const resolvedAt = new Date();
+  for (const incident of incidents) {
+    incident.status = status;
+    incident.resolvedBy = actorUserId;
+    incident.resolvedAt = resolvedAt;
+  }
+  await repo.save(incidents);
 }

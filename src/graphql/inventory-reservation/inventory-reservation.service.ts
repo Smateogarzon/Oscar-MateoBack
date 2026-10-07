@@ -140,7 +140,7 @@ export class InventoryReservationService {
         pending.delete(productVariantId);
         continue;
       }
-      await repo.delete(rows.map((row) => row.id));
+      await repo.remove(rows);
     }
 
     for (const [productVariantId, quantity] of pending) {

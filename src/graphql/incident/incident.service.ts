@@ -9,6 +9,9 @@ import { Incident } from './entities/incident.entity.js';
 import { IncidentStatus } from './entities/incident-status.enum.js';
 import { IncidentType } from './entities/incident-type.enum.js';
 
+// Mismo valor que escribe purchase-order-incidents.ts al abrir la novedad de una línea de compra.
+const PURCHASE_ORDER_ITEM_ENTITY = 'PURCHASE_ORDER_ITEM';
+
 export interface IncidentFilter {
   type?: IncidentType;
   status?: IncidentStatus;
@@ -26,7 +29,11 @@ export class IncidentService {
     private readonly dataSource: DataSource,
   ) {}
 
-  findAll(companyId: string, filter: IncidentFilter = {}): Promise<Incident[]> {
+  // `supplierId` acota a las novedades de las líneas de SUS órdenes (las que nacen del recibo o del
+  // despacho de compras, con entityType PURCHASE_ORDER_ITEM). Sin él, ve toda la empresa: lo decide el
+  // resolver según el rol.
+  findAll(companyId: string, filter: IncidentFilter = {}, supplierId?: string): Promise<Incident[]> {
+    if (supplierId) return this.findAllForSupplier(companyId, supplierId, filter);
     return this.incidentRepository.find({
       where: {
         companyId,
@@ -38,10 +45,34 @@ export class IncidentService {
     });
   }
 
-  async findOne(companyId: string, id: string): Promise<Incident> {
-    const incident = await this.incidentRepository.findOneBy({ id, companyId });
+  async findOne(companyId: string, id: string, supplierId?: string): Promise<Incident> {
+    const incident = supplierId
+      ? await this.supplierScope(companyId, supplierId).andWhere('incident.id = :id', { id }).getOne()
+      : await this.incidentRepository.findOneBy({ id, companyId });
     if (!incident) throw new NotFoundException(`Novedad ${id} no encontrada`);
     return incident;
+  }
+
+  private findAllForSupplier(companyId: string, supplierId: string, filter: IncidentFilter): Promise<Incident[]> {
+    const qb = this.supplierScope(companyId, supplierId).orderBy('incident.createdAt', 'DESC');
+    if (filter.type) qb.andWhere('incident.type = :type', { type: filter.type });
+    if (filter.status) qb.andWhere('incident.status = :status', { status: filter.status });
+    if (filter.locationId) qb.andWhere('incident.locationId = :locationId', { locationId: filter.locationId });
+    return qb.getMany();
+  }
+
+  // Solo las novedades de las líneas cuya orden es de este proveedor, dentro de la empresa.
+  private supplierScope(companyId: string, supplierId: string) {
+    return this.incidentRepository
+      .createQueryBuilder('incident')
+      .where('incident.companyId = :companyId', { companyId })
+      .andWhere(
+        `incident.entityType = :itemType AND incident.entityId IN (
+           SELECT item.id FROM purchase_order_items item
+           INNER JOIN purchase_orders po ON po.id = item."purchaseOrderId"
+           WHERE po."supplierId" = :supplierId AND po."companyId" = :companyId)`,
+        { itemType: PURCHASE_ORDER_ITEM_ENTITY, supplierId },
+      );
   }
 
   async report(

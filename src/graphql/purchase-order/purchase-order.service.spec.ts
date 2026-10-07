@@ -44,6 +44,7 @@ function createService() {
   const incidentRepo = {
     create: vi.fn((value: unknown) => value),
     save: vi.fn(async (value: object) => ({ id: 'incident-1', ...value })),
+    find: vi.fn().mockResolvedValue([]),
   };
   const manager = {
     getRepository: (entity: unknown) =>
@@ -72,6 +73,8 @@ function createService() {
   // Compras y bodega siguen la orden por permisos distintos: cada uno trae a los suyos.
   const notifications = {
     signalChange: vi.fn(),
+    notify: vi.fn().mockResolvedValue(null),
+    markEntityRead: vi.fn().mockResolvedValue(0),
     findUserIdsWithPermission: vi.fn(async (_manager: unknown, _companyId: string, code: string) =>
       code === 'warehouse.fulfill_orders' ? ['warehouse-1'] : ['purchasing-1'],
     ),
@@ -502,6 +505,132 @@ describe('PurchaseOrderService', () => {
 
       await expect(service.send(COMPANY, USER, 'po-1')).rejects.toThrow(ConflictException);
       expect(notifications.signalChange).not.toHaveBeenCalled();
+    });
+  });
+
+  // Los avisos guardados (campanita y push): quién recibe cada paso. Bodega no se entera de una orden
+  // hasta que el proveedor la despacha, y un sobrante solo lo ve la empresa hasta que lo autoriza.
+  describe('the notices', () => {
+    const noticesSent = (notifications: ReturnType<typeof createService>['notifications']) =>
+      notifications.notify.mock.calls.map(([, input]) => input as { type: string; recipientIds: string[] });
+
+    it('tells the supplier when the company sends it the order', async () => {
+      const { service, repo, txPurchaseOrderRepo, notifications } = createService();
+      repo.findOneBy.mockResolvedValue(stored(PurchaseOrderStatus.DRAFT));
+      txPurchaseOrderRepo.findOne.mockResolvedValue(stored(PurchaseOrderStatus.DRAFT));
+
+      await service.send(COMPANY, USER, 'po-1');
+
+      expect(noticesSent(notifications)).toEqual([
+        expect.objectContaining({ type: 'PURCHASE_ORDER_SENT', recipientIds: [SUPPLIER] }),
+      ]);
+    });
+
+    it('tells the company, not the supplier, when the supplier sends its own draft', async () => {
+      const { service, repo, txPurchaseOrderRepo, notifications } = createService();
+      repo.findOneBy.mockResolvedValue(stored(PurchaseOrderStatus.DRAFT));
+      txPurchaseOrderRepo.findOne.mockResolvedValue(stored(PurchaseOrderStatus.DRAFT));
+
+      await service.send(COMPANY, SUPPLIER, 'po-1');
+
+      expect(noticesSent(notifications)).toEqual([
+        expect.objectContaining({ type: 'PURCHASE_ORDER_SENT', recipientIds: ['purchasing-1'] }),
+      ]);
+    });
+
+    it('tells the company about an overage, and keeps the warehouse out until it is approved', async () => {
+      const { service, repo, txPurchaseOrderRepo, itemRepo, notifications } = createService();
+      repo.findOneBy.mockResolvedValue(stored(PurchaseOrderStatus.SENT));
+      txPurchaseOrderRepo.findOne.mockResolvedValue(stored(PurchaseOrderStatus.SENT));
+      itemRepo.find.mockResolvedValue([line('2')]);
+
+      await service.ship(COMPANY, SUPPLIER, 'po-1', [{ itemId: 'item-1', quantity: '3' }]);
+
+      expect(noticesSent(notifications)).toEqual([
+        expect.objectContaining({ type: 'PURCHASE_ORDER_OVERAGE_PENDING', recipientIds: ['purchasing-1'] }),
+      ]);
+    });
+
+    it('tells the company and the warehouse when a dispatch has no overage', async () => {
+      const { service, repo, txPurchaseOrderRepo, itemRepo, notifications } = createService();
+      repo.findOneBy.mockResolvedValue(stored(PurchaseOrderStatus.SENT));
+      txPurchaseOrderRepo.findOne.mockResolvedValue(stored(PurchaseOrderStatus.SENT));
+      itemRepo.find.mockResolvedValue([line('2')]);
+
+      await service.ship(COMPANY, SUPPLIER, 'po-1', [{ itemId: 'item-1', quantity: '2' }]);
+
+      expect(noticesSent(notifications)).toEqual([
+        expect.objectContaining({ type: 'PURCHASE_ORDER_SHIPPED', recipientIds: ['purchasing-1', 'warehouse-1'] }),
+      ]);
+    });
+
+    it('tells the supplier its overage was approved, and the warehouse the order is now dispatched', async () => {
+      const { service, repo, txPurchaseOrderRepo, itemRepo, notifications } = createService();
+      repo.findOneBy.mockResolvedValue(stored(PurchaseOrderStatus.PENDING_APPROVAL));
+      txPurchaseOrderRepo.findOne.mockResolvedValue(stored(PurchaseOrderStatus.PENDING_APPROVAL));
+      itemRepo.find.mockResolvedValue([line('2', '3')]);
+
+      await service.resolveOverage(COMPANY, 'admin-1', 'po-1', [{ itemId: 'item-1', accepted: true } as never]);
+
+      expect(noticesSent(notifications)).toEqual([
+        expect.objectContaining({ type: 'PURCHASE_ORDER_OVERAGE_APPROVED', recipientIds: [SUPPLIER] }),
+        expect.objectContaining({ type: 'PURCHASE_ORDER_SHIPPED', recipientIds: ['warehouse-1'] }),
+      ]);
+      expect(notifications.markEntityRead).toHaveBeenCalledWith(expect.anything(), 'PURCHASE_ORDER', 'po-1', [
+        'PURCHASE_ORDER_OVERAGE_PENDING',
+      ]);
+    });
+
+    it('tells only the supplier when the overage is rejected, so it counts the shipment again', async () => {
+      const { service, repo, txPurchaseOrderRepo, itemRepo, notifications } = createService();
+      repo.findOneBy.mockResolvedValue(stored(PurchaseOrderStatus.PENDING_APPROVAL));
+      txPurchaseOrderRepo.findOne.mockResolvedValue(stored(PurchaseOrderStatus.PENDING_APPROVAL));
+      itemRepo.find.mockResolvedValue([line('2', '3')]);
+
+      await service.resolveOverage(COMPANY, 'admin-1', 'po-1', [{ itemId: 'item-1', accepted: false } as never]);
+
+      expect(noticesSent(notifications)).toEqual([
+        expect.objectContaining({ type: 'PURCHASE_ORDER_OVERAGE_REJECTED', recipientIds: [SUPPLIER] }),
+      ]);
+    });
+
+    it('tells the company when the supplier cancels, and the warehouse only if it already had the order', async () => {
+      const { service, repo, txPurchaseOrderRepo, notifications } = createService();
+      repo.findOneBy.mockResolvedValue(stored(PurchaseOrderStatus.SHIPPED));
+      txPurchaseOrderRepo.findOne.mockResolvedValue(stored(PurchaseOrderStatus.SHIPPED));
+
+      await service.cancel(COMPANY, { userId: SUPPLIER, canManagePurchasing: false }, 'po-1', 'Sin stock');
+
+      expect(noticesSent(notifications)).toEqual([
+        expect.objectContaining({
+          type: 'PURCHASE_ORDER_CANCELLED',
+          recipientIds: ['purchasing-1', 'warehouse-1'],
+        }),
+      ]);
+    });
+
+    it('tells only the supplier when the company cancels an order the warehouse never saw', async () => {
+      const { service, repo, txPurchaseOrderRepo, notifications } = createService();
+      repo.findOneBy.mockResolvedValue(stored(PurchaseOrderStatus.SENT));
+      txPurchaseOrderRepo.findOne.mockResolvedValue(stored(PurchaseOrderStatus.SENT));
+
+      await service.cancel(COMPANY, { userId: USER, canManagePurchasing: true }, 'po-1');
+
+      expect(noticesSent(notifications)).toEqual([
+        expect.objectContaining({ type: 'PURCHASE_ORDER_CANCELLED', recipientIds: [SUPPLIER] }),
+      ]);
+    });
+
+    it('marks the overage notice read when the order is cancelled while it waits for approval', async () => {
+      const { service, repo, txPurchaseOrderRepo, notifications } = createService();
+      repo.findOneBy.mockResolvedValue(stored(PurchaseOrderStatus.PENDING_APPROVAL));
+      txPurchaseOrderRepo.findOne.mockResolvedValue(stored(PurchaseOrderStatus.PENDING_APPROVAL));
+
+      await service.cancel(COMPANY, { userId: USER, canManagePurchasing: true }, 'po-1');
+
+      expect(notifications.markEntityRead).toHaveBeenCalledWith(expect.anything(), 'PURCHASE_ORDER', 'po-1', [
+        'PURCHASE_ORDER_OVERAGE_PENDING',
+      ]);
     });
   });
 });

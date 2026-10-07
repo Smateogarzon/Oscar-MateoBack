@@ -11,7 +11,19 @@ const claimKey = (sql: string) =>
   sql.includes('INSERT INTO "idempotency_keys"') ? [{ id: 'claim-1' }] : [];
 
 function createService() {
-  const repo = { find: vi.fn().mockResolvedValue([]), findOneBy: vi.fn() };
+  // Query builder encadenable para la lectura acotada al proveedor (findAll/findOne con supplierId).
+  const qb = {
+    where: vi.fn(() => qb),
+    andWhere: vi.fn(() => qb),
+    orderBy: vi.fn(() => qb),
+    getMany: vi.fn().mockResolvedValue([]),
+    getOne: vi.fn().mockResolvedValue(null),
+  };
+  const repo = {
+    find: vi.fn().mockResolvedValue([]),
+    findOneBy: vi.fn(),
+    createQueryBuilder: vi.fn(() => qb),
+  };
   const txIncidentRepo = {
     create: vi.fn((value: unknown) => value),
     save: vi.fn(async (value: object) => ({ id: 'incident-1', ...value })),
@@ -39,6 +51,7 @@ function createService() {
   return {
     service,
     repo,
+    qb,
     txIncidentRepo,
     locationRepo,
     variantRepo,
@@ -61,6 +74,20 @@ describe('IncidentService', () => {
 
       expect(repo.find).toHaveBeenCalledWith({ where: { companyId: COMPANY }, order: { createdAt: 'DESC' } });
     });
+
+    // El proveedor solo ve las novedades de las líneas de SUS órdenes (no las de otro proveedor ni las
+    // de bodega o de inventario): la consulta se acota por el id del proveedor dentro de la empresa.
+    it('limits a supplier to the incidents of the lines of its own orders', async () => {
+      const { service, repo, qb } = createService();
+
+      await service.findAll(COMPANY, {}, USER);
+
+      expect(repo.find).not.toHaveBeenCalled();
+      expect(qb.andWhere).toHaveBeenCalledWith(
+        expect.stringContaining('purchase_orders'),
+        expect.objectContaining({ itemType: 'PURCHASE_ORDER_ITEM', supplierId: USER }),
+      );
+    });
   });
 
   describe('findOne', () => {
@@ -69,6 +96,15 @@ describe('IncidentService', () => {
       repo.findOneBy.mockResolvedValue(null);
 
       await expect(service.findOne(COMPANY, 'missing')).rejects.toThrow(NotFoundException);
+    });
+
+    it('does not reveal to a supplier an incident outside its own orders', async () => {
+      const { service, repo, qb } = createService();
+
+      await expect(service.findOne(COMPANY, 'incident-of-other-supplier', USER)).rejects.toThrow(NotFoundException);
+
+      expect(repo.findOneBy).not.toHaveBeenCalled();
+      expect(qb.andWhere).toHaveBeenCalledWith('incident.id = :id', { id: 'incident-of-other-supplier' });
     });
   });
 

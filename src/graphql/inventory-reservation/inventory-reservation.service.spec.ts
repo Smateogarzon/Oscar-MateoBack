@@ -13,7 +13,7 @@ function createService() {
     save: vi.fn(async (value: object) => ({ id: 'reservation-1', ...value })),
     // Lo que el documento ya tenía apartado, para syncForSource.
     findBy: vi.fn().mockResolvedValue([]),
-    delete: vi.fn().mockResolvedValue(undefined),
+    remove: vi.fn().mockResolvedValue(undefined),
   };
   const variantRepo = { existsBy: vi.fn().mockResolvedValue(true) };
   const invLocationRepo = { existsBy: vi.fn().mockResolvedValue(true) };
@@ -194,7 +194,7 @@ describe('InventoryReservationService', () => {
 
       await service.syncForSource(manager as never, COMPANY, SALE, new Map([['variant-1', new Decimal('2')]]));
 
-      expect(txReservationRepo.delete).not.toHaveBeenCalled();
+      expect(txReservationRepo.remove).not.toHaveBeenCalled();
       expect(txReservationRepo.save).not.toHaveBeenCalled();
     });
 
@@ -206,7 +206,7 @@ describe('InventoryReservationService', () => {
 
       await service.syncForSource(manager as never, COMPANY, SALE, new Map([['variant-1', new Decimal('5')]]));
 
-      expect(txReservationRepo.delete).toHaveBeenCalledWith(['res-1']);
+      expect(txReservationRepo.remove).toHaveBeenCalledWith([expect.objectContaining({ id: 'res-1' })]);
       expect(txReservationRepo.create.mock.calls[0][0].quantity.toFixed(2)).toBe('5.00');
     });
 
@@ -218,7 +218,7 @@ describe('InventoryReservationService', () => {
 
       await service.syncForSource(manager as never, COMPANY, SALE, new Map());
 
-      expect(txReservationRepo.delete).toHaveBeenCalledWith(['res-1']);
+      expect(txReservationRepo.remove).toHaveBeenCalledWith([expect.objectContaining({ id: 'res-1' })]);
       expect(txReservationRepo.save).not.toHaveBeenCalled();
     });
 

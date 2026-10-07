@@ -19,7 +19,7 @@ function createService() {
   const transactionRepository = {
     create: vi.fn((value: unknown) => value),
     save: vi.fn(async (value: object) => ({ id: 'rp-1', ...value })),
-    delete: vi.fn().mockResolvedValue(undefined),
+    remove: vi.fn().mockResolvedValue(undefined),
   };
   // El rol al que se le asigna el permiso: por defecto, uno de empresa.
   const roleRepository = {
@@ -213,7 +213,7 @@ describe('RolePermissionService', () => {
         companyId: 'company-1',
         role: COMPANY_VISIBLE_ROLE,
       });
-      expect(transactionRepository.delete).not.toHaveBeenCalled();
+      expect(transactionRepository.remove).not.toHaveBeenCalled();
     });
 
     it('deletes an assignment of the company', async () => {
@@ -221,7 +221,7 @@ describe('RolePermissionService', () => {
       repository.findOneBy.mockResolvedValue({ id: 'rp-1', companyId: 'company-1' });
 
       await expect(service.remove('company-1', 'rp-1')).resolves.toBe(true);
-      expect(transactionRepository.delete).toHaveBeenCalledWith('rp-1');
+      expect(transactionRepository.remove).toHaveBeenCalledWith(expect.objectContaining({ id: 'rp-1' }));
     });
 
     it('locks the company before counting the administrators and before deleting', async () => {
@@ -234,7 +234,7 @@ describe('RolePermissionService', () => {
       expect(query.mock.calls[0][1]).toEqual(['company-1']);
       expect(query.mock.calls[1][0]).toContain('COUNT(DISTINCT');
       expect(query.mock.invocationCallOrder[1]).toBeLessThan(
-        transactionRepository.delete.mock.invocationCallOrder[0],
+        transactionRepository.remove.mock.invocationCallOrder[0],
       );
     });
 
@@ -247,7 +247,7 @@ describe('RolePermissionService', () => {
       const counts = query.mock.calls.filter(([sql]) => sql.includes('COUNT(DISTINCT'));
       expect(counts).toHaveLength(2);
       expect(query.mock.invocationCallOrder[2]).toBeGreaterThan(
-        transactionRepository.delete.mock.invocationCallOrder[0],
+        transactionRepository.remove.mock.invocationCallOrder[0],
       );
     });
 

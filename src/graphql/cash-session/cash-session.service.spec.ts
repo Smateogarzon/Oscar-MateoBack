@@ -123,13 +123,13 @@ function createService() {
   const saleRepo = {
     find: vi.fn().mockResolvedValue([]),
     countBy: vi.fn().mockResolvedValue(0),
-    delete: vi.fn().mockResolvedValue(undefined),
+    remove: vi.fn().mockResolvedValue(undefined),
   };
   const saleItemRepo = { delete: vi.fn().mockResolvedValue(undefined) };
   // Las solicitudes de descuento de esas ventas: por defecto, ninguna.
   const discountRequestRepo = {
     find: vi.fn().mockResolvedValue([]),
-    delete: vi.fn().mockResolvedValue(undefined),
+    remove: vi.fn().mockResolvedValue(undefined),
   };
   // La cuenta del cajero: por defecto, activa.
   const userRepo = { existsBy: vi.fn().mockResolvedValue(true) };
@@ -173,7 +173,10 @@ function createService() {
     [User, userRepo],
     [IdempotencyKey, idempotencyRepo],
     // Soltar lo que apartaban los borradores que se descartan al cerrar el turno.
-    [InventoryReservation, { delete: vi.fn().mockResolvedValue(undefined) }],
+    [
+      InventoryReservation,
+      { find: vi.fn().mockResolvedValue([]), remove: vi.fn().mockResolvedValue(undefined) },
+    ],
   ]);
   const manager = {
     getRepository: (entity: unknown) => repositories.get(entity),
@@ -971,6 +974,8 @@ describe('CashSessionService', () => {
       const { service, txSessionRepo, saleRepo, saleItemRepo, discountRequestRepo } = createService();
       txSessionRepo.findOne.mockResolvedValue(openSession());
       saleRepo.find.mockResolvedValue([{ id: 'draft-1' }, { id: 'draft-2' }]);
+      const requests = [{ id: 'request-1', status: DiscountRequestStatus.PENDING }];
+      discountRequestRepo.find.mockResolvedValue(requests);
 
       await service.close(COMPANY, admin, { cashSessionId: 'session-1', countedAmount: '200000' });
 
@@ -989,8 +994,13 @@ describe('CashSessionService', () => {
         },
       });
       expect(saleItemRepo.delete).toHaveBeenCalledWith({ saleId: In(drafts) });
-      expect(discountRequestRepo.delete).toHaveBeenCalledWith({ saleId: In(drafts) });
-      expect(saleRepo.delete).toHaveBeenCalledWith({ id: In(drafts) });
+      // Luego todas las solicitudes de esas ventas, de cualquier estado, bloqueadas
+      expect(discountRequestRepo.find).toHaveBeenCalledWith({
+        where: { saleId: In(drafts) },
+        lock: { mode: 'pessimistic_write' },
+      });
+      expect(discountRequestRepo.remove).toHaveBeenCalledWith(requests);
+      expect(saleRepo.remove).toHaveBeenCalledWith([{ id: 'draft-1' }, { id: 'draft-2' }]);
     });
 
     it('deletes the lines first, then the discount requests, then the sales, so nothing is left hanging', async () => {
@@ -1001,8 +1011,8 @@ describe('CashSessionService', () => {
       await service.close(COMPANY, admin, { cashSessionId: 'session-1', countedAmount: '200000' });
 
       const order = (mock: { mock: { invocationCallOrder: number[] } }) => mock.mock.invocationCallOrder[0];
-      expect(order(saleItemRepo.delete)).toBeLessThan(order(discountRequestRepo.delete));
-      expect(order(discountRequestRepo.delete)).toBeLessThan(order(saleRepo.delete));
+      expect(order(saleItemRepo.delete)).toBeLessThan(order(discountRequestRepo.remove));
+      expect(order(discountRequestRepo.remove)).toBeLessThan(order(saleRepo.remove));
     });
 
     it('takes the discount requests of the deleted drafts off the approvers\' screens, and reads the pending ones\' notices', async () => {
@@ -1063,8 +1073,8 @@ describe('CashSessionService', () => {
 
       expect(discountRequestRepo.find).not.toHaveBeenCalled();
       expect(saleItemRepo.delete).not.toHaveBeenCalled();
-      expect(discountRequestRepo.delete).not.toHaveBeenCalled();
-      expect(saleRepo.delete).not.toHaveBeenCalled();
+      expect(discountRequestRepo.remove).not.toHaveBeenCalled();
+      expect(saleRepo.remove).not.toHaveBeenCalled();
     });
 
     it('locks the drafts of the shift, without waiting, BEFORE locking the shift: sale first, then shift, like every payment', async () => {
@@ -1107,8 +1117,8 @@ describe('CashSessionService', () => {
       // Ni siquiera se llega a bloquear el turno, y nada se borra, se guarda ni se avisa
       expect(txSessionRepo.findOne).not.toHaveBeenCalled();
       expect(saleItemRepo.delete).not.toHaveBeenCalled();
-      expect(discountRequestRepo.delete).not.toHaveBeenCalled();
-      expect(saleRepo.delete).not.toHaveBeenCalled();
+      expect(discountRequestRepo.remove).not.toHaveBeenCalled();
+      expect(saleRepo.remove).not.toHaveBeenCalled();
       expect(txSessionRepo.save).not.toHaveBeenCalled();
       expect(notifications.signalChange).not.toHaveBeenCalled();
     });
@@ -1237,7 +1247,7 @@ describe('CashSessionService', () => {
         // No se bloquea nada, no se borra nada, no se guarda de nuevo y no se vuelve a avisar
         expect(saleRepo.find).not.toHaveBeenCalled();
         expect(txSessionRepo.findOne).not.toHaveBeenCalled();
-        expect(saleRepo.delete).not.toHaveBeenCalled();
+        expect(saleRepo.remove).not.toHaveBeenCalled();
         expect(txSessionRepo.save).not.toHaveBeenCalled();
         expect(notifications.signalChange).not.toHaveBeenCalled();
       });

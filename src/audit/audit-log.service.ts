@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import type { EntityManager } from 'typeorm';
+import type { EntityManager, QueryDeepPartialEntity } from 'typeorm';
 import { AuditAction } from './entities/audit-action.enum.js';
 import { AuditLog } from './entities/audit-log.entity.js';
 
@@ -20,6 +20,8 @@ export interface RecordAuditLogInput {
 @Injectable()
 export class AuditLogService {
   async record(manager: EntityManager, input: RecordAuditLogInput): Promise<void> {
-    await manager.getRepository(AuditLog).insert(input);
+    // insert() tipa sus valores como QueryDeepPartialEntity, que no admite Record<string, unknown>
+    // (columnas jsonb). El cast es seguro: oldValues/newValues son JSON plano que TypeORM serializa tal cual.
+    await manager.getRepository(AuditLog).insert(input as QueryDeepPartialEntity<AuditLog>);
   }
 }

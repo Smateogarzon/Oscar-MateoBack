@@ -27,6 +27,7 @@ import {
 import { Notification } from './entities/notification.entity.js';
 import { UserNotification } from './entities/user-notification.entity.js';
 import { buildNotificationText } from './notification-text.js';
+import { notificationUrl } from './notification-url.js';
 
 const DEFAULT_PAGE_SIZE = 30;
 const MAX_PAGE_SIZE = 100;
@@ -40,7 +41,8 @@ export interface NotifyInput {
   entityType: NotificationEntityType;
   entityId: string;
   locationId: string | null;
-  // El número de la venta o de la devolución; null si es una venta en borrador (sin número todavía)
+  // El número de la venta, de la devolución o de la orden de compra; null si es una venta en borrador
+  // (sin número todavía)
   reference: string | null;
   notes?: string | null;
   // Solo para INVENTORY_LOW_STOCK (ver NotificationTextParams).
@@ -155,6 +157,14 @@ export class NotificationService {
 
     // A cada destinatario le llega en vivo una señal de que tiene un aviso nuevo, pero solo cuando la
     // transacción se confirme (ver RealtimeService.publishAfterCommit).
+    // El mismo aviso también sale al sistema del dispositivo (web push), con el mismo texto y agrupado
+    // por la entidad a la que se refiere (una misma orden no apila avisos en el celular).
+    const push = {
+      title,
+      body: message,
+      url: notificationUrl(input.entityType, input.entityId, input.companyId),
+      tag: `${input.entityType}:${input.entityId}`,
+    };
     const at = new Date();
     this.realtime.publishAfterCommit(
       manager,
@@ -167,6 +177,7 @@ export class NotificationService {
         entityType: input.entityType,
         entityId: input.entityId,
         at,
+        push,
       })),
     );
 

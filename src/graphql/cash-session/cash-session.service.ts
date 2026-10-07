@@ -438,8 +438,12 @@ export class CashSessionService {
     // Las líneas primero: las filas de descuento por línea (discount_request_items) se van con
     // ellas en cascada, y así ya no queda nada que impida borrar las solicitudes.
     await manager.getRepository(SaleItem).delete({ saleId: In(saleIds) });
-    await manager.getRepository(DiscountRequest).delete({ saleId: In(saleIds) });
-    await manager.getRepository(Sale).delete({ id: In(saleIds) });
+    const allRequests = await manager.getRepository(DiscountRequest).find({
+      where: { saleId: In(saleIds) },
+      lock: { mode: 'pessimistic_write' },
+    });
+    await manager.getRepository(DiscountRequest).remove(allRequests);
+    await manager.getRepository(Sale).remove(drafts);
   }
 
   // El código del turno, para el administrador que lo tiene que dar al cajero. Solo de un turno

@@ -99,7 +99,7 @@ function createService() {
   const txRequestRepo = {
     // Las solicitudes pendientes de la venta que se retiran al cobrarla (ninguna por defecto)
     find: vi.fn().mockResolvedValue([]),
-    update: vi.fn().mockResolvedValue(undefined),
+    save: vi.fn().mockResolvedValue(undefined),
   };
   // Las líneas de la venta: que tenga alguna (existsBy) y las de catálogo que descuentan inventario
   // al cobrar (find; por defecto ninguna: todas las pruebas cobran líneas GENERIC).
@@ -113,7 +113,10 @@ function createService() {
   // ¿Es super admin? (hasStoreAccess lo deja pasar a todas las tiendas): por defecto, no.
   const platformRoleRepo = { existsBy: vi.fn().mockResolvedValue(false) };
   // Soltar lo que la venta tenía apartado (releaseReservations) antes de descontar.
-  const txReservationRepo = { delete: vi.fn().mockResolvedValue(undefined) };
+  const txReservationRepo = {
+    find: vi.fn().mockResolvedValue([]),
+    remove: vi.fn().mockResolvedValue(undefined),
+  };
   const txSaleRepo = {
     save: vi.fn(async (value: object) => ({ ...value })),
     // Lo que un reintento con la misma clave vuelve a cargar por su id
@@ -897,27 +900,28 @@ describe('SalePaymentService', () => {
 
     it('charges a sale with a pending discount request instead of waiting for it: it withdraws the request and charges today’s total', async () => {
       const { service, txRequestRepo } = createService();
-      txRequestRepo.find.mockResolvedValue([pendingRequest]);
+      txRequestRepo.find.mockResolvedValue([{ ...pendingRequest }]);
 
       await service.complete(COMPANY, cashier, charge([cash('100000')]));
 
       // Solo las pendientes: una ya aprobada trae su descuento aplicado en el total que se cobra
       expect(txRequestRepo.find).toHaveBeenCalledWith({
         where: { saleId: In(['sale-1']), status: In([DiscountRequestStatus.PENDING]) },
+        lock: { mode: 'pessimistic_write' },
       });
-      expect(txRequestRepo.update).toHaveBeenCalledWith(
-        { id: In(['req-1']) },
+      expect(txRequestRepo.save).toHaveBeenCalledWith([
         expect.objectContaining({
+          id: 'req-1',
           status: DiscountRequestStatus.CANCELLED,
           resolvedBy: cashier.userId,
           resolutionNotes: expect.stringContaining('Retirada automáticamente'),
         }),
-      );
+      ]);
     });
 
     it('tells the approvers: the new-request notice is read and their pending list refreshes', async () => {
       const { service, txRequestRepo, notifications } = createService();
-      txRequestRepo.find.mockResolvedValue([pendingRequest]);
+      txRequestRepo.find.mockResolvedValue([{ ...pendingRequest }]);
 
       await service.complete(COMPANY, cashier, charge([cash('100000')]));
 
@@ -943,7 +947,7 @@ describe('SalePaymentService', () => {
 
       await service.complete(COMPANY, cashier, charge([cash('100000')]));
 
-      expect(txRequestRepo.update).not.toHaveBeenCalled();
+      expect(txRequestRepo.save).not.toHaveBeenCalled();
       expect(notifications.signalChange).not.toHaveBeenCalled();
     });
   });

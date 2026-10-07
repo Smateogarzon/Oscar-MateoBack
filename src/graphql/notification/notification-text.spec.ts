@@ -11,7 +11,9 @@ describe('CHANNEL_OF_TYPE', () => {
         ? NotificationChannel.DISCOUNTS
         : type.startsWith('INVENTORY_')
           ? NotificationChannel.INVENTORY
-          : NotificationChannel.RETURNS;
+          : type.startsWith('PURCHASE_ORDER_')
+            ? NotificationChannel.PURCHASING
+            : NotificationChannel.RETURNS;
       expect(CHANNEL_OF_TYPE[type]).toBe(expected);
     }
   });

@@ -27,8 +27,10 @@ import { InternalOrderService } from './internal-order.service.js';
 export class InternalOrderResolver {
   constructor(private readonly internalOrderService: InternalOrderService) {}
 
+  // Leer pedidos exige orders.view (la sección de pedidos). Antes bastaba ser miembro: un proveedor
+  // podía listarlos. Lo que cada rol ve dentro (su bodega, sus pedidos) queda para la Fase 6.
   @Query(() => [InternalOrderObjectType])
-  @RequireCompanyMembership()
+  @RequirePermissions(PermissionCode.ORDERS_VIEW)
   internalOrders(
     @CurrentCompanyId() companyId: string,
     @Args('status', { type: () => InternalOrderStatus, nullable: true }) status?: InternalOrderStatus,
@@ -39,13 +41,13 @@ export class InternalOrderResolver {
   }
 
   @Query(() => InternalOrderObjectType)
-  @RequireCompanyMembership()
+  @RequirePermissions(PermissionCode.ORDERS_VIEW)
   internalOrder(@CurrentCompanyId() companyId: string, @Args('id', { type: () => ID }) id: string) {
     return this.internalOrderService.findOne(companyId, id);
   }
 
   @Query(() => [InternalOrderItemObjectType])
-  @RequireCompanyMembership()
+  @RequirePermissions(PermissionCode.ORDERS_VIEW)
   internalOrderItems(
     @CurrentCompanyId() companyId: string,
     @Args('internalOrderId', { type: () => ID }) internalOrderId: string,

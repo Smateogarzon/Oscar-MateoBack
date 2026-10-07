@@ -193,11 +193,12 @@ export class ProductService {
 
     const canHardDelete = roleCodes.includes(HARD_DELETE_ROLE) && !(await this.hasActivity(manager, variantIds));
     if (canHardDelete) {
-      if (variantIds.length > 0) {
+      if (variants.length > 0) {
         await manager.getRepository(InventoryBalance).delete({ productVariantId: In(variantIds) });
-        await variantRepo.delete({ productId: product.id });
+        await variantRepo.remove(variants);
       }
-      await manager.getRepository(Product).delete({ id: product.id });
+      // remove() le quita el id al objeto que recibe: se borra una copia para devolver el producto con su id.
+      await manager.getRepository(Product).remove({ ...product });
       return product;
     }
 
