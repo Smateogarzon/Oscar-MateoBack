@@ -5,6 +5,8 @@ import { InventoryLocationModule } from '../inventory-location/inventory-locatio
 import { InventoryMovementModule } from '../inventory-movement/inventory-movement.module.js';
 import { InventoryReservationModule } from '../inventory-reservation/inventory-reservation.module.js';
 import { NotificationModule } from '../notification/notification.module.js';
+import { ReturnsBinModule } from '../returns-bin/returns-bin.module.js';
+import { InternalOrderCorrectionItem } from './entities/internal-order-correction-item.entity.js';
 import { InternalOrderCorrection } from './entities/internal-order-correction.entity.js';
 import { InternalOrderEvent } from './entities/internal-order-event.entity.js';
 import { InternalOrderItem } from './entities/internal-order-item.entity.js';
@@ -19,12 +21,13 @@ import { InternalOrderService } from './internal-order.service.js';
 // devolverle lo apartado si el cobro se anula.
 @Module({
   imports: [
-    TypeOrmModule.forFeature([InternalOrder, InternalOrderItem, InternalOrderVersion, InternalOrderEvent, InternalOrderCorrection]),
+    TypeOrmModule.forFeature([InternalOrder, InternalOrderItem, InternalOrderVersion, InternalOrderEvent, InternalOrderCorrection, InternalOrderCorrectionItem]),
     InventoryMovementModule,
     InventoryLocationModule,
     InventoryReservationModule,
     DocumentSequenceModule,
     NotificationModule,
+    ReturnsBinModule,
   ],
   providers: [InternalOrderService, InternalOrderStock, InternalOrderResolver, InternalOrderItemResolver],
   exports: [InternalOrderService],

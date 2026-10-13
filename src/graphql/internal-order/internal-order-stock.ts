@@ -3,6 +3,7 @@ import { Decimal } from 'decimal.js';
 import type { EntityManager } from 'typeorm';
 import { InventoryLocationService } from '../inventory-location/inventory-location.service.js';
 import { InventoryMovementType } from '../inventory-movement/entities/inventory-movement-type.enum.js';
+import { InventoryMovement } from '../inventory-movement/entities/inventory-movement.entity.js';
 import { InventorySourceType } from '../inventory-movement/entities/inventory-source-type.enum.js';
 import { InventoryMovementService } from '../inventory-movement/inventory-movement.service.js';
 import { InventoryReservationService } from '../inventory-reservation/inventory-reservation.service.js';
@@ -91,8 +92,19 @@ export class InternalOrderStock {
     await this.move(manager, companyId, order, from.id, bag.id, quantities, InventoryMovementType.RUNNER_PICKUP, actorId);
   }
 
-  // El corredor entrega: de su bolsa al STOCK del destino, o a su cajón de devoluciones (una RE
-  // llega a bodega y no vuelve a la venta hasta que bodega la verifica y la cierra).
+  // Ya salió de la bolsa del corredor. Antes la mercancía salía de la bolsa cuando el corredor marcaba
+  // la entrega; ahora sale cuando el destino confirma. Una orden que quedó entregada sin confirmar
+  // con la regla anterior ya hizo ese movimiento y no se repite.
+  async leftRunner(manager: EntityManager, orderId: string): Promise<boolean> {
+    return manager.getRepository(InventoryMovement).existsBy({
+      sourceType: InventorySourceType.TRANSFER_REQUEST,
+      sourceId: orderId,
+      type: InventoryMovementType.RUNNER_DELIVERY,
+    });
+  }
+
+  // El destino confirma el recibo: de la bolsa del corredor al STOCK del destino, o a su cajón de
+  // devoluciones (una RE llega a bodega y no vuelve a la venta hasta que bodega la verifica y la cierra).
   async fromRunner(
     manager: EntityManager,
     companyId: string,

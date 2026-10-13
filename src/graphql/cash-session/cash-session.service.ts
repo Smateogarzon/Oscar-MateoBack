@@ -439,7 +439,7 @@ export class CashSessionService {
     // Los borradores que cobraban una orden de venta: la orden sigue por cobrar (otro turno la toma).
     for (const draft of drafts) {
       if (draft.internalOrderId) {
-        await this.internalOrders.restoreAfterSaleDiscarded(manager, companyId, draft.internalOrderId, actorId);
+        await this.internalOrders.restoreAfterSaleDiscarded(manager, companyId, draft.internalOrderId, actorId, draft.id);
       }
     }
 

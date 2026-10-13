@@ -22,6 +22,7 @@ import { NotificationChannel } from '../notification/entities/notification-chann
 import { NotificationEntityType } from '../notification/entities/notification-entity-type.enum.js';
 import { NotificationType } from '../notification/entities/notification-type.enum.js';
 import { NotificationService } from '../notification/notification.service.js';
+import { ReturnsBinService } from '../returns-bin/returns-bin.service.js';
 import { PaymentMethodType } from '../payment-method/entities/payment-method-type.enum.js';
 import { validatePaymentMethods } from '../payment-method/payment-method-validation.js';
 import { SaleItemType } from '../sale/entities/sale-item-type.enum.js';
@@ -86,6 +87,7 @@ export class SaleReturnService {
     private readonly cashSessions: CashSessionService,
     private readonly notifications: NotificationService,
     private readonly inventoryLocations: InventoryLocationService,
+    private readonly returnsBin: ReturnsBinService,
     private readonly inventoryMovements: InventoryMovementService,
   ) {}
 
@@ -699,13 +701,12 @@ export class SaleReturnService {
     return { items, totalReturned };
   }
 
-  // Pone en la ubicación RETURNS de la tienda de la venta original lo que el cliente devolvió
-  // físicamente: un movimiento RETURN (ver InventoryMovementType) por cada línea de catálogo de la
-  // devolución. Las líneas GENERIC (sin productVariantId, p.ej. un cargo de servicio) no tocan
-  // inventario, igual que al cobrar (ver SalePaymentService.completeInTransaction). Cae en la
-  // misma zona de cuarentena para cualquier tienda (InventoryLocationService.findOrCreateReturnsLocation):
-  // de ahí se traspasa a bodega vendible a mano, con la función de traspasos que ya existe, no se
-  // vende solo por reaparecer.
+  // Devuelve a la tienda de la venta original lo que el cliente trajo físicamente: un movimiento
+  // RETURN (ver InventoryMovementType) por cada línea de catálogo al STOCK de la tienda —se ve en
+  // Inventario, en la tienda—, apartado en su cajón de devoluciones (ReturnsBinService), así no se
+  // vende solo por reaparecer: el administrador decide cuándo mandarlo a bodega en una RE. Las líneas
+  // GENERIC (sin productVariantId, p.ej. un cargo de servicio) no tocan inventario, igual que al
+  // cobrar (ver SalePaymentService.completeInTransaction).
   private async restockReturnedItems(
     manager: EntityManager,
     actorId: string,
@@ -723,16 +724,15 @@ export class SaleReturnService {
     );
     if (inventoried.length === 0) return;
 
-    const returnsLocation = await this.inventoryLocations.findOrCreateReturnsLocation(
-      manager,
-      saleReturn.companyId,
-      originalSale.storeId,
-    );
+    const storeStock = await this.inventoryLocations.findStockLocation(manager, saleReturn.companyId, originalSale.storeId);
 
+    const quantities = new Map<string, Decimal>();
     for (const item of inventoried) {
+      const productVariantId = item.saleItem.productVariantId!;
+      quantities.set(productVariantId, (quantities.get(productVariantId) ?? new Decimal(0)).plus(item.quantity));
       await this.inventoryMovements.recordInTransaction(manager, saleReturn.companyId, actorId, {
-        productVariantId: item.saleItem.productVariantId!,
-        toLocationId: returnsLocation.id,
+        productVariantId,
+        toLocationId: storeStock.id,
         quantity: item.quantity,
         type: InventoryMovementType.RETURN,
         sourceType: InventorySourceType.SALE_RETURN,
@@ -740,6 +740,13 @@ export class SaleReturnService {
         sourceNumber: saleReturn.returnNumber,
       });
     }
+    await this.returnsBin.hold(manager, saleReturn.companyId, {
+      storeId: originalSale.storeId,
+      origin: { id: saleReturn.id, number: saleReturn.returnNumber },
+      quantities,
+      actorId,
+      notify: true,
+    });
   }
 
   private async lock(manager: EntityManager, companyId: string, id: string): Promise<SaleReturn> {

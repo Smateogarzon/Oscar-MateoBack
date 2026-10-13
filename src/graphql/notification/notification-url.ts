@@ -6,6 +6,7 @@ const ROUTE = {
   notifications: '/notifications',
   inventory: '/inventory',
   cash: '/cash',
+  orders: '/orders',
 } as const;
 
 /**
@@ -21,6 +22,8 @@ export function notificationUrl(entityType: NotificationEntityType, entityId: st
       return `${ROUTE.inventory}?${company}`;
     case NotificationEntityType.CASH_SESSION:
       return `${ROUTE.cash}?${company}`;
+    case NotificationEntityType.RETURNS_BIN:
+      return `${ROUTE.orders}?cajon=${encodeURIComponent(entityId)}&${company}`;
     default:
       return `${ROUTE.notifications}?${company}`;
   }

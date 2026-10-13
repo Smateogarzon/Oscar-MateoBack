@@ -12,6 +12,7 @@ import { InternalOrder } from './internal-order.entity.js';
 //   3  el vendedor recibió lo correcto: corrección cerrada (closedAt)
 // No mueve inventario: el sistema ya registró la variante correcta; lo que se corrige es el error
 // físico de alistamiento, que queda como novedad (WRONG_VARIANT) para revisarlo después.
+// Cuáles líneas llegaron equivocadas (pueden ser varias) las guarda `internal_order_correction_items`.
 @Entity('internal_order_corrections')
 @Index(['internalOrderId'])
 export class InternalOrderCorrection extends BaseEntity {

@@ -1,6 +1,6 @@
 import { UseGuards } from '@nestjs/common';
 import { Args, ID, Mutation, Parent, Query, ResolveField, Resolver } from '@nestjs/graphql';
-import type { CompanyAccess } from '../../common/access/company-access.js';
+import { isCompanyAdmin, type CompanyAccess } from '../../common/access/company-access.js';
 import { CurrentCompanyAccess, CurrentCompanyId } from '../../common/decorators/current-company.decorator.js';
 import { CurrentUser } from '../../common/decorators/current-user.decorator.js';
 import { IdempotencyKeyHeader } from '../../common/decorators/idempotency-key.decorator.js';
@@ -12,6 +12,7 @@ import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard.js';
 import { PermissionsGuard } from '../../common/guards/permissions.guard.js';
 import { fullName } from '../../common/utils/text.js';
 import type { JwtPayload } from '../auth/interface/jwt-payload.interface.js';
+import { IncidentObjectType } from '../incident/dto/incident.object-type.js';
 import { LocationObjectType } from '../location/dto/location.object-type.js';
 import { InternalOrderChangeInput } from './dto/internal-order-change.input.js';
 import { InternalOrderItemObjectType } from './dto/internal-order-item.object-type.js';
@@ -23,29 +24,32 @@ import {
   OrderStockOptionObjectType,
 } from './dto/internal-order.object-type.js';
 import { InternalOrdersFilterInput } from './dto/internal-orders-filter.input.js';
+import { ReportInternalOrderIncidentInput } from './dto/report-internal-order-incident.input.js';
 import { RequestInternalOrderInput } from './dto/request-internal-order.input.js';
+import { CreateReturnFromBinInput, ReturnsBinLineObjectType } from './dto/returns-bin.dto.js';
 import { TransitionInternalOrderInput } from './dto/transition-internal-order.input.js';
 import { InternalOrderNudge } from './entities/internal-order-nudge.enum.js';
 import { InternalOrderService, type InternalOrderView, type OrderActor } from './internal-order.service.js';
 
 // Quien opera, con sus permisos en la empresa activa. El super admin lo puede todo (también hacer un
-// paso por el corredor asignado).
+// paso por el corredor asignado); anular es solo del administrador.
 const actorOf = (user: JwtPayload, access: CompanyAccess): OrderActor => ({
   userId: user.sub,
   permissionCodes: access.permissionCodes,
   isSuperAdmin: access.roleCodes.includes(RoleCode.SUPER_ADMIN),
+  isAdmin: isCompanyAdmin(access),
 });
 
 // Las consultas solo piden pertenecer a la empresa: QUÉ órdenes ve cada quien lo decide el servicio
-// (bodega, corredores y quien tiene orders.view_all ven todas; los demás, las suyas y las de sus
-// sedes). Las mutaciones también se validan allá, paso por paso, con la tabla del flujo.
+// por permisos (ver internal-order-visibility.ts), también para moverlas. Las mutaciones se validan
+// allá, paso por paso, con la tabla del flujo.
 @Resolver(() => InternalOrderObjectType)
 @UseGuards(JwtAuthGuard, PermissionsGuard, CsrfGuard)
 export class InternalOrderResolver {
   constructor(private readonly internalOrderService: InternalOrderService) {}
 
-  // Leer pedidos exige orders.view (la sección de pedidos). Antes bastaba ser miembro: un proveedor
-  // podía listarlos. Lo que cada rol ve dentro (su bodega, sus pedidos) queda para la Fase 6.
+  // Leer pedidos exige orders.view (la sección de pedidos). Lo que cada quien ve dentro (todas, las de
+  // su bodega, las que lleva o puede tomar, las que pidió) lo decide internal-order-visibility.ts.
   @Query(() => [InternalOrderObjectType])
   @RequirePermissions(PermissionCode.ORDERS_VIEW)
   internalOrders(
@@ -151,9 +155,10 @@ export class InternalOrderResolver {
     @CurrentUser() user: JwtPayload,
     @CurrentCompanyAccess() access: CompanyAccess,
     @Args('orderId', { type: () => ID }) orderId: string,
+    @Args('itemIds', { type: () => [ID] }) itemIds: string[],
     @Args('description') description: string,
   ) {
-    const order = await this.internalOrderService.reportCorrection(companyId, actorOf(user, access), orderId, description);
+    const order = await this.internalOrderService.reportCorrection(companyId, actorOf(user, access), orderId, itemIds, description);
     return this.internalOrderService.findView(companyId, order.id);
   }
 
@@ -180,6 +185,65 @@ export class InternalOrderResolver {
     @Args('message', { nullable: true }) message?: string,
   ) {
     const order = await this.internalOrderService.nudge(companyId, actorOf(user, access), orderId, kind, message);
+    return this.internalOrderService.findView(companyId, order.id);
+  }
+
+  // El corredor toma una orden que espera en bodega (antes de recogerla).
+  @Mutation(() => InternalOrderObjectType)
+  @RequirePermissions(PermissionCode.RUNNER_PICKUP_ORDERS)
+  async claimInternalOrder(
+    @CurrentCompanyId() companyId: string,
+    @CurrentUser() user: JwtPayload,
+    @CurrentCompanyAccess() access: CompanyAccess,
+    @Args('orderId', { type: () => ID }) orderId: string,
+  ) {
+    const order = await this.internalOrderService.claim(companyId, actorOf(user, access), orderId);
+    return this.internalOrderService.findView(companyId, order.id);
+  }
+
+  // ─── Cajón de devoluciones (solo el administrador) ──────────────────────────────────────────
+
+  @Query(() => [ReturnsBinLineObjectType])
+  @RequireCompanyMembership()
+  returnsBin(@CurrentCompanyId() companyId: string, @CurrentUser() user: JwtPayload, @CurrentCompanyAccess() access: CompanyAccess) {
+    return this.internalOrderService.returnsBinContents(companyId, actorOf(user, access));
+  }
+
+  @Mutation(() => InternalOrderObjectType)
+  @RequireCompanyMembership()
+  async createReturnFromBin(
+    @CurrentCompanyId() companyId: string,
+    @CurrentUser() user: JwtPayload,
+    @CurrentCompanyAccess() access: CompanyAccess,
+    @Args('input') input: CreateReturnFromBinInput,
+  ) {
+    const order = await this.internalOrderService.createReturnFromBin(companyId, actorOf(user, access), input);
+    return this.internalOrderService.findView(companyId, order.id);
+  }
+
+  // El corredor responde dónde va (a "Contactar al corredor").
+  @Mutation(() => InternalOrderObjectType)
+  @RequireAnyPermission(PermissionCode.RUNNER_PICKUP_ORDERS, PermissionCode.RUNNER_CONFIRM_DELIVERY)
+  async replyAsRunner(
+    @CurrentCompanyId() companyId: string,
+    @CurrentUser() user: JwtPayload,
+    @CurrentCompanyAccess() access: CompanyAccess,
+    @Args('orderId', { type: () => ID }) orderId: string,
+    @Args('message') message: string,
+  ) {
+    const order = await this.internalOrderService.runnerReply(companyId, actorOf(user, access), orderId, message.slice(0, 300));
+    return this.internalOrderService.findView(companyId, order.id);
+  }
+
+  @Mutation(() => InternalOrderObjectType)
+  @RequireAnyPermission(PermissionCode.RUNNER_REPORT_INCIDENT, PermissionCode.ORDERS_CONFIRM_RECEIPT, PermissionCode.WAREHOUSE_FULFILL_ORDERS)
+  async reportInternalOrderIncident(
+    @CurrentCompanyId() companyId: string,
+    @CurrentUser() user: JwtPayload,
+    @CurrentCompanyAccess() access: CompanyAccess,
+    @Args('input') input: ReportInternalOrderIncidentInput,
+  ) {
+    const order = await this.internalOrderService.reportIncident(companyId, actorOf(user, access), input);
     return this.internalOrderService.findView(companyId, order.id);
   }
 
@@ -280,6 +344,7 @@ export class InternalOrderResolver {
       createdAt: correction.createdAt,
       versionNumber: correction.versionNumber,
       description: correction.description,
+      items: correction.items,
       reportedByName: correction.reportedByUser ? fullName(correction.reportedByUser) : null,
       runnerName: correction.runner ? fullName(correction.runner) : null,
       step: correction.step,
@@ -288,6 +353,12 @@ export class InternalOrderResolver {
       closedAt: correction.closedAt,
       incidentId: correction.incidentId,
     }));
+  }
+
+  // Las novedades de la orden y de sus líneas: las ve quien ve la orden.
+  @ResolveField(() => [IncidentObjectType])
+  incidents(@Parent() order: InternalOrderView) {
+    return order.incidents;
   }
 
   // Las sub-órdenes (cambios de pedido despachados por otra bodega): solo se piden en el detalle.

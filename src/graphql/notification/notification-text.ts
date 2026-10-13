@@ -110,6 +110,15 @@ const TEXTS: Record<
     title: 'Preguntan por una orden',
     message: (p) => `${p.actorName} pregunta por la orden #${ref(p)} que llevas.`,
   },
+  [NotificationType.RETURNS_BIN_ADDED]: {
+    title: 'Cajón de devoluciones',
+    message: (p) =>
+      `${p.actorName} dejó ${p.quantity ?? 'algo'} ${p.quantity === '1' ? 'unidad' : 'unidades'} de ${p.reference ? `#${p.reference}` : 'una devolución'} en el cajón de ${p.locationName ?? 'la tienda'}.`,
+  },
+  [NotificationType.ORDER_RUNNER_REPLIED]: {
+    title: 'El corredor responde',
+    message: (p) => `${p.actorName} sobre la orden #${ref(p)}: ${p.notes ?? 'va en camino'}.`,
+  },
   [NotificationType.ORDER_CORRECTION]: {
     title: 'Retorno a bodega por error',
     message: (p) => `${p.actorName} reportó que llegó una referencia equivocada en la orden #${ref(p)}.`,

@@ -10,6 +10,7 @@ import { RefundPayment } from './entities/refund-payment.entity.js';
 import { SaleReturnItem } from './entities/sale-return-item.entity.js';
 import { SaleReturn } from './entities/sale-return.entity.js';
 import { SaleReturnResolver } from './sale-return.resolver.js';
+import { ReturnsBinModule } from '../returns-bin/returns-bin.module.js';
 import { SaleReturnService } from './sale-return.service.js';
 
 @Module({
@@ -21,6 +22,7 @@ import { SaleReturnService } from './sale-return.service.js';
     NotificationModule,
     InventoryLocationModule,
     InventoryMovementModule,
+    ReturnsBinModule,
   ],
   providers: [SaleReturnService, SaleReturnResolver],
   exports: [SaleReturnService],
