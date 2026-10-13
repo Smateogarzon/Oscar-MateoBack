@@ -138,6 +138,11 @@ export class InternalOrderCorrectionObjectType {
   @Field()
   description: string;
 
+  // Las líneas que llegaron equivocadas (pueden ser varias). Vacío en las correcciones anteriores a
+  // que se pudieran señalar; pueden ser de una versión vieja de la orden, por eso viajan enteras.
+  @Field(() => [InternalOrderItemObjectType])
+  items: InternalOrderItemObjectType[];
+
   @Field(() => String, { nullable: true })
   reportedByName: string | null;
 

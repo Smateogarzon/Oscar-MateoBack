@@ -11,6 +11,9 @@ export enum NotificationType {
   RETURN_APPROVED = 'RETURN_APPROVED',
   RETURN_REJECTED = 'RETURN_REJECTED',
   RETURN_CANCELLED = 'RETURN_CANCELLED',
+  // Algo quedó en el cajón de devoluciones de una tienda: le avisa al administrador, que decide
+  // cuándo mandarlo a bodega en una RE (ver ReturnsBinService).
+  RETURNS_BIN_ADDED = 'RETURNS_BIN_ADDED',
   // Una existencia cruzó su mínimo (ver InventoryBalance.minStock): justo al pasar de estar por
   // encima a estar en o por debajo, no en cada movimiento siguiente mientras siga baja (ver
   // InventoryMovementService.maybeNotifyLowStock).
@@ -35,6 +38,7 @@ export enum NotificationType {
   //   ORDER_HURRY              bodega: el vendedor apura la orden (cliente esperando)
   //   ORDER_STOCK_QUESTION     bodega: el vendedor pregunta por la existencia
   //   ORDER_RUNNER_CALLED      el corredor asignado: el vendedor pregunta por la orden
+  //   ORDER_RUNNER_REPLIED     quien la pidió: el corredor responde dónde va
   //   ORDER_CORRECTION         corredores y bodega: llegó una referencia equivocada
   ORDER_REQUESTED = 'ORDER_REQUESTED',
   ORDER_READY_FOR_RUNNER = 'ORDER_READY_FOR_RUNNER',
@@ -43,6 +47,7 @@ export enum NotificationType {
   ORDER_HURRY = 'ORDER_HURRY',
   ORDER_STOCK_QUESTION = 'ORDER_STOCK_QUESTION',
   ORDER_RUNNER_CALLED = 'ORDER_RUNNER_CALLED',
+  ORDER_RUNNER_REPLIED = 'ORDER_RUNNER_REPLIED',
   ORDER_CORRECTION = 'ORDER_CORRECTION',
 }
 
@@ -57,6 +62,7 @@ export const CHANNEL_OF_TYPE: Record<NotificationType, NotificationChannel> = {
   [NotificationType.RETURN_APPROVED]: NotificationChannel.RETURNS,
   [NotificationType.RETURN_REJECTED]: NotificationChannel.RETURNS,
   [NotificationType.RETURN_CANCELLED]: NotificationChannel.RETURNS,
+  [NotificationType.RETURNS_BIN_ADDED]: NotificationChannel.RETURNS,
   [NotificationType.INVENTORY_LOW_STOCK]: NotificationChannel.INVENTORY,
   [NotificationType.PURCHASE_ORDER_SENT]: NotificationChannel.PURCHASING,
   [NotificationType.PURCHASE_ORDER_OVERAGE_PENDING]: NotificationChannel.PURCHASING,
@@ -73,5 +79,6 @@ export const CHANNEL_OF_TYPE: Record<NotificationType, NotificationChannel> = {
   [NotificationType.ORDER_HURRY]: NotificationChannel.ORDERS,
   [NotificationType.ORDER_STOCK_QUESTION]: NotificationChannel.ORDERS,
   [NotificationType.ORDER_RUNNER_CALLED]: NotificationChannel.ORDERS,
+  [NotificationType.ORDER_RUNNER_REPLIED]: NotificationChannel.ORDERS,
   [NotificationType.ORDER_CORRECTION]: NotificationChannel.ORDERS,
 };

@@ -15,6 +15,7 @@ import { LocationType } from '../location/entities/location-type.enum.js';
 import { Location } from '../location/entities/location.entity.js';
 import { NotificationType } from '../notification/entities/notification-type.enum.js';
 import { NotificationService } from '../notification/notification.service.js';
+import { ReturnsBinService } from '../returns-bin/returns-bin.service.js';
 import { ProductVariant } from '../product-variant/entities/product-variant.entity.js';
 import { SaleStatus } from '../sale/entities/sale-status.enum.js';
 import { Sale } from '../sale/entities/sale.entity.js';
@@ -25,6 +26,7 @@ import type { InternalOrderLineCountInput } from './dto/internal-order-line-coun
 import type { InternalOrdersFilterInput } from './dto/internal-orders-filter.input.js';
 import type { RequestInternalOrderInput } from './dto/request-internal-order.input.js';
 import type { TransitionInternalOrderInput } from './dto/transition-internal-order.input.js';
+import { InternalOrderCorrectionItem } from './entities/internal-order-correction-item.entity.js';
 import { InternalOrderCorrection } from './entities/internal-order-correction.entity.js';
 import { InternalOrderEventKind } from './entities/internal-order-event-kind.enum.js';
 import { InternalOrderEvent } from './entities/internal-order-event.entity.js';
@@ -36,26 +38,70 @@ import { InternalOrderStatus as S } from './entities/internal-order-status.enum.
 import { InternalOrderType } from './entities/internal-order-type.enum.js';
 import { InternalOrderVersion } from './entities/internal-order-version.entity.js';
 import { InternalOrder } from './entities/internal-order.entity.js';
-import { FINAL_STATUSES, INITIAL_STATUS, isFinalStatus, stepFor, type FlowStep } from './internal-order-flow.js';
+import {
+  FINAL_STATUSES,
+  INITIAL_STATUS,
+  isFinalStatus,
+  PICKED_UP_STATUSES,
+  RUNNER_ENGAGED_STATUSES,
+  stepFor,
+  WAITING_RUNNER_STATUSES,
+  type FlowStep,
+} from './internal-order-flow.js';
 import { formatInternalOrderNumber, INTERNAL_ORDER_SERIES } from './internal-order-number.js';
-import { InternalOrderStock, quantitiesOf } from './internal-order-stock.js';
+import { InternalOrderStock, quantitiesOf, type VariantQuantities } from './internal-order-stock.js';
+import { applyVisibility, canSeeOrder, visibilityOf, type OrderVisibility } from './internal-order-visibility.js';
 import { notifyInternalOrder, signalInternalOrderChange } from './internal-order-watchers.js';
 
-// Quién hace la operación: sus permisos en la empresa activa (los del token ya resueltos) y si es
-// super admin (lo puede todo, también hacer un paso por el corredor asignado).
+// Quién hace la operación: sus permisos en la empresa activa (los del token ya resueltos), si es
+// super admin (lo puede todo, también hacer un paso por el corredor asignado) y si administra la
+// empresa (Administrador o super admin: para los pasos que son solo del administrador).
 export interface OrderActor {
   userId: string;
   permissionCodes: readonly string[];
   isSuperAdmin: boolean;
+  isAdmin: boolean;
 }
+
+// Un retorno por error con las líneas que llegaron equivocadas ya resueltas (`internal_order_
+// correction_items` solo guarda sus ids, y pueden ser de una versión anterior de la orden).
+export type InternalOrderCorrectionView = InternalOrderCorrection & { items: InternalOrderItem[] };
 
 // Una orden lista para mostrarse: con sus líneas vigentes, su bitácora y sus correcciones, y el
 // número de la venta que la cobró (si la hay). Lo arma `hydrate` en pocas consultas, no una por orden.
 export type InternalOrderView = InternalOrder & {
   items: InternalOrderItem[];
   events: InternalOrderEvent[];
-  corrections: InternalOrderCorrection[];
+  corrections: InternalOrderCorrectionView[];
+  incidents: Incident[];
   saleNumber: string | null;
+};
+
+// Las novedades que se pueden reportar sobre una orden en curso (las de bodega al alistar y al
+// verificar una devolución las abre el propio flujo).
+export const ORDER_INCIDENT_TYPES: readonly IncidentType[] = [
+  IncidentType.NOT_FOUND,
+  IncidentType.DAMAGE,
+  IncidentType.ORDER_ISSUE,
+  IncidentType.DELIVERY_ISSUE,
+];
+
+export interface OrderIncidentReport {
+  orderId: string;
+  itemId?: string;
+  type: IncidentType;
+  description: string;
+}
+
+// Con qué valores de entityType una novedad queda ligada a una orden o a una de sus líneas.
+export const ORDER_INCIDENT_ENTITY = 'INTERNAL_ORDER';
+export const ORDER_ITEM_INCIDENT_ENTITY = 'INTERNAL_ORDER_ITEM';
+
+const INCIDENT_TITLES: Partial<Record<IncidentType, string>> = {
+  [IncidentType.NOT_FOUND]: 'Producto faltante',
+  [IncidentType.DAMAGE]: 'Producto dañado',
+  [IncidentType.ORDER_ISSUE]: 'Problema con la orden',
+  [IncidentType.DELIVERY_ISSUE]: 'Problema en la entrega',
 };
 
 export type InternalOrderVersionView = InternalOrderVersion & { items: InternalOrderItem[] };
@@ -81,13 +127,23 @@ const ORDER_RELATIONS = {
 } as const;
 const ITEM_RELATIONS = { productVariant: { product: true, color: true, size: true } } as const;
 
-// Ven todas las órdenes de la empresa: quien tiene ORDERS_VIEW_ALL, bodega y corredores (trabajan
-// sobre las de todos). Los demás (vendedores, caja) ven las que pidieron y las de sus sedes.
-const SEE_ALL_PERMISSIONS: readonly PermissionCode[] = [
-  PermissionCode.ORDERS_VIEW_ALL,
+// "Air Jordan 1 · Rojo / 39 y Air Max 90 · Negro / 38": cómo se nombran en la bitácora, en las
+// novedades y en los avisos las líneas que llegaron equivocadas. Pide las líneas con ITEM_RELATIONS;
+// sin ellas no hay con qué nombrarlas.
+const linesLabel = (items: InternalOrderItem[]): string =>
+  items
+    .map((item) =>
+      item.productVariant?.product
+        ? `${item.productVariant.product.name} · ${item.productVariant.color.name} / ${item.productVariant.size.name}`
+        : 'una referencia',
+    )
+    .join(' y ');
+
+// Quién puede reportar una novedad sobre una orden.
+const INCIDENT_REPORTERS: readonly PermissionCode[] = [
+  PermissionCode.RUNNER_REPORT_INCIDENT,
+  PermissionCode.ORDERS_CONFIRM_RECEIPT,
   PermissionCode.WAREHOUSE_FULFILL_ORDERS,
-  PermissionCode.WAREHOUSE_RECEIVE_RETURNS,
-  PermissionCode.RUNNER_PICKUP_ORDERS,
 ];
 
 // Pedir una SO es del vendedor; un traslado o un surtido, de quien maneja transferencias o bodega.
@@ -110,6 +166,7 @@ export class InternalOrderService {
     private readonly sequences: DocumentSequenceService,
     private readonly stock: InternalOrderStock,
     private readonly notifications: NotificationService,
+    private readonly returnsBin: ReturnsBinService,
   ) {}
 
   // ─── Consultas ─────────────────────────────────────────────────────────────────────────────
@@ -130,19 +187,9 @@ export class InternalOrderService {
       .leftJoinAndSelect('o.relatedOrder', 'relatedOrder')
       .where('o.companyId = :companyId', { companyId });
 
-    if (filter.mine || !this.canSeeAll(actor)) {
-      const locationIds = filter.mine ? [] : await this.accessibleLocationIds(this.dataSource.manager, companyId, actor);
-      query.andWhere(
-        new Brackets((where) => {
-          where.where('o.requestedBy = :me', { me: actor.userId });
-          if (locationIds.length > 0) {
-            where
-              .orWhere('o.destinationLocationId IN (:...locationIds)', { locationIds })
-              .orWhere('o.sourceLocationId IN (:...locationIds)', { locationIds });
-          }
-        }),
-      );
-    }
+    // Lo que cada quien ve lo decide internal-order-visibility.ts; `mine` acota además a lo que pidió.
+    applyVisibility(query, 'o', await this.visibilityOf(this.dataSource.manager, companyId, actor));
+    if (filter.mine) query.andWhere('o.requestedBy = :me', { me: actor.userId });
     if (filter.type) query.andWhere('o.type = :type', { type: filter.type });
     if (filter.status) query.andWhere('o.status = :status', { status: filter.status });
     if (filter.destinationLocationId) {
@@ -326,6 +373,7 @@ export class InternalOrderService {
   async transition(companyId: string, actor: OrderActor, input: TransitionInternalOrderInput): Promise<InternalOrder> {
     return this.dataSource.transaction(async (manager) => {
       const order = await this.lock(manager, companyId, input.id);
+      await this.assertCanSee(manager, companyId, actor, order);
       const step = stepFor(order.type, order.status, input.to);
       if (!step) throw new ConflictException(`La orden #${order.orderNumber} no puede pasar de ${order.status} a ${input.to}`);
       this.assertStepAllowed(order, step, actor);
@@ -337,12 +385,10 @@ export class InternalOrderService {
   }
 
   private assertStepAllowed(order: InternalOrder, step: FlowStep, actor: OrderActor): void {
-    // Una sub-orden recibida solo se une a su orden original; una orden que no es sub-orden no se une.
-    if (step.effect === 'MERGE' && !order.parentOrderId) throw new ConflictException('Solo una sub-orden se une a la orden original');
-    if (order.parentOrderId && order.status === S.RECEIVED_BY_SELLER && step.effect !== 'MERGE') {
-      throw new ConflictException('Una sub-orden recibida se une a la orden original: el cobro o la devolución se hacen allá');
+    if (step.actor === 'ADMIN') {
+      if (!actor.isAdmin) throw new ForbiddenException('Solo el administrador puede hacer esto');
+      return;
     }
-
     const permitted = this.has(actor, step.permissions);
     if (step.actor === 'REQUESTER') {
       if (!permitted && order.requestedBy !== actor.userId) throw new ForbiddenException('Solo quien la pidió, o quien tiene el permiso, puede hacer esto');
@@ -351,6 +397,12 @@ export class InternalOrderService {
     if (!permitted) throw new ForbiddenException('No tienes permiso para hacer este paso');
     if (step.actor === 'RUNNER' && order.runnerId !== actor.userId && !actor.isSuperAdmin) {
       throw new ForbiddenException('Solo el corredor que la lleva puede hacer esto');
+    }
+    // Para recoger hay que haber tomado la orden antes (claim), y solo la recoge quien la tomó (o el
+    // super admin, por él).
+    if (step.effect === 'PICK_UP' && !actor.isSuperAdmin) {
+      if (!order.runnerId) throw new ForbiddenException('Toma la orden antes de recogerla');
+      if (order.runnerId !== actor.userId) throw new ForbiddenException('Otro corredor ya tomó esta orden');
     }
   }
 
@@ -364,11 +416,6 @@ export class InternalOrderService {
   ): Promise<void> {
     const me = actor.userId;
     switch (step.effect) {
-      case 'ACCEPT':
-        order.warehouseOperatorId = me;
-        await this.setStatus(manager, order, step.to, me, step.detail, order.sourceLocationId);
-        return;
-
       case 'PACK':
         order.warehouseOperatorId ??= me;
         await this.setStatus(manager, order, step.to, me, step.detail, order.sourceLocationId);
@@ -390,35 +437,43 @@ export class InternalOrderService {
       }
 
       case 'PICK_UP': {
+        // Si un corredor la tomó, la lleva él aunque el super admin haga el paso por él.
+        const runnerId = order.runnerId ?? me;
         const items = await this.currentItems(manager, order);
-        order.runnerId = me;
+        order.runnerId = runnerId;
         await this.stock.release(manager, order.id);
-        await this.stock.toRunner(manager, companyId, order, me, quantitiesOf(items), me);
-        await this.setStatus(manager, order, step.to, me, `${step.detail} · ${await this.nameOf(manager, me)}`, order.sourceLocationId);
+        await this.stock.toRunner(manager, companyId, order, runnerId, quantitiesOf(items), me);
+        await this.setStatus(manager, order, step.to, me, `${step.detail} · ${await this.nameOf(manager, runnerId)}`, order.sourceLocationId);
         return;
       }
 
+      // El corredor marca la entrega física: la mercancía sigue en su bolsa (bajo su custodia) hasta
+      // que el destino confirme el recibo.
       case 'DELIVER':
-        await this.deliver(manager, companyId, order, me);
-        await this.setStatus(manager, order, step.to, me, `${step.detail} · ${await this.locationName(manager, order.destinationLocationId)}`, order.destinationLocationId);
+        if (!order.runnerId) throw new ConflictException('Esta orden no tiene corredor');
+        await this.setStatus(
+          manager,
+          order,
+          step.to,
+          me,
+          `${step.detail} · ${await this.locationName(manager, order.destinationLocationId)} · esperando confirmación`,
+          order.destinationLocationId,
+        );
         await notifyInternalOrder(manager, this.notifications, companyId, order, NotificationType.ORDER_DELIVERED, ['REQUESTER'], me);
-        return;
-
-      case 'DELIVER_AND_RECEIVE':
-        await assertStoreAccess(manager, me, order.destinationLocationId);
-        await this.deliver(manager, companyId, order, me);
-        await this.setStatus(manager, order, S.DELIVERED_TO_STORE, me, `Entregado en ${await this.locationName(manager, order.destinationLocationId)}`, order.destinationLocationId);
-        order.receivedBy = me;
-        await this.setStatus(manager, order, step.to, me, step.detail, order.destinationLocationId);
         return;
 
       case 'RECEIVE':
         if (order.type === InternalOrderType.SO) await assertStoreAccess(manager, me, order.destinationLocationId);
+        await this.handOver(manager, companyId, order, quantitiesOf(await this.currentItems(manager, order)), me);
         order.receivedBy = me;
-        await this.setStatus(manager, order, step.to, me, step.detail, order.destinationLocationId);
+        await this.setStatus(manager, order, step.to, me, `${step.detail} · termina la custodia del corredor`, order.destinationLocationId);
+        if (order.type === InternalOrderType.SO && order.parentOrderId) await this.absorbParent(manager, companyId, order, me);
         return;
 
       case 'TO_PAYMENT':
+        // Una sub-orden nunca se cobra dejando a su original esperando el cambio: si por lo que sea
+        // no absorbió al recibirse (p. ej. se recibió con la regla anterior), lo hace ahora.
+        if (order.type === InternalOrderType.SO && order.parentOrderId) await this.absorbParent(manager, companyId, order, me);
         await this.setStatus(manager, order, step.to, me, step.detail, order.destinationLocationId);
         await notifyInternalOrder(manager, this.notifications, companyId, order, NotificationType.ORDER_PENDING_PAYMENT, ['STORE_CASHIERS'], me);
         return;
@@ -428,25 +483,36 @@ export class InternalOrderService {
         await this.setStatus(manager, order, step.to, me, step.detail, order.destinationLocationId);
         return;
 
+      // El cliente no compra: lo que tenía apartado pasa al cajón de devoluciones de la tienda (sigue
+      // ahí, apartado para nadie) y la orden se cierra como devuelta.
       case 'RETURN_REQUEST': {
         await this.assertNoOpenSale(manager, order);
         const items = await this.currentItems(manager, order);
-        const ret = await this.createReturn(manager, companyId, order, items, me, 'El cliente no compra');
-        order.relatedOrderId = ret.id;
-        await this.newVersion(manager, order, `Devolución solicitada · #${ret.orderNumber}`, items, me);
-        await this.setStatus(manager, order, step.to, me, `${step.detail} #${ret.orderNumber}`, order.destinationLocationId);
+        await this.stock.release(manager, order.id);
+        await this.returnsBin.hold(manager, companyId, {
+          storeId: order.destinationLocationId,
+          origin: { id: order.id, number: order.orderNumber },
+          quantities: quantitiesOf(items),
+          actorId: me,
+          notify: true,
+        });
+        await this.setStatus(manager, order, step.to, me, `${step.detail} de ${await this.locationName(manager, order.destinationLocationId)}`, order.destinationLocationId);
         return;
       }
 
-      case 'MERGE':
-        await this.merge(manager, companyId, order, me);
-        return;
-
       case 'VERIFY_RETURN': {
         const items = await this.currentItems(manager, order);
+        // Lo que el corredor trajo entra completo al cajón de devoluciones (termina su custodia); lo
+        // que no cuadre se queda allí con su novedad y no pasa al STOCK.
+        await this.handOver(manager, companyId, order, quantitiesOf(items), me);
+        order.receivedBy = me;
         const mismatches = await this.recordCounts(manager, companyId, order, items, input.lines, me, 'VERIFY');
+        // Recibir cierra el ticket: lo contado pasa del cajón de devoluciones a la existencia de la
+        // bodega en el mismo paso, sin un segundo "cerrar" que no decide nada.
+        await this.stock.returnsToStock(manager, companyId, order, quantitiesOf(items), me);
         const detail = mismatches > 0 ? `${step.detail} · ${mismatches} ${mismatches === 1 ? 'línea no cuadra' : 'líneas no cuadran'}` : step.detail;
         await this.setStatus(manager, order, step.to, me, detail, order.destinationLocationId);
+        await this.closeReturnedSale(manager, companyId, order, me);
         return;
       }
 
@@ -468,13 +534,15 @@ export class InternalOrderService {
     }
   }
 
-  // El corredor entrega: de su bolsa al destino. Una SO queda además apartada en la tienda para su
-  // cliente (nadie más la vende mientras se decide); una RE entra al cajón de devoluciones.
-  private async deliver(manager: EntityManager, companyId: string, order: InternalOrder, actorId: string): Promise<void> {
+  // El destino confirma el recibo y termina la custodia del corredor: de su bolsa al destino. Una SO
+  // queda además apartada en la tienda para su cliente (nadie más la vende mientras se decide); una
+  // RE entra al cajón de devoluciones.
+  private async handOver(manager: EntityManager, companyId: string, order: InternalOrder, quantities: VariantQuantities, actorId: string): Promise<void> {
     if (!order.runnerId) throw new ConflictException('Esta orden no tiene corredor');
-    const quantities = quantitiesOf(await this.currentItems(manager, order));
     const into = order.type === InternalOrderType.RE ? 'RETURNS' : 'STOCK';
-    await this.stock.fromRunner(manager, companyId, order, order.runnerId, quantities, into, actorId);
+    if (!(await this.stock.leftRunner(manager, order.id))) {
+      await this.stock.fromRunner(manager, companyId, order, order.runnerId, quantities, into, actorId);
+    }
     if (order.type === InternalOrderType.SO) {
       await this.stock.reserveAt(manager, companyId, order, order.destinationLocationId, quantities, actorId);
     }
@@ -491,7 +559,18 @@ export class InternalOrderService {
     actorId: string,
     reason?: string,
   ): Promise<void> {
-    if (order.type === InternalOrderType.RE) {
+    if (order.type === InternalOrderType.RE && !order.relatedOrderId) {
+      // Una RE armada desde el cajón: lo que llevaba vuelve al cajón de la tienda.
+      const items = await this.currentItems(manager, order);
+      await this.stock.release(manager, order.id);
+      await this.returnsBin.hold(manager, companyId, {
+        storeId: order.sourceLocationId,
+        origin: { id: order.id, number: order.orderNumber },
+        quantities: quantitiesOf(items),
+        actorId,
+        notify: false,
+      });
+    } else if (order.type === InternalOrderType.RE) {
       const sale = order.relatedOrderId ? await this.lock(manager, companyId, order.relatedOrderId) : null;
       if (!sale || sale.status !== S.RETURN_REQUESTED) {
         throw new ConflictException('Esta devolución es parte de un cambio de pedido: no se cancela por separado');
@@ -524,29 +603,40 @@ export class InternalOrderService {
     await signalInternalOrderChange(manager, this.notifications, companyId, parent, actorId);
   }
 
-  // Una sub-orden recibida se suma a su orden original: la original pasa a una versión nueva con lo
-  // que se quedó más lo que trajo la sub-orden, todo apartado en la tienda para el cliente, y vuelve
-  // a "recibida por el vendedor" para seguir hacia el pago.
-  private async merge(manager: EntityManager, companyId: string, sub: InternalOrder, actorId: string): Promise<void> {
+  // La sub-orden de un cambio acaba de llegar a la tienda: se le suma lo que el cliente se quedó de
+  // la orden original, de modo que quede con TODO lo que se lleva, y es ella la que sigue hasta el
+  // pago. La original ya no tiene nada que entregar ni que cobrar: termina en CLOSED_BY_CHANGE
+  // (terminada, sin cobro), con lo suyo devuelto en la RE o pasado a esta sub-orden.
+  //
+  // Lo apartado se mueve en el mismo orden: primero suelta lo de la original (si no, sus unidades
+  // seguirían tomadas y la sub-orden no podría apartarlas), y después la sub-orden aparta todo en la
+  // tienda, para el cliente, hasta que pague o devuelva.
+  private async absorbParent(manager: EntityManager, companyId: string, sub: InternalOrder, actorId: string): Promise<void> {
     const parent = await this.lock(manager, companyId, sub.parentOrderId!);
-    if (parent.status !== S.ITEM_CHANGE_REQUESTED) {
-      throw new ConflictException(`La orden original #${parent.orderNumber} no está esperando este cambio`);
-    }
-    const kept = await this.currentItems(manager, parent);
-    const brought = (await this.currentItems(manager, sub)).map((item) => ({
+    // Si la original ya no espera el cambio (su sub-orden anterior se anuló y siguió sola), la
+    // sub-orden sigue su camino con lo que trajo y nada más.
+    if (parent.status !== S.ITEM_CHANGE_REQUESTED) return;
+
+    const kept = (await this.currentItems(manager, parent)).map((item) => ({
       productVariantId: item.productVariantId,
       quantity: item.foundQuantity ?? item.quantity,
       unitPrice: item.unitPrice,
       discountAmount: item.discountAmount,
-      notes: `Traída por la sub-orden #${sub.orderNumber}`,
+      notes: `Se queda de #${parent.orderNumber}`,
     }));
-    const lines = [...kept.map(lineOf), ...brought];
+    const brought = (await this.currentItems(manager, sub)).map(lineOf);
 
-    await this.stock.release(manager, sub.id);
-    await this.newVersion(manager, parent, `Se une la sub-orden #${sub.orderNumber}`, lines, actorId);
-    await this.stock.reserveAt(manager, companyId, parent, parent.destinationLocationId, quantitiesOf(await this.currentItems(manager, parent)), actorId);
-    await this.setStatus(manager, sub, S.MERGED_INTO_PARENT, actorId, `Se une a la orden original #${parent.orderNumber}`, sub.destinationLocationId);
-    await this.setStatus(manager, parent, S.RECEIVED_BY_SELLER, actorId, `#${sub.orderNumber} se unió · el cobro se hace en esta orden`, parent.destinationLocationId);
+    await this.stock.release(manager, parent.id);
+    await this.newVersion(manager, sub, `Se suma lo que el cliente se queda de #${parent.orderNumber}`, [...brought, ...kept], actorId);
+    await this.stock.reserveAt(manager, companyId, sub, sub.destinationLocationId, quantitiesOf(await this.currentItems(manager, sub)), actorId);
+    await this.setStatus(
+      manager,
+      parent,
+      S.CLOSED_BY_CHANGE,
+      actorId,
+      `Cambio resuelto en #${sub.orderNumber} · terminada sin cobro: el cliente paga allá`,
+      parent.destinationLocationId,
+    );
     await signalInternalOrderChange(manager, this.notifications, companyId, parent, actorId);
   }
 
@@ -565,26 +655,35 @@ export class InternalOrderService {
   // El cliente pide otra talla, otro color u otro producto de lo que ya tiene en la mano. Nunca se
   // sobrescribe nada: la SO pasa a una versión nueva (con lo que se queda) y a ITEM_CHANGE_REQUESTED;
   // lo que se cambia vuelve a bodega en una RE, y lo nuevo viene en una sub-orden desde la bodega
-  // elegida, con su propio consecutivo, su corredor y su recorrido completo. Al recibirla se une.
+  // elegida, con su propio consecutivo, su corredor y su recorrido completo.
+  //
+  // Al llegar esa sub-orden se le suma lo que el cliente se quedó y es ella la que se cobra en caja
+  // (`absorbParent`); la original termina ahí, sin cobro. Mientras tanto la original guarda lo que
+  // se queda: si la sub-orden se anula, vuelve a manos del vendedor con eso y se cobra como siempre.
   async requestChange(companyId: string, actor: OrderActor, input: InternalOrderChangeInput): Promise<InternalOrder> {
     if (!this.has(actor, [PermissionCode.ORDERS_CONFIRM_RECEIPT, PermissionCode.ORDERS_REQUEST_FROM_WAREHOUSE])) {
       throw new ForbiddenException('No tienes permiso para cambiar un pedido');
     }
     return this.dataSource.transaction(async (manager) => {
       const order = await this.lock(manager, companyId, input.orderId);
-      if (order.type !== InternalOrderType.SO || order.parentOrderId) throw new ConflictException('Solo una orden de venta original admite cambio de pedido');
+      if (order.type !== InternalOrderType.SO) throw new ConflictException('Solo una orden de venta admite cambio de pedido');
       if (order.status !== S.RECEIVED_BY_SELLER && order.status !== S.DELIVERED_TO_STORE) {
         throw new ConflictException('El cambio de pedido se pide cuando el producto ya llegó a la tienda');
       }
+      await this.assertCanSee(manager, companyId, actor, order);
       await assertStoreAccess(manager, actor.userId, order.destinationLocationId);
       await this.assertNoOpenSale(manager, order);
       const dispatch = await this.activeLocation(manager, companyId, input.sourceLocationId);
       if (dispatch.type !== LocationType.WAREHOUSE) throw new BadRequestException(`${dispatch.name} no es una bodega`);
 
       if (order.status === S.DELIVERED_TO_STORE) {
+        await this.handOver(manager, companyId, order, quantitiesOf(await this.currentItems(manager, order)), actor.userId);
         order.receivedBy = actor.userId;
         await this.setStatus(manager, order, S.RECEIVED_BY_SELLER, actor.userId, 'Vendedor confirma recepción', order.destinationLocationId);
       }
+      // Si es la sub-orden de un cambio anterior, primero se queda con lo de su original: el cliente
+      // puede cambiar cualquier cosa de lo que tiene en la mano, no solo lo que trajo esta.
+      if (order.parentOrderId) await this.absorbParent(manager, companyId, order, actor.userId);
 
       const items = await this.currentItems(manager, order);
       const byId = new Map(items.map((item) => [item.id, item]));
@@ -613,7 +712,15 @@ export class InternalOrderService {
       }
       if (outgoing.length === 0) throw new BadRequestException('Marca al menos una línea para cambiar');
 
-      const ret = await this.createReturn(manager, companyId, order, outgoing, actor.userId, 'Cambio de pedido');
+      // Lo que el cliente cambia queda en el cajón de devoluciones de la tienda (no vuelve solo a bodega).
+      await this.stock.release(manager, order.id);
+      await this.returnsBin.hold(manager, companyId, {
+        storeId: order.destinationLocationId,
+        origin: { id: order.id, number: order.orderNumber },
+        quantities: quantitiesOf(outgoing),
+        actorId: actor.userId,
+        notify: true,
+      });
       const sub = await this.createOrder(manager, companyId, actor.userId, {
         type: InternalOrderType.SO,
         origin: order.origin,
@@ -633,20 +740,19 @@ export class InternalOrderService {
       await this.stock.reserveAt(manager, companyId, sub, dispatch.id, quantitiesOf(await this.currentItems(manager, sub)), actor.userId);
 
       const kept = items.filter((item) => !changed.has(item.id));
-      order.relatedOrderId = ret.id;
-      await this.newVersion(manager, order, `Cambio de pedido · #${ret.orderNumber} y #${sub.orderNumber}`, kept.map(lineOf), actor.userId);
+      await this.newVersion(manager, order, `Cambio de pedido · lo cambiado al cajón y llega en #${sub.orderNumber}`, kept.map(lineOf), actor.userId);
       await this.stock.reserveAt(manager, companyId, order, order.destinationLocationId, quantitiesOf(await this.currentItems(manager, order)), actor.userId);
       await this.setStatus(
         manager,
         order,
         S.ITEM_CHANGE_REQUESTED,
         actor.userId,
-        `Cliente solicita cambio · vuelve en #${ret.orderNumber} y llega en #${sub.orderNumber} desde ${dispatch.name}`,
+        `Cliente solicita cambio · lo cambiado queda en el cajón de devoluciones y llega en #${sub.orderNumber} desde ${dispatch.name}`,
         order.destinationLocationId,
       );
 
       await notifyInternalOrder(manager, this.notifications, companyId, sub, NotificationType.ORDER_REQUESTED, ['WAREHOUSE'], actor.userId);
-      for (const touched of [order, ret, sub]) {
+      for (const touched of [order, sub]) {
         await signalInternalOrderChange(manager, this.notifications, companyId, touched, actor.userId);
       }
       return order;
@@ -655,14 +761,17 @@ export class InternalOrderService {
 
   // ─── Retorno a bodega por error ────────────────────────────────────────────────────────────
 
-  async reportCorrection(companyId: string, actor: OrderActor, orderId: string, description: string): Promise<InternalOrder> {
+  async reportCorrection(companyId: string, actor: OrderActor, orderId: string, itemIds: string[], description: string): Promise<InternalOrder> {
     if (!this.has(actor, [PermissionCode.ORDERS_CONFIRM_RECEIPT, PermissionCode.WAREHOUSE_FULFILL_ORDERS])) {
       throw new ForbiddenException('No tienes permiso para registrar un retorno por error');
     }
     const text = description.trim();
     if (!text) throw new BadRequestException('Describe qué pasó');
+    const ids = [...new Set(itemIds)];
+    if (ids.length === 0) throw new BadRequestException('Señala cuáles llegaron mal');
     return this.dataSource.transaction(async (manager) => {
       const order = await this.lock(manager, companyId, orderId);
+      await this.assertCanSee(manager, companyId, actor, order);
       if (order.type !== InternalOrderType.SO || (order.status !== S.DELIVERED_TO_STORE && order.status !== S.RECEIVED_BY_SELLER)) {
         throw new ConflictException('El retorno por error se registra cuando la orden ya llegó a la tienda');
       }
@@ -671,6 +780,14 @@ export class InternalOrderService {
         order: { createdAt: 'DESC' },
       });
       if (latest && !latest.closedAt) throw new ConflictException('Esta orden ya tiene una corrección en curso');
+      // Cuáles líneas llegaron equivocadas: son las que el corredor devuelve y las que bodega vuelve a
+      // alistar, así que las señala quien reporta y no se deducen. Van en el orden de la orden, no en
+      // el que se hayan ido marcando.
+      const current = await this.currentItems(manager, order);
+      const missing = ids.find((id) => !current.some((line) => line.id === id));
+      if (missing) throw new NotFoundException(`Línea ${missing} no está en la versión vigente de la orden`);
+      const items = current.filter((line) => ids.includes(line.id));
+      const what = linesLabel(items);
 
       const incidentRepo = manager.getRepository(Incident);
       const incident = await incidentRepo.save(
@@ -678,19 +795,23 @@ export class InternalOrderService {
           companyId,
           type: IncidentType.WRONG_VARIANT,
           status: IncidentStatus.OPEN,
-          title: `Referencia equivocada en la orden #${order.orderNumber}`,
-          description: text.slice(0, 500),
-          entityType: 'INTERNAL_ORDER',
+          title: (items.length === 1
+            ? `Referencia equivocada en la orden #${order.orderNumber}`
+            : `${items.length} referencias equivocadas en la orden #${order.orderNumber}`
+          ).slice(0, 150),
+          description: `${what} · ${text}`.slice(0, 500),
+          entityType: ORDER_INCIDENT_ENTITY,
           entityId: order.id,
           locationId: order.sourceLocationId,
-          productVariantId: null,
+          // Con una sola referencia la novedad apunta a su variante; con varias no hay una sola.
+          productVariantId: items.length === 1 ? items[0].productVariantId : null,
           reportedBy: actor.userId,
           resolvedBy: null,
           resolvedAt: null,
         }),
       );
       const repo = manager.getRepository(InternalOrderCorrection);
-      await repo.save(
+      const correction = await repo.save(
         repo.create({
           internalOrderId: order.id,
           versionNumber: order.versionNumber,
@@ -701,9 +822,18 @@ export class InternalOrderService {
           incidentId: incident.id,
         }),
       );
-      await this.addEvent(manager, order, InternalOrderEventKind.CORRECTION, actor.userId, `Retorno a bodega por error · ${text}`, order.destinationLocationId);
+      const lineRepo = manager.getRepository(InternalOrderCorrectionItem);
+      await lineRepo.save(items.map((item) => lineRepo.create({ correctionId: correction.id, internalOrderItemId: item.id })));
+      await this.addEvent(
+        manager,
+        order,
+        InternalOrderEventKind.CORRECTION,
+        actor.userId,
+        `Retorno a bodega por error · ${what} · ${text}`.slice(0, 500),
+        order.destinationLocationId,
+      );
       await notifyInternalOrder(manager, this.notifications, companyId, order, NotificationType.ORDER_CORRECTION, ['RUNNERS', 'WAREHOUSE'], actor.userId, {
-        notes: text,
+        notes: `${what} · ${text}`,
       });
       await signalInternalOrderChange(manager, this.notifications, companyId, order, actor.userId);
       return order;
@@ -724,6 +854,7 @@ export class InternalOrderService {
     }
     return this.dataSource.transaction(async (manager) => {
       const order = await this.lock(manager, companyId, orderId);
+      await this.assertCanSee(manager, companyId, actor, order);
       const repo = manager.getRepository(InternalOrderCorrection);
       const correction = await repo.findOne({ where: { internalOrderId: order.id }, order: { createdAt: 'DESC' } });
       if (!correction || correction.closedAt) throw new ConflictException('Esta orden no tiene una corrección en curso');
@@ -753,6 +884,7 @@ export class InternalOrderService {
   async nudge(companyId: string, actor: OrderActor, orderId: string, kind: InternalOrderNudge, message?: string): Promise<InternalOrder> {
     return this.dataSource.transaction(async (manager) => {
       const order = await this.lock(manager, companyId, orderId);
+      await this.assertCanSee(manager, companyId, actor, order);
       if (order.requestedBy !== actor.userId && !this.has(actor, [PermissionCode.ORDERS_CONFIRM_RECEIPT])) {
         throw new ForbiddenException('Solo quien pidió la orden puede hacer esto');
       }
@@ -760,10 +892,16 @@ export class InternalOrderService {
       const note = message?.trim() || null;
       if (kind === InternalOrderNudge.CALL_RUNNER) {
         if (!order.runnerId) throw new ConflictException('Esta orden todavía no tiene corredor');
+        // Después de que el destino confirma, el corredor ya no responde por la orden (salvo un
+        // retorno por error en curso, que vuelve a moverlo).
+        if (!RUNNER_ENGAGED_STATUSES.includes(order.status) && !(await this.hasOpenCorrection(manager, order))) {
+          throw new ConflictException('El corredor ya entregó esta orden y se confirmó el recibo');
+        }
         await this.addEvent(manager, order, InternalOrderEventKind.NUDGE, actor.userId, `Se contactó al corredor${note ? ` · ${note}` : ''}`, order.destinationLocationId);
         await notifyInternalOrder(manager, this.notifications, companyId, order, NotificationType.ORDER_RUNNER_CALLED, ['RUNNER'], actor.userId, { notes: note });
       } else {
-        if (order.runnerId) throw new ConflictException('La orden ya va con el corredor');
+        // Tomada por un corredor pero sin recoger, bodega todavía la tiene: aún se le puede avisar.
+        if (PICKED_UP_STATUSES.includes(order.status)) throw new ConflictException('La orden ya va con el corredor');
         const hurry = kind === InternalOrderNudge.HURRY;
         if (hurry) order.priority = InternalOrderPriority.HIGH;
         await manager.getRepository(InternalOrder).save(order);
@@ -786,6 +924,177 @@ export class InternalOrderService {
           { notes: note },
         );
       }
+      await signalInternalOrderChange(manager, this.notifications, companyId, order, actor.userId);
+      return order;
+    });
+  }
+
+  // ─── El corredor toma una orden ────────────────────────────────────────────────────────────
+
+  // El corredor se la asigna mientras espera en bodega (no cambia el estado: queda en la bitácora).
+  // Desde ahí solo él la recoge. Tomarla otra vez es inofensivo.
+  async claim(companyId: string, actor: OrderActor, orderId: string): Promise<InternalOrder> {
+    if (!this.has(actor, [PermissionCode.RUNNER_PICKUP_ORDERS])) throw new ForbiddenException('No tienes permiso para tomar órdenes');
+    return this.dataSource.transaction(async (manager) => {
+      const order = await this.lock(manager, companyId, orderId);
+      await this.assertCanSee(manager, companyId, actor, order);
+      if (!WAITING_RUNNER_STATUSES.includes(order.status)) throw new ConflictException(`La orden #${order.orderNumber} no está esperando corredor`);
+      if (order.runnerId === actor.userId) return order;
+      if (order.runnerId) throw new ConflictException(`Otro corredor ya tomó la orden #${order.orderNumber}`);
+
+      order.runnerId = actor.userId;
+      await manager.getRepository(InternalOrder).save(order);
+      await this.addEvent(manager, order, InternalOrderEventKind.NOTE, actor.userId, `${await this.nameOf(manager, actor.userId)} tomó la orden`, order.sourceLocationId);
+      await signalInternalOrderChange(manager, this.notifications, companyId, order, actor.userId);
+      return order;
+    });
+  }
+
+  // ─── Novedades de una orden ────────────────────────────────────────────────────────────────
+
+  // Reporta una novedad sobre la orden o una de sus líneas vigentes (faltante, daño, problema al
+  // recoger o al entregar). Usa el modelo general de novedades; no cambia el estado de la orden.
+  async reportIncident(companyId: string, actor: OrderActor, input: OrderIncidentReport): Promise<InternalOrder> {
+    if (!this.has(actor, INCIDENT_REPORTERS)) throw new ForbiddenException('No tienes permiso para reportar novedades de órdenes');
+    if (!ORDER_INCIDENT_TYPES.includes(input.type)) throw new BadRequestException('Ese tipo de novedad no aplica a una orden');
+    const text = input.description.trim();
+    if (!text) throw new BadRequestException('Describe qué pasó');
+    return this.dataSource.transaction(async (manager) => {
+      const order = await this.lock(manager, companyId, input.orderId);
+      await this.assertCanSee(manager, companyId, actor, order);
+      if (isFinalStatus(order.status)) throw new ConflictException('La orden ya está cerrada');
+      const item = input.itemId ? (await this.currentItems(manager, order)).find((line) => line.id === input.itemId) : undefined;
+      if (input.itemId && !item) throw new NotFoundException(`Línea ${input.itemId} no está en la versión vigente de la orden`);
+
+      const title = `${INCIDENT_TITLES[input.type] ?? 'Novedad'} · #${order.orderNumber}`;
+      const repo = manager.getRepository(Incident);
+      await repo.save(
+        repo.create({
+          companyId,
+          type: input.type,
+          status: IncidentStatus.OPEN,
+          title,
+          description: text.slice(0, 500),
+          entityType: item ? ORDER_ITEM_INCIDENT_ENTITY : ORDER_INCIDENT_ENTITY,
+          entityId: item ? item.id : order.id,
+          // Antes de salir de bodega pasa en el origen; después, en el destino.
+          locationId: PICKED_UP_STATUSES.includes(order.status) ? order.destinationLocationId : order.sourceLocationId,
+          productVariantId: item?.productVariantId ?? null,
+          reportedBy: actor.userId,
+          resolvedBy: null,
+          resolvedAt: null,
+        }),
+      );
+      await this.addEvent(manager, order, InternalOrderEventKind.NOTE, actor.userId, `Novedad reportada · ${title} · ${text}`, order.destinationLocationId);
+      await signalInternalOrderChange(manager, this.notifications, companyId, order, actor.userId);
+      return order;
+    });
+  }
+
+  // ─── Cajón de devoluciones ─────────────────────────────────────────────────────────────────
+
+  // El administrador manda a bodega lo que se acumuló en el cajón de una tienda: una RE de la tienda a
+  // la bodega que elija, con las cantidades que marcó (salen del cajón y quedan apartadas para la RE).
+  // Nace esperando corredor y sigue el camino de siempre (recoger, entregar, verificar, cerrar).
+  async createReturnFromBin(
+    companyId: string,
+    actor: OrderActor,
+    input: { storeId: string; warehouseId: string; lines: { productVariantId: string; quantity: string }[] },
+  ): Promise<InternalOrder> {
+    if (!actor.isAdmin) throw new ForbiddenException('Solo el administrador manda a bodega el cajón de devoluciones');
+    return this.dataSource.transaction(async (manager) => {
+      const store = await this.activeLocation(manager, companyId, input.storeId);
+      const warehouse = await this.activeLocation(manager, companyId, input.warehouseId);
+      if (store.type !== LocationType.STORE) throw new BadRequestException(`${store.name} no es una tienda`);
+      if (warehouse.type !== LocationType.WAREHOUSE) throw new BadRequestException(`${warehouse.name} no es una bodega`);
+      const merged = mergeLines(input.lines);
+      if (merged.length === 0) throw new BadRequestException('Marca al menos una referencia del cajón');
+
+      const quantities = new Map(merged.map((line) => [line.productVariantId, line.quantity]));
+      const origins = await this.returnsBin.take(manager, companyId, store.id, quantities);
+      const lines = await this.pricedLines(manager, companyId, InternalOrderType.RE, merged);
+      const ret = await this.createOrder(manager, companyId, actor.userId, {
+        type: InternalOrderType.RE,
+        origin: InternalOrderOrigin.ADMIN,
+        priority: InternalOrderPriority.NORMAL,
+        sourceLocationId: store.id,
+        destinationLocationId: warehouse.id,
+        deliveryPoint: null,
+        requestedBy: actor.userId,
+        parentOrderId: null,
+        relatedOrderId: null,
+        notes: `Cajón de devoluciones de ${store.name}${origins.length > 0 ? ` · ${origins.map((number) => `#${number}`).join(', ')}` : ''}`.slice(0, 500),
+        reason: `Cajón de devoluciones de ${store.name}`,
+        createdDetail: `Devolución creada desde el cajón de ${store.name} hacia ${warehouse.name}`,
+        createdAt: store.id,
+        lines,
+      });
+      await this.stock.reserveAt(manager, companyId, ret, store.id, quantities, actor.userId);
+      await this.setStatus(manager, ret, S.WAITING_FOR_RUNNER, actor.userId, 'Notificación enviada a corredores', store.id);
+      await notifyInternalOrder(manager, this.notifications, companyId, ret, NotificationType.ORDER_READY_FOR_RUNNER, ['RUNNERS'], actor.userId, {
+        locationId: store.id,
+      });
+      await signalInternalOrderChange(manager, this.notifications, companyId, ret, actor.userId);
+      return ret;
+    });
+  }
+
+  // Lo que hay en el cajón de devoluciones de cada tienda (solo el administrador lo ve).
+  async returnsBinContents(companyId: string, actor: OrderActor) {
+    if (!actor.isAdmin) throw new ForbiddenException('Solo el administrador ve el cajón de devoluciones');
+    const rows = await this.returnsBin.contents(companyId);
+    return rows.map((row) => {
+      const variant = row.productVariant;
+      return {
+        id: row.id,
+        storeId: row.inventoryLocation.locationId ?? '',
+        storeName: row.inventoryLocation.location?.name ?? 'Tienda',
+        productVariantId: row.productVariantId,
+        variant: variant?.product
+          ? {
+              sku: variant.sku,
+              productName: variant.product.name,
+              reference: variant.product.reference,
+              colorName: variant.color.name,
+              colorHex: variant.color.hex,
+              sizeName: variant.size.name,
+              imageUrl: variant.imageUrl,
+            }
+          : null,
+        quantity: row.quantity.toFixed(2),
+        sourceNumber: row.sourceNumber,
+        addedByName: row.reservedByUser ? `${row.reservedByUser.firstName} ${row.reservedByUser.lastName}`.trim() : null,
+        createdAt: row.createdAt,
+      };
+    });
+  }
+
+  // Lo que trajo una orden de venta, por variante (lo encontrado si se alistó): con esto Venta sabe
+  // cuánto de lo que caja quitó de su cobro va al cajón de devoluciones.
+  async orderedQuantities(manager: EntityManager, companyId: string, orderId: string): Promise<VariantQuantities> {
+    const order = await manager.getRepository(InternalOrder).findOneByOrFail({ id: orderId, companyId });
+    return quantitiesOf(await this.currentItems(manager, order));
+  }
+
+  // ─── El corredor responde dónde va ─────────────────────────────────────────────────────────
+
+  // La respuesta a "Contactar al corredor": dónde va o cuánto le falta. No cambia la orden; queda en la
+  // bitácora y le llega a quien la pidió. Solo el corredor de la orden (o el super admin) y mientras
+  // responde por ella.
+  async runnerReply(companyId: string, actor: OrderActor, orderId: string, message: string): Promise<InternalOrder> {
+    const text = message.trim();
+    if (!text) throw new BadRequestException('Escribe dónde vas');
+    return this.dataSource.transaction(async (manager) => {
+      const order = await this.lock(manager, companyId, orderId);
+      await this.assertCanSee(manager, companyId, actor, order);
+      if (order.runnerId !== actor.userId && !actor.isSuperAdmin) throw new ForbiddenException('Solo el corredor de la orden puede responder');
+      if (!RUNNER_ENGAGED_STATUSES.includes(order.status) && !(await this.hasOpenCorrection(manager, order))) {
+        throw new ConflictException('Ya entregaste esta orden y se confirmó el recibo');
+      }
+      await this.addEvent(manager, order, InternalOrderEventKind.NUDGE, actor.userId, `Respuesta del corredor · ${text}`, null);
+      await notifyInternalOrder(manager, this.notifications, companyId, order, NotificationType.ORDER_RUNNER_REPLIED, ['REQUESTER'], actor.userId, {
+        notes: text,
+      });
       await signalInternalOrderChange(manager, this.notifications, companyId, order, actor.userId);
       return order;
     });
@@ -829,8 +1138,10 @@ export class InternalOrderService {
   }
 
   // La venta que la cobraba se anuló (en Venta, o al cerrar el turno): la orden sigue por cobrar y
-  // lo suyo vuelve a quedar apartado en la tienda para el cliente.
-  async restoreAfterSaleDiscarded(manager: EntityManager, companyId: string, orderId: string, actorId: string): Promise<void> {
+  // lo suyo vuelve a quedar apartado en la tienda para el cliente. Lo que caja había quitado de ese
+  // cobro sale del cajón de devoluciones: vuelve a ser de la orden.
+  async restoreAfterSaleDiscarded(manager: EntityManager, companyId: string, orderId: string, actorId: string, saleId: string): Promise<void> {
+    await this.returnsBin.release(manager, saleId);
     const order = await this.lock(manager, companyId, orderId);
     if (order.status !== S.PENDING_PAYMENT) return;
     const items = await this.currentItems(manager, order);
@@ -898,43 +1209,6 @@ export class InternalOrderService {
     return order;
   }
 
-  // Crea la RE que lleva de vuelta a bodega lo que el cliente no se queda: de la tienda a la bodega de
-  // donde salió, con lo que la SO tenía apartado en la tienda para esas líneas. Nace y queda de
-  // inmediato esperando corredor (las dos cosas en la bitácora).
-  private async createReturn(
-    manager: EntityManager,
-    companyId: string,
-    sale: InternalOrder,
-    items: InternalOrderItem[],
-    actorId: string,
-    why: string,
-  ): Promise<InternalOrder> {
-    const ret = await this.createOrder(manager, companyId, actorId, {
-      type: InternalOrderType.RE,
-      origin: sale.origin,
-      priority: sale.priority,
-      sourceLocationId: sale.destinationLocationId,
-      destinationLocationId: sale.sourceLocationId,
-      deliveryPoint: sale.deliveryPoint,
-      requestedBy: sale.requestedBy,
-      parentOrderId: null,
-      relatedOrderId: sale.id,
-      notes: `${why} · devolución de #${sale.orderNumber}`,
-      reason: `${why} · devolución de #${sale.orderNumber}`,
-      createdDetail: `Devolución creada desde #${sale.orderNumber} · ${why.toLowerCase()}`,
-      createdAt: sale.destinationLocationId,
-      lines: items.map(lineOf),
-    });
-    // Lo que la SO tenía apartado en la tienda para estas líneas pasa a la RE.
-    await this.stock.release(manager, sale.id);
-    await this.stock.reserveAt(manager, companyId, ret, ret.sourceLocationId, quantitiesOf(await this.currentItems(manager, ret)), actorId);
-    await this.setStatus(manager, ret, S.WAITING_FOR_RUNNER, actorId, 'Notificación enviada a corredores', ret.sourceLocationId);
-    await notifyInternalOrder(manager, this.notifications, companyId, ret, NotificationType.ORDER_READY_FOR_RUNNER, ['RUNNERS'], actorId, {
-      locationId: ret.sourceLocationId,
-    });
-    await signalInternalOrderChange(manager, this.notifications, companyId, ret, actorId);
-    return ret;
-  }
 
   // Sube de versión con estas líneas; la versión anterior y sus líneas quedan intactas.
   private async newVersion(manager: EntityManager, order: InternalOrder, reason: string, lines: NewLine[] | InternalOrderItem[], actorId: string): Promise<void> {
@@ -1044,7 +1318,7 @@ export class InternalOrderService {
             status: IncidentStatus.OPEN,
             title: mode === 'READY' ? `Faltante en la orden #${order.orderNumber}` : `La devolución #${order.orderNumber} llegó incompleta`,
             description: `Se esperaban ${item.quantity.toFixed(2)} y ${mode === 'READY' ? 'se encontraron' : 'llegaron'} ${counted.toFixed(2)}`,
-            entityType: 'INTERNAL_ORDER_ITEM',
+            entityType: ORDER_ITEM_INCIDENT_ENTITY,
             entityId: item.id,
             locationId: mode === 'READY' ? order.sourceLocationId : order.destinationLocationId,
             productVariantId: item.productVariantId,
@@ -1058,6 +1332,11 @@ export class InternalOrderService {
       await itemRepo.save(item);
     }
     return mismatches;
+  }
+
+  private async hasOpenCorrection(manager: EntityManager, order: InternalOrder): Promise<boolean> {
+    const latest = await manager.getRepository(InternalOrderCorrection).findOne({ where: { internalOrderId: order.id }, order: { createdAt: 'DESC' } });
+    return !!latest && !latest.closedAt;
   }
 
   private async assertNoOpenSale(manager: EntityManager, order: InternalOrder): Promise<void> {
@@ -1130,14 +1409,18 @@ export class InternalOrderService {
     return actor.isSuperAdmin || permissions.some((permission) => actor.permissionCodes.includes(permission));
   }
 
-  private canSeeAll(actor: OrderActor): boolean {
-    return this.has(actor, SEE_ALL_PERMISSIONS);
+  private async visibilityOf(manager: EntityManager, companyId: string, actor: OrderActor): Promise<OrderVisibility> {
+    const locationIds = actor.isSuperAdmin ? [] : await this.accessibleLocationIds(manager, companyId, actor);
+    return visibilityOf(actor, locationIds);
   }
 
   private async canSee(companyId: string, actor: OrderActor, order: InternalOrder): Promise<boolean> {
-    if (this.canSeeAll(actor) || order.requestedBy === actor.userId) return true;
-    const ids = await this.accessibleLocationIds(this.dataSource.manager, companyId, actor);
-    return ids.includes(order.destinationLocationId) || ids.includes(order.sourceLocationId);
+    return canSeeOrder(await this.visibilityOf(this.dataSource.manager, companyId, actor), order);
+  }
+
+  // Quien no ve la orden tampoco la mueve: para él no existe.
+  private async assertCanSee(manager: EntityManager, companyId: string, actor: OrderActor, order: InternalOrder): Promise<void> {
+    if (!canSeeOrder(await this.visibilityOf(manager, companyId, actor), order)) throw new NotFoundException(`Orden ${order.id} no encontrada`);
   }
 
   private async accessibleLocationIds(manager: EntityManager, companyId: string, actor: OrderActor): Promise<string[]> {
@@ -1162,6 +1445,25 @@ export class InternalOrderService {
       relations: { reportedByUser: true, runner: true },
       order: { createdAt: 'ASC' },
     });
+    const incidents = await this.incidentsOf(manager, ids, items);
+    const orderOfItem = new Map(items.map((item) => [item.id, item.internalOrderId]));
+    // Las líneas que llegaron equivocadas en cada corrección: pueden ser de una versión anterior, así
+    // que se buscan entre todas las líneas ya cargadas y no solo entre las vigentes.
+    const itemById = new Map(items.map((item) => [item.id, item]));
+    const correctionLines =
+      corrections.length === 0
+        ? []
+        : await manager.find(InternalOrderCorrectionItem, {
+            where: { correctionId: In(corrections.map((correction) => correction.id)) },
+            order: { createdAt: 'ASC' },
+          });
+    const wrongItems = new Map<string, InternalOrderItem[]>();
+    for (const line of correctionLines) {
+      const item = itemById.get(line.internalOrderItemId);
+      if (item) wrongItems.set(line.correctionId, [...(wrongItems.get(line.correctionId) ?? []), item]);
+    }
+    const incidentOrder = (incident: Incident) =>
+      incident.entityType === ORDER_INCIDENT_ENTITY ? incident.entityId : orderOfItem.get(incident.entityId ?? '');
     const saleIds = orders.map((order) => order.saleId).filter((id): id is string => !!id);
     const sales = saleIds.length > 0 ? await manager.find(Sale, { select: { id: true, saleNumber: true }, where: { id: In(saleIds) } }) : [];
     const saleNumbers = new Map(sales.map((sale) => [sale.id, sale.saleNumber]));
@@ -1170,10 +1472,31 @@ export class InternalOrderService {
       Object.assign(order, {
         items: items.filter((item) => item.internalOrderId === order.id && item.versionNumber === order.versionNumber),
         events: events.filter((event) => event.internalOrderId === order.id),
-        corrections: corrections.filter((correction) => correction.internalOrderId === order.id),
+        corrections: corrections
+          .filter((correction) => correction.internalOrderId === order.id)
+          .map((correction) => Object.assign(correction, { items: wrongItems.get(correction.id) ?? [] })),
+        incidents: incidents.filter((incident) => incidentOrder(incident) === order.id),
         saleNumber: order.saleId ? (saleNumbers.get(order.saleId) ?? null) : null,
       }),
     );
+  }
+
+  // Las novedades ligadas a las órdenes o a cualquiera de sus líneas (de todas las versiones).
+  private incidentsOf(manager: EntityManager, orderIds: string[], items: InternalOrderItem[]): Promise<Incident[]> {
+    const itemIds = items.map((item) => item.id);
+    return manager
+      .getRepository(Incident)
+      .createQueryBuilder('incident')
+      .where(
+        new Brackets((where) => {
+          where.where('(incident.entityType = :orderEntity AND incident.entityId IN (:...orderIds))', { orderEntity: ORDER_INCIDENT_ENTITY, orderIds });
+          if (itemIds.length > 0) {
+            where.orWhere('(incident.entityType = :itemEntity AND incident.entityId IN (:...itemIds))', { itemEntity: ORDER_ITEM_INCIDENT_ENTITY, itemIds });
+          }
+        }),
+      )
+      .orderBy('incident.createdAt', 'ASC')
+      .getMany();
   }
 }
 

@@ -9,6 +9,7 @@ import { NotificationModule } from '../notification/notification.module.js';
 import { SaleItem } from './entities/sale-item.entity.js';
 import { Sale } from './entities/sale.entity.js';
 import { SaleResolver } from './sale.resolver.js';
+import { ReturnsBinModule } from '../returns-bin/returns-bin.module.js';
 import { SaleService } from './sale.service.js';
 
 @Module({
@@ -20,6 +21,7 @@ import { SaleService } from './sale.service.js';
     InventoryReservationModule,
     InventoryLocationModule,
     InternalOrderModule,
+    ReturnsBinModule,
   ],
   providers: [SaleService, SaleResolver],
   exports: [SaleService],

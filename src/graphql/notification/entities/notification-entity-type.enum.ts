@@ -5,4 +5,6 @@ export enum NotificationEntityType {
   INVENTORY_BALANCE = 'INVENTORY_BALANCE',
   PURCHASE_ORDER = 'PURCHASE_ORDER',
   INTERNAL_ORDER = 'INTERNAL_ORDER',
+  // El cajón de devoluciones de una tienda (entityId = la tienda).
+  RETURNS_BIN = 'RETURNS_BIN',
 }

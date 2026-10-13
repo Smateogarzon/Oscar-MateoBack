@@ -9,6 +9,7 @@ import {
 } from 'typeorm';
 import { COMPANY_VISIBLE_ROLE, PLATFORM_ROLE } from '../../common/access/platform-role.js';
 import { PermissionCode } from '../../common/enums/permission-code.enum.js';
+import { RoleCode } from '../../common/enums/role-code.enum.js';
 import { RecordStatus } from '../../common/enums/record-status.enum.js';
 import { fullName } from '../../common/utils/text.js';
 import { RealtimeEventKind } from '../../realtime/realtime-event.js';
@@ -32,6 +33,16 @@ import { notificationUrl } from './notification-url.js';
 const DEFAULT_PAGE_SIZE = 30;
 const MAX_PAGE_SIZE = 100;
 const UNKNOWN_ACTOR_NAME = 'Alguien';
+
+// El administrador (y el super admin) no recibe avisos de todo: solo de las órdenes de compra, los
+// descuentos y las devoluciones (estas dos las aprueba él). Los pedidos internos y el stock bajo son
+// de quien opera (bodega, corredores, tiendas). Las señales en vivo (signalChange) no cambian: sus
+// pantallas se siguen poniendo al día solas.
+const ADMIN_NOTIFICATION_CHANNELS: readonly NotificationChannel[] = [
+  NotificationChannel.PURCHASING,
+  NotificationChannel.DISCOUNTS,
+  NotificationChannel.RETURNS,
+];
 
 export interface NotifyInput {
   companyId: string;
@@ -109,9 +120,14 @@ export class NotificationService {
     manager: EntityManager,
     input: NotifyInput,
   ): Promise<NotifyResult | null> {
-    const recipientIds = [...new Set(input.recipientIds)].filter(
+    const channel = CHANNEL_OF_TYPE[input.type];
+    const candidates = [...new Set(input.recipientIds)].filter(
       (id) => id !== input.actorId,
     );
+    const admins = ADMIN_NOTIFICATION_CHANNELS.includes(channel)
+      ? new Set<string>()
+      : await this.adminsAmong(manager, input.companyId, candidates);
+    const recipientIds = candidates.filter((id) => !admins.has(id));
     if (recipientIds.length === 0) return null;
 
     const actor = await manager
@@ -134,7 +150,7 @@ export class NotificationService {
     const notification = await notificationRepo.save(
       notificationRepo.create({
         companyId: input.companyId,
-        channel: CHANNEL_OF_TYPE[input.type],
+        channel,
         type: input.type,
         title,
         message,
@@ -183,6 +199,32 @@ export class NotificationService {
 
     this.purgeOldSometimes(manager);
     return { notification, recipientIds };
+  }
+
+  // Quienes administran la empresa (rol Administrador, activos) y la plataforma (super admin): a quien
+  // le toca lo que es solo del administrador, como el cajón de devoluciones.
+  async findCompanyAdminIds(manager: EntityManager, companyId: string): Promise<string[]> {
+    const activeMember = { companyId, status: RecordStatus.ACTIVE, user: { status: RecordStatus.ACTIVE } };
+    const memberships = await manager.getRepository(UserCompanyRole).find({
+      where: [
+        { ...activeMember, role: { code: RoleCode.ADMIN, status: RecordStatus.ACTIVE } },
+        { ...activeMember, role: { ...PLATFORM_ROLE, status: RecordStatus.ACTIVE } },
+      ],
+    });
+    return [...new Set(memberships.map((membership) => membership.userId))];
+  }
+
+  // Quiénes de `userIds` administran la empresa (rol Administrador) o la plataforma (super admin).
+  private async adminsAmong(manager: EntityManager, companyId: string, userIds: string[]): Promise<Set<string>> {
+    if (userIds.length === 0) return new Set();
+    const activeMember = { companyId, userId: In(userIds), status: RecordStatus.ACTIVE };
+    const memberships = await manager.getRepository(UserCompanyRole).find({
+      where: [
+        { ...activeMember, role: { code: RoleCode.ADMIN } },
+        { ...activeMember, role: PLATFORM_ROLE },
+      ],
+    });
+    return new Set(memberships.map((membership) => membership.userId));
   }
 
   // Borra los avisos de más de seis meses, de vez en cuando y sin esperar: va por otra conexión del

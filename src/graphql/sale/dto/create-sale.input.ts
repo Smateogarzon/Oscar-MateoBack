@@ -22,4 +22,11 @@ export class CreateSaleInput {
   @IsOptional()
   @IsUUID()
   sellerId?: string;
+
+  // La devolución aprobada por cambio cuya referencia de reemplazo se va a cobrar. Es la única
+  // venta que puede abrir quien no tiene sales.create (el cajero): la enlaza completeSale al cobrar.
+  @Field(() => ID, { nullable: true })
+  @IsOptional()
+  @IsUUID()
+  saleReturnId?: string;
 }

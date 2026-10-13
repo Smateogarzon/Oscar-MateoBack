@@ -1,4 +1,4 @@
-import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, EntityManager, Repository } from 'typeorm';
 import { Location } from '../location/entities/location.entity.js';
@@ -14,6 +14,10 @@ import { IncidentType } from './entities/incident-type.enum.js';
 
 // Mismo valor que escribe purchase-order-incidents.ts al abrir la novedad de una línea de compra.
 const PURCHASE_ORDER_ITEM_ENTITY = 'PURCHASE_ORDER_ITEM';
+
+// Mismos valores que escribe InternalOrderService: las novedades de una orden interna se reportan por
+// reportInternalOrderIncident, que exige su permiso y que quien reporta vea la orden.
+const INTERNAL_ORDER_ENTITIES: readonly string[] = ['INTERNAL_ORDER', 'INTERNAL_ORDER_ITEM'];
 
 export interface IncidentFilter {
   type?: IncidentType;
@@ -85,6 +89,9 @@ export class IncidentService {
     input: CreateIncidentInput,
     idempotencyKey?: string,
   ): Promise<Incident> {
+    if (input.entityType && INTERNAL_ORDER_ENTITIES.includes(input.entityType)) {
+      throw new BadRequestException('Las novedades de un pedido se reportan desde el pedido');
+    }
     return this.dataSource.transaction((manager) =>
       runIdempotent(
         manager,

@@ -5,36 +5,35 @@ import { InternalOrderType } from './entities/internal-order-type.enum.js';
 // Las máquinas de estado de las órdenes, una por tipo, en una sola tabla: qué transición existe,
 // quién puede hacerla (cualquiera de `permissions`, más la regla de `actor`) y qué efecto tiene.
 // El servicio no decide flujos: busca aquí el paso pedido y aplica su efecto. Las transiciones que
-// nadie pide a mano (PAID al cobrar en caja, ITEM_CHANGE_REQUESTED al pedir un cambio, la vuelta a
-// RECEIVED_BY_SELLER al unir una sub-orden, RETURN_CREATED → WAITING_FOR_RUNNER al crear una RE) no
-// están aquí: las hace el servicio dentro de la operación que las provoca.
+// nadie pide a mano (PAID al cobrar en caja, ITEM_CHANGE_REQUESTED al pedir un cambio,
+// CLOSED_BY_CHANGE cuando la sub-orden de un cambio llega y la original termina sin cobro,
+// RETURN_CREATED → WAITING_FOR_RUNNER al crear una RE) no están aquí: las hace el servicio dentro
+// de la operación que las provoca.
 
 export type FlowEffect =
-  // bodega toma la orden (queda como responsable)
-  | 'ACCEPT'
-  // empieza el alistamiento
+  // bodega toma la orden y empieza a alistarla (queda como responsable)
   | 'PACK'
   // bodega dice cuánto encontró de cada línea; lo faltante abre novedad y se suelta de la reserva
   | 'READY'
-  // el corredor la recoge: sale del STOCK de origen a su bolsa
+  // el corredor que la tomó (claimInternalOrder) la recoge: sale del STOCK de origen a su bolsa
   | 'PICK_UP'
-  // el corredor la entrega: de su bolsa al STOCK (o al cajón de devoluciones) del destino
+  // el corredor marca que la entregó físicamente; sigue bajo su custodia (en su bolsa) hasta que el
+  // destino confirme: son dos eventos distintos, nunca uno solo
   | 'DELIVER'
-  // el vendedor la recibe directo de manos del corredor: entregar y recibir a la vez
-  | 'DELIVER_AND_RECEIVE'
-  // el destino confirma que llegó
+  // el destino confirma que la recibió: termina la custodia del corredor y pasa de su bolsa al STOCK
+  // del destino
   | 'RECEIVE'
   // el cliente compra: pasa a la cola de cobro de la caja de esa tienda
   | 'TO_PAYMENT'
   // caja la devuelve al vendedor (el cliente todavía no decide)
   | 'BACK_TO_SELLER'
-  // el cliente no compra: nace la RE que lleva todo de vuelta a bodega
+  // el cliente no compra: lo que tiene va al cajón de devoluciones de la tienda y la orden se cierra
+  // como devuelta (la RE la arma después el administrador con lo acumulado)
   | 'RETURN_REQUEST'
-  // una sub-orden recibida se suma a su orden original, que sigue hacia el pago
-  | 'MERGE'
-  // bodega cuenta lo que llegó de una devolución
+  // bodega recibe una devolución: cuenta lo que llegó (termina la custodia del corredor, pasa de su
+  // bolsa al cajón de devoluciones) y lo contado entra al STOCK · cierra el ticket
   | 'VERIFY_RETURN'
-  // la devolución pasa del cajón de devoluciones al STOCK de la bodega
+  // heredado: la devolución que quedó recibida con la regla anterior pasa del cajón al STOCK
   | 'CLOSE_RETURN'
   // un traslado o un surtido se da por terminado
   | 'CLOSE'
@@ -43,8 +42,10 @@ export type FlowEffect =
 
 // Regla de quién, además del permiso:
 //   RUNNER     el corredor asignado (o el super admin, por él)
-//   REQUESTER  quien la pidió, o quien tenga el permiso (cancelar lo propio no pide permiso de bodega)
-export type FlowActor = 'RUNNER' | 'REQUESTER';
+//   REQUESTER  quien la pidió, o quien tenga el permiso
+//   ADMIN      solo quien administra la empresa (Administrador) o la plataforma (super admin); no
+//              depende de permisos
+export type FlowActor = 'RUNNER' | 'REQUESTER' | 'ADMIN';
 
 export interface FlowStep {
   from: S;
@@ -64,22 +65,23 @@ const DELIVERY = [P.RUNNER_CONFIRM_DELIVERY];
 const RECEIPT = [P.ORDERS_CONFIRM_RECEIPT];
 const RECEIPT_OR_WAREHOUSE = [P.ORDERS_CONFIRM_RECEIPT, P.WAREHOUSE_FULFILL_ORDERS];
 const CASH_DESK = [P.CASH_CHARGE_ORDERS, P.CASH_REGISTER_PAYMENT, P.ORDERS_CONFIRM_RECEIPT];
-const CANCEL = { effect: 'CANCEL' as const, permissions: WAREHOUSE, actor: 'REQUESTER' as const };
+// Anular una SO, un TR o un RS antes de que lo recoja el corredor es solo del administrador (ni bodega,
+// ni el corredor, ni quien lo pidió). Cancelar una devolución (RE) sigue su propia regla.
+const CANCEL = { effect: 'CANCEL' as const, permissions: [], actor: 'ADMIN' as const };
 
 export const FLOWS: Record<InternalOrderType, readonly FlowStep[]> = {
   [InternalOrderType.SO]: [
-    { from: S.NEW, to: S.ACCEPTED_BY_WAREHOUSE, effect: 'ACCEPT', permissions: WAREHOUSE, detail: 'Bodega acepta la orden' },
+    { from: S.NEW, to: S.PACKING, effect: 'PACK', permissions: WAREHOUSE, detail: 'Bodega toma la orden · alistamiento iniciado' },
+    // Heredado: ya no se acepta antes de alistar, pero una orden que quedó aceptada sigue su camino.
     { from: S.ACCEPTED_BY_WAREHOUSE, to: S.PACKING, effect: 'PACK', permissions: WAREHOUSE, detail: 'Alistamiento iniciado' },
     { from: S.PACKING, to: S.READY_FOR_RUNNER, effect: 'READY', permissions: WAREHOUSE, detail: 'Alistado y notificado a corredores' },
     { from: S.READY_FOR_RUNNER, to: S.IN_TRANSIT, effect: 'PICK_UP', permissions: PICKUP, detail: 'Corredor recoge y transporta' },
     { from: S.IN_TRANSIT, to: S.DELIVERED_TO_STORE, effect: 'DELIVER', permissions: DELIVERY, actor: 'RUNNER', detail: 'Entregado en tienda' },
-    { from: S.IN_TRANSIT, to: S.RECEIVED_BY_SELLER, effect: 'DELIVER_AND_RECEIVE', permissions: RECEIPT, detail: 'El vendedor la recibe del corredor' },
     { from: S.DELIVERED_TO_STORE, to: S.RECEIVED_BY_SELLER, effect: 'RECEIVE', permissions: RECEIPT, detail: 'Vendedor confirma recepción' },
     { from: S.RECEIVED_BY_SELLER, to: S.PENDING_PAYMENT, effect: 'TO_PAYMENT', permissions: RECEIPT, detail: 'Cliente decide comprar · enviada a caja' },
-    { from: S.RECEIVED_BY_SELLER, to: S.RETURN_REQUESTED, effect: 'RETURN_REQUEST', permissions: RECEIPT, detail: 'Cliente no compra · se genera la devolución' },
-    { from: S.RECEIVED_BY_SELLER, to: S.MERGED_INTO_PARENT, effect: 'MERGE', permissions: RECEIPT, detail: 'Los productos se suman a la orden original' },
+    { from: S.RECEIVED_BY_SELLER, to: S.RETURNED, effect: 'RETURN_REQUEST', permissions: RECEIPT, detail: 'Cliente no compra · al cajón de devoluciones' },
     { from: S.PENDING_PAYMENT, to: S.RECEIVED_BY_SELLER, effect: 'BACK_TO_SELLER', permissions: CASH_DESK, detail: 'Vuelve al vendedor · el cliente aún no decide' },
-    { from: S.PENDING_PAYMENT, to: S.RETURN_REQUESTED, effect: 'RETURN_REQUEST', permissions: CASH_DESK, detail: 'Cliente no compra · se genera la devolución' },
+    { from: S.PENDING_PAYMENT, to: S.RETURNED, effect: 'RETURN_REQUEST', permissions: CASH_DESK, detail: 'Cliente no compra · al cajón de devoluciones' },
     { from: S.NEW, to: S.CANCELLED, ...CANCEL, detail: 'Orden anulada' },
     { from: S.ACCEPTED_BY_WAREHOUSE, to: S.CANCELLED, ...CANCEL, detail: 'Orden anulada' },
     { from: S.PACKING, to: S.CANCELLED, ...CANCEL, detail: 'Orden anulada' },
@@ -88,7 +90,10 @@ export const FLOWS: Record<InternalOrderType, readonly FlowStep[]> = {
   [InternalOrderType.RE]: [
     { from: S.WAITING_FOR_RUNNER, to: S.IN_TRANSIT_TO_WAREHOUSE, effect: 'PICK_UP', permissions: PICKUP, detail: 'Corredor transporta hacia bodega' },
     { from: S.IN_TRANSIT_TO_WAREHOUSE, to: S.DELIVERED_TO_WAREHOUSE, effect: 'DELIVER', permissions: DELIVERY, actor: 'RUNNER', detail: 'Entregada en bodega' },
-    { from: S.DELIVERED_TO_WAREHOUSE, to: S.RECEIVED_BY_WAREHOUSE, effect: 'VERIFY_RETURN', permissions: RETURNS_DESK, detail: 'Bodega verifica y confirma recepción' },
+    // Recibir en bodega cierra el ticket: se cuenta lo que llegó, entra a la existencia y la
+    // devolución queda cerrada en un solo paso.
+    { from: S.DELIVERED_TO_WAREHOUSE, to: S.RETURNED, effect: 'VERIFY_RETURN', permissions: RETURNS_DESK, detail: 'Bodega recibe y cuenta · devolución cerrada' },
+    // Heredado: las devoluciones que quedaron recibidas sin cerrar cuando eran dos pasos.
     { from: S.RECEIVED_BY_WAREHOUSE, to: S.RETURNED, effect: 'CLOSE_RETURN', permissions: RETURNS_DESK, detail: 'Devolución cerrada · movimiento de inventario registrado' },
     { from: S.WAITING_FOR_RUNNER, to: S.CANCELLED, effect: 'CANCEL', permissions: RECEIPT_OR_WAREHOUSE, actor: 'REQUESTER', detail: 'Devolución cancelada · el cliente cambió de opinión' },
   ],
@@ -126,6 +131,7 @@ export const FINAL_STATUSES: readonly S[] = [
   S.CANCELLED,
   S.RETURNED,
   S.MERGED_INTO_PARENT,
+  S.CLOSED_BY_CHANGE,
   S.TRANSFERRED,
   S.RESTOCKED,
 ];
@@ -143,6 +149,7 @@ export const PICKED_UP_STATUSES: readonly S[] = [
   S.RETURN_REQUESTED,
   S.ITEM_CHANGE_REQUESTED,
   S.MERGED_INTO_PARENT,
+  S.CLOSED_BY_CHANGE,
   S.IN_TRANSIT_TO_WAREHOUSE,
   S.DELIVERED_TO_WAREHOUSE,
   S.RECEIVED_BY_WAREHOUSE,
@@ -156,6 +163,17 @@ export const PICKED_UP_STATUSES: readonly S[] = [
 
 // Estados en que la orden espera que un corredor la tome.
 export const WAITING_RUNNER_STATUSES: readonly S[] = [S.READY_FOR_RUNNER, S.WAITING_FOR_RUNNER];
+
+// Estados en que el corredor todavía responde por la orden: la tomó (espera en bodega), la lleva, o
+// la entregó y espera la confirmación del receptor. Con la confirmación termina su custodia.
+export const RUNNER_ENGAGED_STATUSES: readonly S[] = [
+  ...WAITING_RUNNER_STATUSES,
+  S.IN_TRANSIT,
+  S.IN_TRANSIT_TO_WAREHOUSE,
+  S.DELIVERED_TO_STORE,
+  S.DELIVERED_TO_WAREHOUSE,
+  S.DELIVERED_TO_DESTINATION,
+];
 
 export function stepFor(type: InternalOrderType, from: S, to: S): FlowStep | undefined {
   return FLOWS[type].find((step) => step.from === from && step.to === to);
