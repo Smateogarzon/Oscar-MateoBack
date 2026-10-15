@@ -19,6 +19,11 @@ export class SaleObjectType extends BaseObjectType {
   @Field(() => String, { nullable: true })
   internalOrderId: string | null;
 
+  // Solo acepta líneas no inventariadas (ver `Sale.genericOnly`): es la venta que abre la caja sin
+  // sales.create. La terminal lo usa para no ofrecer el catálogo en ella.
+  @Field()
+  genericOnly: boolean;
+
   // Consecutivo por empresa, ej: VTA-000001. Se asigna al cobrar: un borrador todavía no tiene número.
   @Field(() => String, { nullable: true })
   saleNumber: string | null;

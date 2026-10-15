@@ -2,7 +2,8 @@ import { ConflictException, Injectable, NotFoundException } from '@nestjs/common
 import { Decimal } from 'decimal.js';
 import { InjectRepository } from '@nestjs/typeorm';
 import type { EntityManager } from 'typeorm';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
+import { directVariantsOf, isDirectIn } from '../../common/access/direct-sale.js';
 import { RecordStatus } from '../../common/enums/record-status.enum.js';
 import { InventoryLocationType } from '../inventory-location/entities/inventory-location-type.enum.js';
 import type { SellableStockObjectType } from './dto/sellable-stock.object-type.js';
@@ -11,12 +12,17 @@ import { InventoryBalance } from './entities/inventory-balance.entity.js';
 export interface InventoryBalanceFilter {
   productVariantId?: string;
   inventoryLocationId?: string;
+  /** Las sedes cuyo inventario puede ver quien consulta, o `null` si las ve todas (ver
+   * `visibleLocationIds`). Un arreglo vacío no devuelve nada: no tiene ninguna asignada. */
+  locationIds?: string[] | null;
 }
 
 // Lo que hay y lo disponible de una variante en una bodega STOCK (ver `stockAvailability`).
 interface StockAvailability {
   productVariantId: string;
   inventoryLocationId: string;
+  /** La sede a la que pertenece ese cajón: con esto se distingue el stock de la tienda que vende. */
+  locationId: string;
   quantity: Decimal;
   available: Decimal;
 }
@@ -30,30 +36,45 @@ export class InventoryBalanceService {
     private readonly inventoryBalanceRepository: Repository<InventoryBalance>,
   ) {}
 
+  // Las existencias de la empresa, acotadas a las sedes de quien consulta (`locationIds`): un
+  // bodeguero ve lo de sus bodegas, no lo de toda la empresa. Los cajones sin sede (la bolsa de un
+  // corredor) quedan fuera para todo el que no las vea todas: no son de ninguna bodega suya.
   findAll(companyId: string, filter: InventoryBalanceFilter = {}): Promise<InventoryBalance[]> {
+    const { locationIds } = filter;
+    if (locationIds?.length === 0) return Promise.resolve([]);
     return this.inventoryBalanceRepository.find({
       where: {
         productVariant: { companyId },
         ...(filter.productVariantId && { productVariantId: filter.productVariantId }),
         ...(filter.inventoryLocationId && { inventoryLocationId: filter.inventoryLocationId }),
+        ...(locationIds && { inventoryLocation: { locationId: In(locationIds) } }),
       },
     });
   }
 
-  async findOne(companyId: string, id: string): Promise<InventoryBalance> {
-    const balance = await this.inventoryBalanceRepository.findOne({
-      where: { id, productVariant: { companyId } },
-    });
+  // Fuera de las sedes de quien consulta la existencia no existe: 404, no 403 (quien no ve una
+  // bodega tampoco tiene por qué saber qué hay en ella).
+  async findOne(companyId: string, id: string, locationIds?: string[] | null): Promise<InventoryBalance> {
+    const balance =
+      locationIds?.length === 0
+        ? null
+        : await this.inventoryBalanceRepository.findOne({
+            where: {
+              id,
+              productVariant: { companyId },
+              ...(locationIds && { inventoryLocation: { locationId: In(locationIds) } }),
+            },
+          });
     if (!balance) throw new NotFoundException(`Existencia ${id} no encontrada`);
     return balance;
   }
 
   // Fija o quita el mínimo de una existencia sin registrar un movimiento. Un UPDATE de esa sola
   // columna: no pisa la cantidad que un movimiento esté ajustando en paralelo.
-  async updateMinStock(companyId: string, id: string, minStock: string): Promise<InventoryBalance> {
-    await this.findOne(companyId, id);
+  async updateMinStock(companyId: string, id: string, minStock: string, locationIds?: string[] | null): Promise<InventoryBalance> {
+    await this.findOne(companyId, id, locationIds);
     await this.inventoryBalanceRepository.update({ id }, { minStock: minStock ? new Decimal(minStock) : null });
-    return this.findOne(companyId, id);
+    return this.findOne(companyId, id, locationIds);
   }
 
   // La bodega STOCK de la que sale una línea de venta (devuelve su id): hoy cada referencia vive en
@@ -70,10 +91,20 @@ export class InventoryBalanceService {
     companyId: string,
     productVariantId: string,
     quantity: Decimal,
+    // La tienda donde se vende, si se sabe: lo que se vende directo (la ropa, o todo en una tienda
+    // sin corredores) solo sale del stock de esa tienda, porque no hay quien lo traiga de otra.
+    storeId?: string,
   ): Promise<string> {
-    const candidates = await this.stockAvailability(manager, companyId, productVariantId);
+    const all = await this.stockAvailability(manager, companyId, productVariantId);
+    const direct = storeId ? await directVariantsOf(manager, companyId, storeId) : new Set<string>();
+    const sellsDirect = isDirectIn(direct, productVariantId);
+    const candidates = sellsDirect ? all.filter((row) => row.locationId === storeId) : all;
     if (candidates.length === 0) {
-      throw new NotFoundException('Esta variante no tiene existencia registrada en ninguna bodega');
+      throw new NotFoundException(
+        sellsDirect
+          ? 'Esta referencia se vende de lo que hay en la tienda y la tienda no tiene existencia de ella'
+          : 'Esta variante no tiene existencia registrada en ninguna bodega',
+      );
     }
 
     const best = candidates[0];
@@ -85,7 +116,9 @@ export class InventoryBalanceService {
       throw new ConflictException(
         physical.greaterThanOrEqualTo(quantity)
           ? `Otro vendedor tiene apartadas esas unidades: quedan ${best.available.toFixed(2)} disponibles de ${physical.toFixed(2)} y se pidieron ${quantity.toFixed(2)}`
-          : `No hay suficiente existencia en una sola bodega: la mayor tiene ${best.available.toFixed(2)} disponibles y se pidieron ${quantity.toFixed(2)}`,
+          : sellsDirect
+            ? `La tienda tiene ${best.available.toFixed(2)} disponibles de esta referencia y se pidieron ${quantity.toFixed(2)}`
+            : `No hay suficiente existencia en una sola bodega: la mayor tiene ${best.available.toFixed(2)} disponibles y se pidieron ${quantity.toFixed(2)}`,
       );
     }
     return best.inventoryLocationId;
@@ -95,9 +128,20 @@ export class InventoryBalanceService {
   // tiene, que es lo máximo que acepta una línea de venta (sale entera de una sola bodega; ver
   // findStockLocationForSale). Con esto el selector de productos de Ventas muestra lo agotado y no
   // deja pedir de más, con la misma cuenta con la que después se aparta, sin repetirla en el cliente.
-  async findSellableStock(companyId: string): Promise<SellableStockObjectType[]> {
+  //
+  // Con `storeId` (la tienda donde se está vendiendo) lo que se vende directo se cuenta DONDE está:
+  // la ropa de esa tienda, o todo si la tienda no tiene corredores (ver `directVariantsOf`). Si se
+  // contara "la que más tenga", el selector ofrecería la ropa de otra tienda y la venta se iría a
+  // descontar de allá, que es justo lo que no puede pasar: nadie la va a traer.
+  async findSellableStock(companyId: string, storeId?: string): Promise<SellableStockObjectType[]> {
+    const manager = this.inventoryBalanceRepository.manager;
+    const rows = await this.stockAvailability(manager, companyId);
+    const direct = storeId ? await directVariantsOf(manager, companyId, storeId) : new Set<string>();
+
     const best = new Map<string, Decimal>();
-    for (const row of await this.stockAvailability(this.inventoryBalanceRepository.manager, companyId)) {
+    for (const row of rows) {
+      // Lo directo solo cuenta en la tienda que vende; lo demás, en cualquier bodega.
+      if (isDirectIn(direct, row.productVariantId) && row.locationId !== storeId) continue;
       const current = best.get(row.productVariantId);
       if (!current || row.available.greaterThan(current)) best.set(row.productVariantId, row.available);
     }
@@ -116,9 +160,10 @@ export class InventoryBalanceService {
     companyId: string,
     productVariantId?: string,
   ): Promise<StockAvailability[]> {
-    const rows: { productVariantId: string; inventoryLocationId: string; quantity: string; available: string }[] =
+    const rows: { productVariantId: string; inventoryLocationId: string; locationId: string; quantity: string; available: string }[] =
       await manager.query(
         `SELECT b."productVariantId" AS "productVariantId", b."inventoryLocationId" AS "inventoryLocationId",
+                l."locationId" AS "locationId",
                 b.quantity::text AS "quantity", (b.quantity - COALESCE(r.reserved, 0))::text AS "available"
            FROM inventory_balances b
            JOIN inventory_locations l ON l.id = b."inventoryLocationId"
@@ -139,6 +184,7 @@ export class InventoryBalanceService {
     return rows.map((row) => ({
       productVariantId: row.productVariantId,
       inventoryLocationId: row.inventoryLocationId,
+      locationId: row.locationId,
       quantity: new Decimal(row.quantity),
       available: new Decimal(row.available),
     }));

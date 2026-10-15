@@ -8,6 +8,7 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { Decimal } from 'decimal.js';
 import { DataSource, EntityManager, In, Repository } from 'typeorm';
+import { isDirectLine } from '../../common/access/direct-sale.js';
 import { assertStoreAccess } from '../../common/access/store-access.js';
 import { RecordStatus } from '../../common/enums/record-status.enum.js';
 import { MAX_AMOUNT } from '../../common/utils/money.js';
@@ -193,8 +194,10 @@ export class SaleService {
     actor: CashActor,
     input: CreateSaleInput,
     idempotencyKey?: string,
-    // Sin sales.create solo se abre la venta del cambio de una devolución (ver el resolver).
-    options: { canCreateBlank: boolean } = { canCreateBlank: true },
+    // Sin sales.create (la caja) la venta que se abre solo acepta líneas no inventariadas, salvo la
+    // del cambio de una devolución aprobada, que es para cobrar una referencia del catálogo (ver
+    // `genericOnly` en la entidad y el resolver).
+    options: { canSellCatalog: boolean } = { canSellCatalog: true },
   ): Promise<Sale> {
     const cashierId = actor.userId;
     return this.dataSource.transaction((manager) =>
@@ -215,9 +218,16 @@ export class SaleService {
             throw new ConflictException(`La tienda ${store.name} está desactivada: no se puede vender en ella`);
           }
 
-          // Sin sales.create (la caja) no se abren ventas en blanco: solo la del cambio de una
-          // devolución aprobada, que todavía no tiene su venta de reemplazo.
-          if (!options.canCreateBlank) await this.assertExchangeToCharge(manager, companyId, input.saleReturnId);
+          // Sin sales.create (la caja) se abren dos cosas: la venta del cambio de una devolución
+          // aprobada —que todavía no tiene su venta de reemplazo y se cobra con catálogo— y una venta
+          // de puros no inventariados. Pedir un cambio que no está en pie sigue siendo un no: así el
+          // error dice qué pasó con ESE cambio en vez de abrir una venta que no sirve para cobrarlo.
+          // En una tienda sin corredores la caja ES quien vende: ahí su venta en blanco sí toma
+          // catálogo, porque no hay un vendedor que mande una orden ni un corredor que la traiga.
+          const canSellCatalog = options.canSellCatalog || input.saleReturnId !== undefined || store.directSale;
+          if (!options.canSellCatalog && input.saleReturnId !== undefined) {
+            await this.assertExchangeToCharge(manager, companyId, input.saleReturnId);
+          }
 
           // Solo se vende desde las tiendas a las que el usuario tiene acceso (Configuración →
           // Personal por ubicación), también el administrador: si tiene que vender, se asigna.
@@ -253,6 +263,7 @@ export class SaleService {
               cashierId,
               cashSessionId: session.id,
               saleNumber: null,
+              genericOnly: !canSellCatalog,
               subtotal: new Decimal(0),
               discountTotal: new Decimal(0),
               generalDiscount: new Decimal(0),
@@ -310,6 +321,11 @@ export class SaleService {
           await assertStoreAccess(manager, actor.userId, sale.storeId);
 
           if (input.productVariantId) {
+            // La venta de puros no inventariados que abre la caja (ver `Sale.genericOnly`): el
+            // catálogo se vende con una orden del vendedor, no desde aquí.
+            if (sale.genericOnly) {
+              throw new ForbiddenException('Esta venta solo acepta productos no inventariados: el catálogo se cobra desde una orden del vendedor');
+            }
             const exists = await manager
               .getRepository(ProductVariant)
               .existsBy({ id: input.productVariantId, companyId, status: RecordStatus.ACTIVE });
@@ -471,11 +487,6 @@ export class SaleService {
       desired.set(item.productVariantId, held.plus(item.quantity));
     }
 
-    // Una venta que cobra una orden de venta aparta en la tienda a la que llegó la mercancía.
-    const preferredLocationId = sale.internalOrderId
-      ? (await this.inventoryLocations.findStockLocation(manager, companyId, sale.storeId)).id
-      : undefined;
-
     await this.reservations.syncForSource(
       manager,
       companyId,
@@ -486,8 +497,37 @@ export class SaleService {
         reservedBy,
       },
       desired,
-      preferredLocationId,
+      await this.storeHeldVariants(manager, companyId, sale, [...desired.keys()]),
     );
+  }
+
+  /**
+   * Qué variantes de la venta se apartan en el STOCK de la tienda que vende, en vez de en "la bodega
+   * que más tenga" (variante → cajón de esa tienda). Son dos casos:
+   *   · la venta cobra una orden de venta (SO): todo, porque el corredor ya trajo la mercancía ahí;
+   *   · la venta es directa: lo que vive en la tienda y no pasa por corredor (ver `isDirectLine`) —
+   *     la ropa de una tienda mixta, o todo en una tienda sin corredores.
+   * Si no hay ninguna, no se busca el cajón de la tienda: una tienda que nunca vende directo no
+   * necesita tenerlo.
+   */
+  private async storeHeldVariants(
+    manager: EntityManager,
+    companyId: string,
+    sale: Sale,
+    productVariantIds: readonly string[],
+  ): Promise<ReadonlyMap<string, string>> {
+    if (productVariantIds.length === 0) return new Map();
+    const fromStore = sale.internalOrderId
+      ? productVariantIds
+      : (
+          await Promise.all(
+            productVariantIds.map(async (id) => ((await isDirectLine(manager, companyId, sale.storeId, id)) ? id : null)),
+          )
+        ).filter((id): id is string => id !== null);
+    if (fromStore.length === 0) return new Map();
+
+    const stockLocation = await this.inventoryLocations.findStockLocation(manager, companyId, sale.storeId);
+    return new Map(fromStore.map((id) => [id, stockLocation.id]));
   }
 
   // La caja abre el cobro de una orden de venta (SO) que el vendedor dejó pendiente de pago: un
@@ -717,10 +757,13 @@ export class SaleService {
     return manager.getRepository(Sale).save(sale);
   }
 
+  // Quien no tiene sales.create solo cobra con catálogo el cambio de una devolución aprobada que
+  // todavía no tiene su venta de reemplazo. Si ese cambio no está en pie, no se abre la venta: para
+  // cobrar algo que no está en el inventario se abre una venta de no inventariados, sin pedir cambio.
   private async assertExchangeToCharge(manager: EntityManager, companyId: string, saleReturnId: string | undefined): Promise<void> {
     const exchange = saleReturnId ? await manager.getRepository(SaleReturn).findOneBy({ id: saleReturnId, companyId }) : null;
     const open =
       exchange?.status === SaleReturnStatus.APPROVED && exchange.resolution === SaleReturnResolution.EXCHANGE && exchange.replacementSaleId === null;
-    if (!open) throw new ForbiddenException('No tienes permiso para crear ventas: solo puedes cobrar órdenes y cambios aprobados');
+    if (!open) throw new ForbiddenException('Ese cambio no está aprobado o ya se cobró: no hay nada que cobrar con él');
   }
 }

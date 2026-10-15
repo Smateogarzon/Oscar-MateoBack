@@ -1,7 +1,7 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Decimal } from 'decimal.js';
-import { DataSource, EntityManager, Repository } from 'typeorm';
+import { DataSource, EntityManager, In, Repository } from 'typeorm';
 import { PermissionCode } from '../../common/enums/permission-code.enum.js';
 import { InventoryBalance } from '../inventory-balance/entities/inventory-balance.entity.js';
 import { lockOrCreateInventoryBalance } from '../inventory-balance/lock-inventory-balance.js';
@@ -21,6 +21,8 @@ export interface InventoryMovementFilter {
   productVariantId?: string;
   fromLocationId?: string;
   toLocationId?: string;
+  /** Las sedes de quien consulta, o `null` si las ve todas (ver `visibleLocationIds`). */
+  locationIds?: string[] | null;
 }
 
 // Lo mismo que `CreateInventoryMovementInput`, pero con `quantity` ya convertida a Decimal: lo usa
@@ -66,16 +68,26 @@ export class InventoryMovementService {
     private readonly notifications: NotificationService,
   ) {}
 
+  // El kárdex que ve quien consulta: solo los movimientos que entran o salen de una sede suya
+  // (`locationIds`). Un traslado entre su bodega y otra sí lo ve —pasó por sus manos—; uno entre dos
+  // bodegas ajenas, no.
   findAll(companyId: string, filter: InventoryMovementFilter = {}): Promise<InventoryMovement[]> {
-    return this.inventoryMovementRepository.find({
-      where: {
-        companyId,
-        ...(filter.productVariantId && { productVariantId: filter.productVariantId }),
-        ...(filter.fromLocationId && { fromLocationId: filter.fromLocationId }),
-        ...(filter.toLocationId && { toLocationId: filter.toLocationId }),
-      },
-      order: { createdAt: 'DESC' },
-    });
+    const { locationIds } = filter;
+    if (locationIds?.length === 0) return Promise.resolve([]);
+    const common = {
+      companyId,
+      ...(filter.productVariantId && { productVariantId: filter.productVariantId }),
+      ...(filter.fromLocationId && { fromLocationId: filter.fromLocationId }),
+      ...(filter.toLocationId && { toLocationId: filter.toLocationId }),
+    };
+    // Dos condiciones alternativas (origen o destino): en TypeORM, un arreglo de `where` es un OR.
+    const where = locationIds
+      ? [
+          { ...common, fromLocation: { locationId: In(locationIds) } },
+          { ...common, toLocation: { locationId: In(locationIds) } },
+        ]
+      : common;
+    return this.inventoryMovementRepository.find({ where, order: { createdAt: 'DESC' } });
   }
 
   async findOne(companyId: string, id: string): Promise<InventoryMovement> {

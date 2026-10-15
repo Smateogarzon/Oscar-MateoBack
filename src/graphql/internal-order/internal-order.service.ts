@@ -2,7 +2,8 @@ import { BadRequestException, ConflictException, ForbiddenException, Injectable,
 import { InjectRepository } from '@nestjs/typeorm';
 import { Decimal } from 'decimal.js';
 import { Brackets, DataSource, EntityManager, In, Repository } from 'typeorm';
-import { assertStoreAccess } from '../../common/access/store-access.js';
+import { directVariantsOf } from '../../common/access/direct-sale.js';
+import { assertStoreAccess, hasStoreAccess } from '../../common/access/store-access.js';
 import { PermissionCode } from '../../common/enums/permission-code.enum.js';
 import { RecordStatus } from '../../common/enums/record-status.enum.js';
 import { DocumentSequenceService } from '../document-sequence/document-sequence.service.js';
@@ -46,6 +47,7 @@ import {
   RUNNER_ENGAGED_STATUSES,
   stepFor,
   WAITING_RUNNER_STATUSES,
+  WAREHOUSE_EFFECT_AT,
   type FlowStep,
 } from './internal-order-flow.js';
 import { formatInternalOrderNumber, INTERNAL_ORDER_SERIES } from './internal-order-number.js';
@@ -258,10 +260,11 @@ export class InternalOrderService {
     return this.hydrate(this.dataSource.manager, orders);
   }
 
-  // Las sedes en que trabaja quien consulta (Configuración → Personal por ubicación); el super admin,
-  // todas las activas de la empresa. Es de donde el vendedor pide y a donde le llega.
+  // Las sedes en que trabaja quien consulta (Configuración → Personal por ubicación); quien
+  // administra la empresa (y el super admin), todas las activas. Es de donde el vendedor pide y a
+  // donde le llega, y también lo que acota la pantalla de Inventario a las bodegas de cada quien.
   async myLocations(companyId: string, actor: OrderActor): Promise<Location[]> {
-    if (actor.isSuperAdmin) {
+    if (actor.isSuperAdmin || actor.isAdmin) {
       return this.dataSource.manager.find(Location, { where: { companyId, status: RecordStatus.ACTIVE }, order: { name: 'ASC' } });
     }
     const ids = await this.accessibleLocationIds(this.dataSource.manager, companyId, actor);
@@ -339,6 +342,12 @@ export class InternalOrderService {
           if (input.type === InternalOrderType.SO) await assertStoreAccess(manager, actor.userId, destination.id);
 
           const lines = await this.pricedLines(manager, companyId, input.type, mergeLines(input.items));
+          // Un pedido de venta existe para que un corredor traiga la mercancía a la tienda. Lo que ya
+          // está en la tienda no tiene nada que esperar: se cobra directo en caja. Pedirlo dejaría una
+          // orden que nadie puede completar, así que se rechaza acá y se dice por qué.
+          if (input.type === InternalOrderType.SO) {
+            await this.assertNothingSoldDirect(manager, companyId, destination, lines);
+          }
           const order = await this.createOrder(manager, companyId, actor.userId, {
             type: input.type,
             origin: input.origin,
@@ -377,6 +386,7 @@ export class InternalOrderService {
       const step = stepFor(order.type, order.status, input.to);
       if (!step) throw new ConflictException(`La orden #${order.orderNumber} no puede pasar de ${order.status} a ${input.to}`);
       this.assertStepAllowed(order, step, actor);
+      await this.assertWarehouseAccess(manager, order, step, actor);
 
       await this.applyEffect(manager, companyId, order, step, actor, input);
       await signalInternalOrderChange(manager, this.notifications, companyId, order, actor.userId);
@@ -403,6 +413,43 @@ export class InternalOrderService {
     if (step.effect === 'PICK_UP' && !actor.isSuperAdmin) {
       if (!order.runnerId) throw new ForbiddenException('Toma la orden antes de recogerla');
       if (order.runnerId !== actor.userId) throw new ForbiddenException('Otro corredor ya tomó esta orden');
+    }
+  }
+
+  // Tener el permiso de bodega dice QUÉ puede hacer; la asignación dice DÓNDE. Un paso de bodega
+  // (alistar, despachar, recibir una devolución) solo lo da quien tiene asignada la sede donde está
+  // la mercancía: con el permiso suelto, un bodeguero de una bodega despachaba las de todas. Es la
+  // misma regla con la que ya se opera una tienda (assertStoreAccess), y como ella se comprueba en
+  // cada paso: quitarle la bodega a alguien lo deja fuera en ese momento, no mañana.
+  // Lo que se vende directo no se pide a bodega: ni en una tienda sin corredores (nada se pide ahí)
+  // ni la ropa de una tienda mixta (eso ya está colgado en la tienda). El mensaje nombra la primera
+  // referencia que sobra, que es lo que hay que sacar del pedido.
+  private async assertNothingSoldDirect(
+    manager: EntityManager,
+    companyId: string,
+    destination: Location,
+    lines: readonly { productVariantId: string }[],
+  ): Promise<void> {
+    const direct = await directVariantsOf(manager, companyId, destination.id);
+    if (direct === 'all') {
+      throw new BadRequestException(
+        `${destination.name} vende directo en caja desde su propio inventario: no se le piden órdenes de venta a bodega`,
+      );
+    }
+    const offender = lines.find((line) => direct.has(line.productVariantId));
+    if (!offender) return;
+    const sku = (await manager.getRepository(ProductVariant).findOneBy({ id: offender.productVariantId, companyId }))?.sku;
+    throw new BadRequestException(
+      `${sku ? `La referencia ${sku}` : 'Una de las referencias'} se vende de lo que hay en la tienda: quítala del pedido y cóbrala directo en caja`,
+    );
+  }
+
+  private async assertWarehouseAccess(manager: EntityManager, order: InternalOrder, step: FlowStep, actor: OrderActor): Promise<void> {
+    const at = WAREHOUSE_EFFECT_AT[step.effect];
+    if (!at) return;
+    const locationId = at === 'SOURCE' ? order.sourceLocationId : order.destinationLocationId;
+    if (!(await hasStoreAccess(manager, actor.userId, locationId))) {
+      throw new ForbiddenException('No tienes asignada la bodega de esta orden');
     }
   }
 
@@ -711,6 +758,10 @@ export class InternalOrderService {
         });
       }
       if (outgoing.length === 0) throw new BadRequestException('Marca al menos una línea para cambiar');
+      // La sub-orden del cambio viaja con un corredor igual que la original: lo que ya está en la
+      // tienda no entra por ahí. Un cliente que quiere cambiar su par por una camisa la paga en caja,
+      // y la sub-orden se quedaría esperando a un corredor que no tiene nada que traer.
+      await this.assertNothingSoldDirect(manager, companyId, await this.activeLocation(manager, companyId, order.destinationLocationId), incoming);
 
       // Lo que el cliente cambia queda en el cajón de devoluciones de la tienda (no vuelve solo a bodega).
       await this.stock.release(manager, order.id);

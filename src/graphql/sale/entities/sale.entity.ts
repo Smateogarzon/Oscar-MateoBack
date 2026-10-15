@@ -35,6 +35,14 @@ export class Sale extends BaseEntity {
   @Column({ type: 'uuid', nullable: true })
   internalOrderId: string | null;
 
+  // La venta solo acepta líneas no inventariadas (SaleItemType.GENERIC). Es la venta que abre la
+  // caja sin tener sales.create: puede cobrar lo que no está en el inventario (un domicilio, un
+  // arreglo, una bolsa) poniéndole precio, pero no vender catálogo sin una orden del vendedor. Se
+  // decide al crearla (SaleService.create) y se guarda: quitarle o darle permisos después no cambia
+  // lo que esa venta ya es, y un borrador que se retoma sigue siendo lo mismo.
+  @Column({ type: 'boolean', default: false })
+  genericOnly: boolean;
+
   // Consecutivo por empresa (VTA-000001); lo entrega DocumentSequenceService al COBRAR la venta
   // (SaleService.assignNumber). Un borrador no tiene número: los que se abandonan o se borran no dejan
   // huecos. Solo las ventas de antes de este cambio traen número desde que eran borradores.

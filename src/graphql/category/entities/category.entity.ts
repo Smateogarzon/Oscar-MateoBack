@@ -38,6 +38,13 @@ export class Category extends BaseEntity {
   @Column({ type: 'varchar', length: 255, nullable: true })
   description: string | null;
 
+  // Esta mercancía vive en la tienda, no en una bodega: no pasa por corredor en ninguna tienda (la
+  // ropa, frente al calzado). Se vende directo en caja, descontando del STOCK de la tienda que
+  // vende, y no se puede pedir a bodega. Se hereda: marcar una categoría raíz alcanza a todas sus
+  // subcategorías (ver `isDirectCategory`), así no hay que repetirlo rama por rama.
+  @Column({ type: 'boolean', default: false })
+  directSale: boolean;
+
   @Column({
     type: 'enum',
     enum: RecordStatus,

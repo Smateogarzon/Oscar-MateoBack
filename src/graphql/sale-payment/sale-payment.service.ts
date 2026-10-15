@@ -242,7 +242,8 @@ export class SalePaymentService {
 
     for (const item of inventoried) {
       // Sin reserva solo quedan los borradores de antes de que las ventas apartaran: se elige bodega
-      // como se hacía entonces.
+      // como se hacía entonces, pero ya con la tienda a la vista — lo que se vende directo sale de
+      // su propio stock.
       const reserved = heldByVariant.get(item.productVariantId!);
       const fromLocationId =
         reserved?.inventoryLocationId ??
@@ -251,6 +252,7 @@ export class SalePaymentService {
           companyId,
           item.productVariantId!,
           item.quantity,
+          sale.storeId,
         ));
       await this.inventoryMovements.recordInTransaction(manager, companyId, actor.userId, {
         productVariantId: item.productVariantId!,
