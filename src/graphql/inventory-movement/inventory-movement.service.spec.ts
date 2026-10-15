@@ -1,6 +1,9 @@
 import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
 import { Decimal } from 'decimal.js';
 import { InventoryBalance } from '../inventory-balance/entities/inventory-balance.entity.js';
+import { Incident } from '../incident/entities/incident.entity.js';
+import { IncidentStatus } from '../incident/entities/incident-status.enum.js';
+import { IncidentType } from '../incident/entities/incident-type.enum.js';
 import { InventoryLocation } from '../inventory-location/entities/inventory-location.entity.js';
 import { IdempotencyKey } from '../idempotency/entities/idempotency-key.entity.js';
 import { fingerprintOf } from '../idempotency/idempotency.js';
@@ -28,8 +31,18 @@ function createService() {
     save: vi.fn(async (value: object) => ({ id: 'movement-1', ...value })),
     findOneByOrFail: vi.fn(),
   };
-  const variantRepo = { existsBy: vi.fn().mockResolvedValue(true) };
-  const invLocationRepo = { existsBy: vi.fn().mockResolvedValue(true) };
+  const variantRepo = {
+    existsBy: vi.fn().mockResolvedValue(true),
+    findOne: vi.fn().mockResolvedValue({ id: 'variant-1', sku: 'ADI-AA-36', product: { name: 'Airforce' } }),
+  };
+  const invLocationRepo = {
+    existsBy: vi.fn().mockResolvedValue(true),
+    findOne: vi.fn().mockResolvedValue({ id: 'to-1', locationId: 'sede-1', location: { name: 'Centro' } }),
+  };
+  const incidentRepo = {
+    create: vi.fn((value: unknown) => value),
+    save: vi.fn(async (value: object) => ({ id: 'incident-1', ...value })),
+  };
   const balanceRepo = { findOne: vi.fn(), save: vi.fn(async (value: object) => value) };
   const idempotencyRepo = { findOneBy: vi.fn().mockResolvedValue(null) };
   const manager = {
@@ -42,7 +55,9 @@ function createService() {
             ? balanceRepo
             : entity === IdempotencyKey
               ? idempotencyRepo
-              : txMovementRepo,
+              : entity === Incident
+                ? incidentRepo
+                : txMovementRepo,
     query: vi.fn(async (sql: string) => claimKey(sql)),
   };
   const dataSource = {
@@ -58,6 +73,7 @@ function createService() {
     txMovementRepo,
     variantRepo,
     invLocationRepo,
+    incidentRepo,
     balanceRepo,
     idempotencyRepo,
     manager,
@@ -219,6 +235,73 @@ describe('InventoryMovementService', () => {
       const saved = balanceRepo.save.mock.calls.map((call) => call[0]);
       expect(saved.find((row) => row.inventoryLocationId === 'loc-b').quantity.toFixed(2)).toBe('6.00');
       expect(saved.find((row) => row.inventoryLocationId === 'loc-a').quantity.toFixed(2)).toBe('5.00');
+    });
+
+    it('a manual adjustment (entry) opens an incident on the same movement, in the same transaction', async () => {
+      const { service, balanceRepo, incidentRepo, dataSource } = createService();
+      balanceRepo.findOne.mockResolvedValueOnce(balance('to-1', '0'));
+
+      await service.record(COMPANY, USER, {
+        ...purchase,
+        type: InventoryMovementType.ADJUSTMENT,
+        sourceType: InventorySourceType.MANUAL_ADJUSTMENT,
+        notes: 'Conteo del lunes',
+      });
+
+      expect(dataSource.transaction).toHaveBeenCalledTimes(1);
+      expect(incidentRepo.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          companyId: COMPANY,
+          type: IncidentType.UNREGISTERED_ENTRY,
+          status: IncidentStatus.OPEN,
+          entityType: 'INVENTORY_MOVEMENT',
+          entityId: 'movement-1',
+          locationId: 'sede-1',
+          productVariantId: 'variant-1',
+          reportedBy: USER,
+          resolvedBy: null,
+        }),
+      );
+      expect(incidentRepo.create.mock.calls[0][0].title).toContain('Airforce (ADI-AA-36)');
+      expect(incidentRepo.create.mock.calls[0][0].description).toContain('Conteo del lunes');
+    });
+
+    it('a manual exit for damage opens a DAMAGE incident', async () => {
+      const { service, balanceRepo, incidentRepo } = createService();
+      balanceRepo.findOne.mockResolvedValueOnce(balance('from-1', '10'));
+
+      await service.record(COMPANY, USER, {
+        ...sale,
+        type: InventoryMovementType.DAMAGE,
+        sourceType: InventorySourceType.MANUAL_ADJUSTMENT,
+        notes: 'Par mojado',
+      });
+
+      expect(incidentRepo.create).toHaveBeenCalledWith(
+        expect.objectContaining({ type: IncidentType.DAMAGE, entityType: 'INVENTORY_MOVEMENT' }),
+      );
+    });
+
+    it('a movement backed by a document (a purchase, a sale) opens no incident', async () => {
+      const { service, balanceRepo, incidentRepo } = createService();
+      balanceRepo.findOne.mockResolvedValueOnce(balance('to-1', '0'));
+
+      await service.record(COMPANY, USER, purchase);
+
+      expect(incidentRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('the initial stock load opens no incident, even though it is manual', async () => {
+      const { service, balanceRepo, incidentRepo } = createService();
+      balanceRepo.findOne.mockResolvedValueOnce(balance('to-1', '0'));
+
+      await service.record(COMPANY, USER, {
+        ...purchase,
+        type: InventoryMovementType.INITIAL_STOCK,
+        sourceType: InventorySourceType.MANUAL_ADJUSTMENT,
+      });
+
+      expect(incidentRepo.save).not.toHaveBeenCalled();
     });
 
     it('rejects a variant of another company (or one that does not exist)', async () => {

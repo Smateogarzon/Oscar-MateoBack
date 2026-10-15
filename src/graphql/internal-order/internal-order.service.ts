@@ -49,7 +49,7 @@ import {
   type FlowStep,
 } from './internal-order-flow.js';
 import { formatInternalOrderNumber, INTERNAL_ORDER_SERIES } from './internal-order-number.js';
-import { InternalOrderStock, quantitiesOf, type VariantQuantities } from './internal-order-stock.js';
+import { InternalOrderStock, positionsOf, quantitiesOf, type VariantQuantities } from './internal-order-stock.js';
 import { applyVisibility, canSeeOrder, visibilityOf, type OrderVisibility } from './internal-order-visibility.js';
 import { notifyInternalOrder, signalInternalOrderChange } from './internal-order-watchers.js';
 
@@ -464,7 +464,7 @@ export class InternalOrderService {
 
       case 'RECEIVE':
         if (order.type === InternalOrderType.SO) await assertStoreAccess(manager, me, order.destinationLocationId);
-        await this.handOver(manager, companyId, order, quantitiesOf(await this.currentItems(manager, order)), me);
+        await this.handOver(manager, companyId, order, quantitiesOf(await this.currentItems(manager, order)), me, positionsOf(input.positions));
         order.receivedBy = me;
         await this.setStatus(manager, order, step.to, me, `${step.detail} · termina la custodia del corredor`, order.destinationLocationId);
         if (order.type === InternalOrderType.SO && order.parentOrderId) await this.absorbParent(manager, companyId, order, me);
@@ -537,11 +537,20 @@ export class InternalOrderService {
   // El destino confirma el recibo y termina la custodia del corredor: de su bolsa al destino. Una SO
   // queda además apartada en la tienda para su cliente (nadie más la vende mientras se decide); una
   // RE entra al cajón de devoluciones.
-  private async handOver(manager: EntityManager, companyId: string, order: InternalOrder, quantities: VariantQuantities, actorId: string): Promise<void> {
+  // `positions` (opcional) solo viene al confirmar la llegada: dónde guardó quien recibe cada
+  // referencia, para que quede en la existencia de esa sede.
+  private async handOver(
+    manager: EntityManager,
+    companyId: string,
+    order: InternalOrder,
+    quantities: VariantQuantities,
+    actorId: string,
+    positions?: ReadonlyMap<string, string>,
+  ): Promise<void> {
     if (!order.runnerId) throw new ConflictException('Esta orden no tiene corredor');
     const into = order.type === InternalOrderType.RE ? 'RETURNS' : 'STOCK';
     if (!(await this.stock.leftRunner(manager, order.id))) {
-      await this.stock.fromRunner(manager, companyId, order, order.runnerId, quantities, into, actorId);
+      await this.stock.fromRunner(manager, companyId, order, order.runnerId, quantities, into, actorId, positions);
     }
     if (order.type === InternalOrderType.SO) {
       await this.stock.reserveAt(manager, companyId, order, order.destinationLocationId, quantities, actorId);

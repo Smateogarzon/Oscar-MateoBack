@@ -42,3 +42,14 @@ export function countedByItem(
   if (quantities.size !== items.length) throw new BadRequestException(messages.missing);
   return quantities;
 }
+
+// La posición que el bodeguero le pone a cada línea al recibirla (dónde la guardó). Solo trae las
+// líneas en las que escribió algo: una línea sin posición no toca la que esa referencia ya tenía en
+// la bodega (ver InventoryMovementService.adjustBalance).
+export function positionsByItem(counted: readonly PurchaseOrderItemCountInput[]): Map<string, string> {
+  const positions = new Map<string, string>();
+  for (const line of counted) {
+    if (line.position !== undefined) positions.set(line.itemId, line.position);
+  }
+  return positions;
+}

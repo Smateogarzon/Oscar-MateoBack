@@ -9,7 +9,7 @@ import type { PurchaseOrderItemCountInput } from './dto/purchase-order-item-coun
 import { PurchaseOrderItem } from './entities/purchase-order-item.entity.js';
 import { PurchaseOrder } from './entities/purchase-order.entity.js';
 import { openReceptionMismatch } from './purchase-order-incidents.js';
-import { countedByItem, loadPurchaseOrderItems } from './purchase-order-lines.js';
+import { countedByItem, loadPurchaseOrderItems, positionsByItem } from './purchase-order-lines.js';
 
 // Lo que hace de verdad "recibir" una orden de compra: el BODEGUERO cuenta lo que llegó y, por cada
 // línea, entra una fila de movimiento PURCHASE hacia el STOCK de la sede destino con lo que él
@@ -50,6 +50,9 @@ export class PurchaseOrderReceivingService {
       repeated: 'Una línea viene repetida en la recepción',
       missing: 'Falta contar una referencia de las que despachó el proveedor',
     });
+    // Dónde guardó cada referencia quien la recibió: viaja con el conteo y queda en la balanza de
+    // esa bodega, para que la próxima vez se sepa dónde buscarla.
+    const positionByLine = positionsByItem(counted);
     let mismatched = false;
     const stockLocation = await this.inventoryLocations.findStockLocation(
       manager,
@@ -72,6 +75,7 @@ export class PurchaseOrderReceivingService {
           sourceId: purchaseOrder.id,
           sourceNumber: purchaseOrder.orderNumber,
           notes: `Orden de compra ${purchaseOrder.orderNumber}`,
+          position: positionByLine.get(item.id),
         });
       }
 
