@@ -15,6 +15,7 @@ import { Company } from '../company/entities/company.entity.js';
 import { DiscountRequestStatus } from '../discount-request/entities/discount-request-status.enum.js';
 import { DiscountRequest } from '../discount-request/entities/discount-request.entity.js';
 import { IdempotencyKey } from '../idempotency/entities/idempotency-key.entity.js';
+import { InventoryReservation } from '../inventory-reservation/entities/inventory-reservation.entity.js';
 import { fingerprintOf } from '../idempotency/idempotency.js';
 import { LocationType } from '../location/entities/location-type.enum.js';
 import { Location } from '../location/entities/location.entity.js';
@@ -122,13 +123,13 @@ function createService() {
   const saleRepo = {
     find: vi.fn().mockResolvedValue([]),
     countBy: vi.fn().mockResolvedValue(0),
-    delete: vi.fn().mockResolvedValue(undefined),
+    remove: vi.fn().mockResolvedValue(undefined),
   };
   const saleItemRepo = { delete: vi.fn().mockResolvedValue(undefined) };
   // Las solicitudes de descuento de esas ventas: por defecto, ninguna.
   const discountRequestRepo = {
     find: vi.fn().mockResolvedValue([]),
-    delete: vi.fn().mockResolvedValue(undefined),
+    remove: vi.fn().mockResolvedValue(undefined),
   };
   // La cuenta del cajero: por defecto, activa.
   const userRepo = { existsBy: vi.fn().mockResolvedValue(true) };
@@ -136,13 +137,15 @@ function createService() {
   const idempotencyRepo = { findOneBy: vi.fn().mockResolvedValue(null) };
   // Lo que lee loadCompanyAccess para saber si el cajero asignado puede cobrar: por defecto, es un
   // miembro con el rol Caja, que trae cash.register_payment, de una empresa activa.
+  // Con `role` en la condición es otra pregunta: quiénes son super admin en la empresa (para ofrecerlos
+  // como cajeros en cualquier tienda): por defecto, nadie.
   const membershipRepo = {
-    find: vi
-      .fn()
-      .mockResolvedValue([
-        { role: { id: 'role-cashier', code: 'CASHIER', status: RecordStatus.ACTIVE } },
-      ]),
+    find: vi.fn(async ({ where }: { where: { role?: unknown } }) =>
+      where.role ? [] : [{ role: { id: 'role-cashier', code: 'CASHIER', status: RecordStatus.ACTIVE } }],
+    ),
   };
+  // ¿El cajero es super admin? (hasStoreAccess lo deja pasar a todas las tiendas): por defecto, no.
+  const platformRoleRepo = { existsBy: vi.fn().mockResolvedValue(false) };
   const rolePermissionRepo = {
     find: vi.fn().mockResolvedValue([
       { permission: { code: 'cash.register_payment', status: RecordStatus.ACTIVE } },
@@ -159,6 +162,7 @@ function createService() {
     [CashSession, txSessionRepo],
     [CashRegister, txRegisterRepo],
     [UserLocationAccess, accessRepo],
+    [UserCompanyRole, platformRoleRepo],
     [Location, locationRepo],
     [SalePayment, paymentRepo],
     [CashMovement, movementRepo],
@@ -168,6 +172,11 @@ function createService() {
     [DiscountRequest, discountRequestRepo],
     [User, userRepo],
     [IdempotencyKey, idempotencyRepo],
+    // Soltar lo que apartaban los borradores que se descartan al cerrar el turno.
+    [
+      InventoryReservation,
+      { find: vi.fn().mockResolvedValue([]), remove: vi.fn().mockResolvedValue(undefined) },
+    ],
   ]);
   const manager = {
     getRepository: (entity: unknown) => repositories.get(entity),
@@ -212,6 +221,7 @@ function createService() {
     userRepo,
     idempotencyRepo,
     membershipRepo,
+    platformRoleRepo,
     rolePermissionRepo,
     notifications,
     dataSource,
@@ -526,6 +536,20 @@ describe('CashSessionService', () => {
 
       expect(await service.findCashierCandidates(COMPANY, 'store-1')).toEqual([]);
     });
+
+    it('also offers the super admin of the company, who works in every store without being assigned', async () => {
+      const created = createService();
+      created.accessRepo.find.mockResolvedValue([{ user: person('cashier-1') }]);
+      created.membershipRepo.find.mockImplementation(async ({ where }: { where: { userId?: string; role?: unknown } }) =>
+        where.role
+          ? [{ user: person('super-1') }]
+          : [{ role: { id: 'role-cashier-x', code: where.userId === 'super-1' ? 'SUPER_ADMIN' : 'CASHIER', status: RecordStatus.ACTIVE } }],
+      );
+
+      const candidates = await created.service.findCashierCandidates(COMPANY, 'store-1');
+
+      expect(candidates.map((user) => user.id)).toEqual(['cashier-1', 'super-1']);
+    });
   });
 
   describe('open', () => {
@@ -600,6 +624,17 @@ describe('CashSessionService', () => {
 
       await expect(service.open(COMPANY, 'admin-1', opening)).rejects.toThrow(BadRequestException);
       expect(txSessionRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('lets the super admin be the cashier of any store, without an explicit assignment', async () => {
+      const { service, accessRepo, platformRoleRepo, txSessionRepo } = createService();
+      accessRepo.existsBy.mockResolvedValue(false);
+      platformRoleRepo.existsBy.mockResolvedValue(true);
+
+      await service.open(COMPANY, 'admin-1', opening);
+
+      expect(txSessionRepo.save).toHaveBeenCalled();
+      expect(accessRepo.existsBy).not.toHaveBeenCalled();
     });
 
     it('checks the access of the cashier, and not the one of the administrator who opens the shift', async () => {
@@ -868,32 +903,32 @@ describe('CashSessionService', () => {
       expect(session.differenceAmount?.toFixed(2)).toBe('0.00');
     });
 
-    it('needs notes when cash is missing, and leaves the difference negative', async () => {
+    it('closes with cash missing even without notes, and leaves the difference negative', async () => {
       const { service, txSessionRepo } = createService();
       txSessionRepo.findOne.mockResolvedValue(openSession());
 
-      await expect(
-        service.close(COMPANY, admin, { cashSessionId: 'session-1', countedAmount: '190000' }),
-      ).rejects.toThrow(BadRequestException);
-      expect(txSessionRepo.save).not.toHaveBeenCalled();
-
       const session = await service.close(COMPANY, admin, {
+        cashSessionId: 'session-1',
+        countedAmount: '190000',
+      });
+
+      expect(session.differenceAmount?.toFixed(2)).toBe('-10000.00');
+      expect(session.notes).toBeNull();
+      expect(txSessionRepo.save).toHaveBeenCalled();
+
+      txSessionRepo.findOne.mockResolvedValue(openSession());
+      const withNotes = await service.close(COMPANY, admin, {
         cashSessionId: 'session-1',
         countedAmount: '190000',
         notes: '  Faltan 10.000 del cambio ',
       });
 
-      expect(session.differenceAmount?.toFixed(2)).toBe('-10000.00');
-      expect(session.notes).toBe('Faltan 10.000 del cambio');
+      expect(withNotes.notes).toBe('Faltan 10.000 del cambio');
     });
 
     it('accepts a negative count, with its difference and the notes that explain it', async () => {
       const { service, txSessionRepo } = createService();
       txSessionRepo.findOne.mockResolvedValue(openSession());
-
-      await expect(
-        service.close(COMPANY, admin, { cashSessionId: 'session-1', countedAmount: '-5000' }),
-      ).rejects.toThrow(BadRequestException);
 
       const session = await service.close(COMPANY, admin, {
         cashSessionId: 'session-1',
@@ -907,14 +942,14 @@ describe('CashSessionService', () => {
       expect(session.differenceAmount?.toFixed(2)).toBe('-205000.00');
     });
 
-    it('needs notes when there is more cash than expected, too', async () => {
+    it('closes with more cash than expected even without notes, too', async () => {
       const { service, txSessionRepo } = createService();
       txSessionRepo.findOne.mockResolvedValue(openSession());
 
-      await expect(
-        service.close(COMPANY, admin, { cashSessionId: 'session-1', countedAmount: '210000' }),
-      ).rejects.toThrow(BadRequestException);
-      expect(txSessionRepo.save).not.toHaveBeenCalled();
+      const session = await service.close(COMPANY, admin, { cashSessionId: 'session-1', countedAmount: '210000' });
+
+      expect(session.differenceAmount?.toFixed(2)).toBe('10000.00');
+      expect(txSessionRepo.save).toHaveBeenCalled();
     });
 
     it('counts the cash refunds of returns when it works out the expected cash to close', async () => {
@@ -939,6 +974,8 @@ describe('CashSessionService', () => {
       const { service, txSessionRepo, saleRepo, saleItemRepo, discountRequestRepo } = createService();
       txSessionRepo.findOne.mockResolvedValue(openSession());
       saleRepo.find.mockResolvedValue([{ id: 'draft-1' }, { id: 'draft-2' }]);
+      const requests = [{ id: 'request-1', status: DiscountRequestStatus.PENDING }];
+      discountRequestRepo.find.mockResolvedValue(requests);
 
       await service.close(COMPANY, admin, { cashSessionId: 'session-1', countedAmount: '200000' });
 
@@ -957,8 +994,13 @@ describe('CashSessionService', () => {
         },
       });
       expect(saleItemRepo.delete).toHaveBeenCalledWith({ saleId: In(drafts) });
-      expect(discountRequestRepo.delete).toHaveBeenCalledWith({ saleId: In(drafts) });
-      expect(saleRepo.delete).toHaveBeenCalledWith({ id: In(drafts) });
+      // Luego todas las solicitudes de esas ventas, de cualquier estado, bloqueadas
+      expect(discountRequestRepo.find).toHaveBeenCalledWith({
+        where: { saleId: In(drafts) },
+        lock: { mode: 'pessimistic_write' },
+      });
+      expect(discountRequestRepo.remove).toHaveBeenCalledWith(requests);
+      expect(saleRepo.remove).toHaveBeenCalledWith([{ id: 'draft-1' }, { id: 'draft-2' }]);
     });
 
     it('deletes the lines first, then the discount requests, then the sales, so nothing is left hanging', async () => {
@@ -969,8 +1011,8 @@ describe('CashSessionService', () => {
       await service.close(COMPANY, admin, { cashSessionId: 'session-1', countedAmount: '200000' });
 
       const order = (mock: { mock: { invocationCallOrder: number[] } }) => mock.mock.invocationCallOrder[0];
-      expect(order(saleItemRepo.delete)).toBeLessThan(order(discountRequestRepo.delete));
-      expect(order(discountRequestRepo.delete)).toBeLessThan(order(saleRepo.delete));
+      expect(order(saleItemRepo.delete)).toBeLessThan(order(discountRequestRepo.remove));
+      expect(order(discountRequestRepo.remove)).toBeLessThan(order(saleRepo.remove));
     });
 
     it('takes the discount requests of the deleted drafts off the approvers\' screens, and reads the pending ones\' notices', async () => {
@@ -1031,20 +1073,8 @@ describe('CashSessionService', () => {
 
       expect(discountRequestRepo.find).not.toHaveBeenCalled();
       expect(saleItemRepo.delete).not.toHaveBeenCalled();
-      expect(discountRequestRepo.delete).not.toHaveBeenCalled();
-      expect(saleRepo.delete).not.toHaveBeenCalled();
-    });
-
-    it('keeps the drafts when the shift cannot be closed', async () => {
-      const { service, txSessionRepo, saleRepo } = createService();
-      txSessionRepo.findOne.mockResolvedValue(openSession());
-      saleRepo.find.mockResolvedValue([{ id: 'draft-1' }]);
-
-      await expect(
-        service.close(COMPANY, admin, { cashSessionId: 'session-1', countedAmount: '190000' }),
-      ).rejects.toThrow(BadRequestException);
-
-      expect(saleRepo.delete).not.toHaveBeenCalled();
+      expect(discountRequestRepo.remove).not.toHaveBeenCalled();
+      expect(saleRepo.remove).not.toHaveBeenCalled();
     });
 
     it('locks the drafts of the shift, without waiting, BEFORE locking the shift: sale first, then shift, like every payment', async () => {
@@ -1087,8 +1117,8 @@ describe('CashSessionService', () => {
       // Ni siquiera se llega a bloquear el turno, y nada se borra, se guarda ni se avisa
       expect(txSessionRepo.findOne).not.toHaveBeenCalled();
       expect(saleItemRepo.delete).not.toHaveBeenCalled();
-      expect(discountRequestRepo.delete).not.toHaveBeenCalled();
-      expect(saleRepo.delete).not.toHaveBeenCalled();
+      expect(discountRequestRepo.remove).not.toHaveBeenCalled();
+      expect(saleRepo.remove).not.toHaveBeenCalled();
       expect(txSessionRepo.save).not.toHaveBeenCalled();
       expect(notifications.signalChange).not.toHaveBeenCalled();
     });
@@ -1118,16 +1148,6 @@ describe('CashSessionService', () => {
         recipientIds: ['cashier-1'],
         exceptUserId: 'admin-1',
       });
-    });
-
-    it('signals nobody when the closing is rejected', async () => {
-      const { service, txSessionRepo, notifications } = createService();
-      txSessionRepo.findOne.mockResolvedValue(openSession());
-
-      await expect(
-        service.close(COMPANY, admin, { cashSessionId: 'session-1', countedAmount: '190000' }),
-      ).rejects.toThrow(BadRequestException);
-      expect(notifications.signalChange).not.toHaveBeenCalled();
     });
 
     it('does not close a shift twice', async () => {
@@ -1227,7 +1247,7 @@ describe('CashSessionService', () => {
         // No se bloquea nada, no se borra nada, no se guarda de nuevo y no se vuelve a avisar
         expect(saleRepo.find).not.toHaveBeenCalled();
         expect(txSessionRepo.findOne).not.toHaveBeenCalled();
-        expect(saleRepo.delete).not.toHaveBeenCalled();
+        expect(saleRepo.remove).not.toHaveBeenCalled();
         expect(txSessionRepo.save).not.toHaveBeenCalled();
         expect(notifications.signalChange).not.toHaveBeenCalled();
       });
@@ -1249,11 +1269,9 @@ describe('CashSessionService', () => {
 
       it('a closing that fails does not link the key to anything', async () => {
         const { service, txSessionRepo, manager } = createService();
-        txSessionRepo.findOne.mockResolvedValue(openSession());
+        txSessionRepo.findOne.mockResolvedValue(openSession({ status: CashSessionStatus.CLOSED }));
 
-        await expect(
-          service.close(COMPANY, admin, { ...closing, countedAmount: '190000' }, 'key-1'),
-        ).rejects.toThrow(BadRequestException);
+        await expect(service.close(COMPANY, admin, closing, 'key-1')).rejects.toThrow(ConflictException);
 
         // Solo el INSERT que reclama (que se deshace con la transacción); nunca el UPDATE que la enlaza
         expect(manager.query).toHaveBeenCalledTimes(1);
@@ -1416,16 +1434,14 @@ describe('CashSessionService', () => {
       expect(txSessionRepo.findOne).toHaveBeenCalledTimes(1);
     });
 
-    it('does not let whoever opens and closes shifts operate a shift that is not theirs: only the assigned cashier charges', async () => {
+    it('lets whoever opens and closes shifts operate a shift that is not theirs: admins intervene any register', async () => {
       const { service, manager, txSessionRepo } = createService();
       txSessionRepo.findOne.mockResolvedValue(openSession());
 
-      // El administrador (admin-1) abrió el turno de 'cashier-1': no lo puede cobrar por ese turno
-      await expect(service.lockOpen(manager as never, COMPANY, 'session-1', admin)).rejects.toThrow(
-        ForbiddenException,
-      );
-      // Ni siquiera se bloquea el turno
-      expect(txSessionRepo.findOne).toHaveBeenCalledTimes(1);
+      // El administrador (admin-1) abrió el turno de 'cashier-1': puede cobrar y mover dinero en él igual
+      await expect(
+        service.lockOpen(manager as never, COMPANY, 'session-1', admin),
+      ).resolves.toMatchObject({ id: 'session-1', cashierId: 'cashier-1' });
     });
 
     it('lets the administrator operate a shift when they are the cashier assigned to it: to charge, they assign themselves', async () => {

@@ -73,17 +73,21 @@ export async function withdrawDiscountRequests(
     note: string;
   },
 ): Promise<void> {
-  const requests = await findDiscountRequestsOfSales(manager, params.saleIds, params.statuses);
+  if (params.saleIds.length === 0) return;
+  const repo = manager.getRepository(DiscountRequest);
+  const requests = await repo.find({
+    where: { saleId: In(params.saleIds), status: In(params.statuses) },
+    lock: { mode: 'pessimistic_write' },
+  });
   if (requests.length === 0) return;
 
-  await manager.getRepository(DiscountRequest).update(
-    { id: In(requests.map((request) => request.id)) },
-    {
-      status: DiscountRequestStatus.CANCELLED,
-      resolvedBy: params.actorId,
-      resolvedAt: new Date(),
-      resolutionNotes: params.note,
-    },
-  );
+  const resolvedAt = new Date();
+  for (const request of requests) {
+    request.status = DiscountRequestStatus.CANCELLED;
+    request.resolvedBy = params.actorId;
+    request.resolvedAt = resolvedAt;
+    request.resolutionNotes = params.note;
+  }
+  await repo.save(requests);
   await clearDiscountRequestNotices(manager, notifications, params.companyId, requests, params.actorId);
 }

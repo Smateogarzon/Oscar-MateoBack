@@ -2,12 +2,15 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { CashSessionModule } from '../cash-session/cash-session.module.js';
 import { DocumentSequenceModule } from '../document-sequence/document-sequence.module.js';
+import { InventoryLocationModule } from '../inventory-location/inventory-location.module.js';
+import { InventoryMovementModule } from '../inventory-movement/inventory-movement.module.js';
 import { NotificationModule } from '../notification/notification.module.js';
 import { SaleModule } from '../sale/sale.module.js';
 import { RefundPayment } from './entities/refund-payment.entity.js';
 import { SaleReturnItem } from './entities/sale-return-item.entity.js';
 import { SaleReturn } from './entities/sale-return.entity.js';
 import { SaleReturnResolver } from './sale-return.resolver.js';
+import { ReturnsBinModule } from '../returns-bin/returns-bin.module.js';
 import { SaleReturnService } from './sale-return.service.js';
 
 @Module({
@@ -17,6 +20,9 @@ import { SaleReturnService } from './sale-return.service.js';
     DocumentSequenceModule,
     CashSessionModule,
     NotificationModule,
+    InventoryLocationModule,
+    InventoryMovementModule,
+    ReturnsBinModule,
   ],
   providers: [SaleReturnService, SaleReturnResolver],
   exports: [SaleReturnService],

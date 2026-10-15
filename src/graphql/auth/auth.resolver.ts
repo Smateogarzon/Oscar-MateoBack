@@ -74,8 +74,8 @@ export class AuthResolver {
   @Mutation(() => Boolean)
   @UseGuards(JwtAuthGuard, CsrfGuard)
   @SkipMustChangePassword()
-  logout(@Context() context: GqlContext) {
+  async logout(@CurrentUser() currentUser: JwtPayload, @Context() context: GqlContext) {
     clearSessionCookies(context.res);
-    return this.authService.logout();
+    return this.authService.logout(currentUser.sub);
   }
 }

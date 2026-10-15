@@ -1,4 +1,5 @@
 import { Decimal } from 'decimal.js';
+import { roundMoney } from '../../common/utils/money.js';
 
 // Cuánto vale devolver algo: lo que el cliente REALMENTE pagó, con los descuentos que tuvo. Todo
 // con Decimal, redondeando a centavos "mitad hacia arriba", y de forma que devolver todas las
@@ -32,10 +33,7 @@ export function paidPerLine(
     const isLast = index === lines.length - 1;
     const share = isLast
       ? generalDiscount.minus(allocated)
-      : line.total
-          .times(generalDiscount)
-          .dividedBy(net)
-          .toDecimalPlaces(2, Decimal.ROUND_HALF_UP);
+      : roundMoney(line.total.times(generalDiscount).dividedBy(net));
     allocated = allocated.plus(share);
     paid.set(line.id, line.total.minus(share));
   });
@@ -55,5 +53,5 @@ export function returnValue(
   const remainingQuantity = quantity.minus(returnedQuantity);
   if (quantityToReturn.equals(remainingQuantity)) return paid.minus(returnedAmount);
 
-  return paid.times(quantityToReturn).dividedBy(quantity).toDecimalPlaces(2, Decimal.ROUND_HALF_UP);
+  return roundMoney(paid.times(quantityToReturn).dividedBy(quantity));
 }

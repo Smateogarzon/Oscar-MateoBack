@@ -17,7 +17,6 @@ export class CloseCashSessionInput {
   })
   countedAmount: string;
 
-  // Obligatorias si lo contado no coincide con lo esperado
   @Field({ nullable: true })
   @IsOptional()
   @IsString()

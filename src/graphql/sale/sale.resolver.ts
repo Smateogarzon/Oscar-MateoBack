@@ -98,6 +98,13 @@ export class SaleResolver {
     return typeof sale.itemCount === 'number' ? sale.itemCount : this.saleService.countItems(sale.id);
   }
 
+  // El número de la orden de venta (SO) que cobró esta venta, para Caja y el recibo ("#SO-000125").
+  // Casi ninguna venta tiene orden: solo esas consultan.
+  @ResolveField(() => String, { nullable: true })
+  internalOrderNumber(@Parent() sale: SaleObjectType) {
+    return sale.internalOrderId ? this.saleService.internalOrderNumberOf(sale.internalOrderId) : null;
+  }
+
   // Las ventas cobradas de un turno, para su recibo de cierre. Autorizado igual que
   // CashMovementResolver.cashMovements (por el turno, no por sales.view): quien puede ver el
   // turno ve sus ventas.
@@ -140,10 +147,11 @@ export class SaleResolver {
     );
   }
 
-  // "Nueva venta" del cajero: el cajero es el usuario de la sesión. Queda atada al turno que
-  // manda `input.cashSessionId` desde que nace (SaleService.create lo valida y bloquea).
+  // "Nueva venta": quien la crea es el usuario de la sesión. Queda atada al turno que manda
+  // `input.cashSessionId` desde que nace (SaleService.create lo valida y bloquea). Una venta en blanco
+  // exige sales.create; la caja (sin ese permiso) solo abre la del cambio de una devolución aprobada.
   @Mutation(() => SaleObjectType)
-  @RequirePermissions(PermissionCode.SALES_CREATE)
+  @RequireAnyPermission(PermissionCode.SALES_CREATE, PermissionCode.CASH_CHARGE_ORDERS, PermissionCode.CASH_REGISTER_PAYMENT)
   createSale(
     @CurrentCompanyId() companyId: string,
     @CurrentCompanyAccess() access: CompanyAccess,
@@ -156,18 +164,20 @@ export class SaleResolver {
       cashActor(currentUser.sub, access.permissionCodes),
       input,
       idempotencyKey,
+      { canCreateBlank: access.permissionCodes.includes(PermissionCode.SALES_CREATE) },
     );
   }
 
-  // Armar la venta es parte de crearla: quien puede crearla puede agregar y quitar líneas y
-  // cambiar su cantidad mientras siga en borrador. Devuelven la venta con los totales
+  // Armar una venta ya creada: quien crea ventas, y también la caja (que no crea ventas en blanco
+  // pero completa la que abrió desde una orden o un cambio), agrega y quita líneas y cambia su
+  // cantidad mientras siga en borrador. Devuelven la venta con los totales
   // recalculados. Los descuentos no se aplican aquí: pasan por una solicitud
   // (DiscountRequestResolver).
   //
   // Llevan el usuario porque el servicio comprueba en cada una que siga teniendo acceso a la tienda
   // de la venta: si se lo quitan con la venta a medias, deja de poder tocarla en ese momento.
   @Mutation(() => SaleObjectType)
-  @RequirePermissions(PermissionCode.SALES_CREATE)
+  @RequireAnyPermission(PermissionCode.SALES_CREATE, PermissionCode.CASH_CHARGE_ORDERS, PermissionCode.CASH_REGISTER_PAYMENT)
   addSaleItem(
     @CurrentCompanyId() companyId: string,
     @CurrentCompanyAccess() access: CompanyAccess,
@@ -184,7 +194,7 @@ export class SaleResolver {
   }
 
   @Mutation(() => SaleObjectType)
-  @RequirePermissions(PermissionCode.SALES_CREATE)
+  @RequireAnyPermission(PermissionCode.SALES_CREATE, PermissionCode.CASH_CHARGE_ORDERS, PermissionCode.CASH_REGISTER_PAYMENT)
   updateSaleItemQuantity(
     @CurrentCompanyId() companyId: string,
     @CurrentCompanyAccess() access: CompanyAccess,
@@ -195,7 +205,7 @@ export class SaleResolver {
   }
 
   @Mutation(() => SaleObjectType)
-  @RequirePermissions(PermissionCode.SALES_CREATE)
+  @RequireAnyPermission(PermissionCode.SALES_CREATE, PermissionCode.CASH_CHARGE_ORDERS, PermissionCode.CASH_REGISTER_PAYMENT)
   removeSaleItem(
     @CurrentCompanyId() companyId: string,
     @CurrentCompanyAccess() access: CompanyAccess,
@@ -206,12 +216,32 @@ export class SaleResolver {
     return this.saleService.removeItem(companyId, cashActor(currentUser.sub, access.permissionCodes), saleId, itemId);
   }
 
+  // La caja abre el cobro de una orden de venta que el vendedor mandó a caja (ver
+  // SaleService.createFromInternalOrder). Cobrarla después es el cobro de siempre (completeSale).
+  @Mutation(() => SaleObjectType)
+  @RequireAnyPermission(PermissionCode.CASH_CHARGE_ORDERS, PermissionCode.CASH_REGISTER_PAYMENT)
+  startSaleFromInternalOrder(
+    @CurrentCompanyId() companyId: string,
+    @CurrentCompanyAccess() access: CompanyAccess,
+    @CurrentUser() currentUser: JwtPayload,
+    @Args('internalOrderId', { type: () => ID }) internalOrderId: string,
+    @Args('cashSessionId', { type: () => ID }) cashSessionId: string,
+    @IdempotencyKeyHeader() idempotencyKey?: string,
+  ) {
+    return this.saleService.createFromInternalOrder(
+      companyId,
+      cashActor(currentUser.sub, access.permissionCodes),
+      { internalOrderId, cashSessionId },
+      idempotencyKey,
+    );
+  }
+
   // Anular exige `sales.cancel` (cualquier venta), salvo una excepción: quien creó una venta
   // puede borrar SU PROPIO borrador (no cobrado) sin ese permiso — es solo deshacer algo que
   // nunca llegó a ser un cobro, no la operación de auditoría que es anular una venta ajena o ya
-  // en curso.
+  // en curso. La caja también descarta lo que abrió (el cobro de una orden o de un cambio).
   @Mutation(() => SaleObjectType)
-  @RequireAnyPermission(PermissionCode.SALES_CANCEL, PermissionCode.SALES_CREATE)
+  @RequireAnyPermission(PermissionCode.SALES_CANCEL, PermissionCode.SALES_CREATE, PermissionCode.CASH_CHARGE_ORDERS, PermissionCode.CASH_REGISTER_PAYMENT)
   cancelSale(
     @CurrentCompanyId() companyId: string,
     @CurrentCompanyAccess() access: CompanyAccess,

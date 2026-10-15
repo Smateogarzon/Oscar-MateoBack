@@ -1,4 +1,5 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
+import { assertDestructiveDownAllowed } from '../../config/destructive-down.js';
 
 // Permiso para aprobar o rechazar las solicitudes de descuento de una venta. Por defecto solo
 // lo tienen el Administrador y el super administrador, en cada empresa que exista; cada empresa
@@ -29,6 +30,7 @@ export class SeedDiscountApprovalPermission1789780000000 implements MigrationInt
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
+    assertDestructiveDownAllowed(this.name);
     await queryRunner.query(`
       DELETE FROM "role_permissions" WHERE "permissionId" IN (
         SELECT "id" FROM "permissions" WHERE "code" = 'sales.approve_discount'

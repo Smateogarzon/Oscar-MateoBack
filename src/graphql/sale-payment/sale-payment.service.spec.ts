@@ -11,6 +11,7 @@ import type { CashActor } from '../cash-session/cash-actor.js';
 import { DiscountRequestStatus } from '../discount-request/entities/discount-request-status.enum.js';
 import { DiscountRequest } from '../discount-request/entities/discount-request.entity.js';
 import { IdempotencyKey } from '../idempotency/entities/idempotency-key.entity.js';
+import { InventoryReservation } from '../inventory-reservation/entities/inventory-reservation.entity.js';
 import { NotificationChannel } from '../notification/entities/notification-channel.enum.js';
 import { NotificationEntityType } from '../notification/entities/notification-entity-type.enum.js';
 import { NotificationType } from '../notification/entities/notification-type.enum.js';
@@ -20,6 +21,7 @@ import { SaleStatus } from '../sale/entities/sale-status.enum.js';
 import { Sale } from '../sale/entities/sale.entity.js';
 import type { SaleActor } from '../sale/sale-actor.js';
 import { StorePaymentMethod } from '../store-payment-method/entities/store-payment-method.entity.js';
+import { UserCompanyRole } from '../user-company-role/entities/user-company-role.entity.js';
 import { UserLocationAccess } from '../user-location-access/entities/user-location-access.entity.js';
 import { SalePayment } from './entities/sale-payment.entity.js';
 import { SalePaymentService } from './sale-payment.service.js';
@@ -97,15 +99,24 @@ function createService() {
   const txRequestRepo = {
     // Las solicitudes pendientes de la venta que se retiran al cobrarla (ninguna por defecto)
     find: vi.fn().mockResolvedValue([]),
-    update: vi.fn().mockResolvedValue(undefined),
+    save: vi.fn().mockResolvedValue(undefined),
   };
-  const txItemRepo = { existsBy: vi.fn().mockResolvedValue(true) };
+  // Las líneas de la venta: que tenga alguna (existsBy) y las de catálogo que descuentan inventario
+  // al cobrar (find; por defecto ninguna: todas las pruebas cobran líneas GENERIC).
+  const txItemRepo = { existsBy: vi.fn().mockResolvedValue(true), find: vi.fn().mockResolvedValue([]) };
   const txMethodRepo = { find: vi.fn().mockResolvedValue([cashMethod, cardMethod]) };
   // Los medios que la tienda acepta (por defecto, los dos) y el acceso del usuario a la tienda
   const txStoreMethodRepo = {
     find: vi.fn().mockResolvedValue([{ paymentMethodId: 'method-cash' }, { paymentMethodId: 'method-card' }]),
   };
   const accessRepo = { existsBy: vi.fn().mockResolvedValue(true) };
+  // ¿Es super admin? (hasStoreAccess lo deja pasar a todas las tiendas): por defecto, no.
+  const platformRoleRepo = { existsBy: vi.fn().mockResolvedValue(false) };
+  // Soltar lo que la venta tenía apartado (releaseReservations) antes de descontar.
+  const txReservationRepo = {
+    find: vi.fn().mockResolvedValue([]),
+    remove: vi.fn().mockResolvedValue(undefined),
+  };
   const txSaleRepo = {
     save: vi.fn(async (value: object) => ({ ...value })),
     // Lo que un reintento con la misma clave vuelve a cargar por su id
@@ -133,6 +144,10 @@ function createService() {
     markEntityRead: vi.fn().mockResolvedValue(0),
     signalChange: vi.fn(),
   };
+  // Ninguna de estas pruebas cobra una línea de catálogo (todas son GENERIC): el descuento de
+  // inventario nunca se dispara, así que basta con que estos mocks existan para completar la firma.
+  const inventoryBalances = { findStockLocationForSale: vi.fn() };
+  const inventoryMovements = { recordInTransaction: vi.fn() };
 
   // Las claves de idempotencia que guardaría la base: reclamar una nueva la inserta; si ya estaba
   // (ON CONFLICT DO NOTHING) no inserta nada y el reintento la busca para devolver lo que se cobró.
@@ -175,15 +190,22 @@ function createService() {
                 ? txStoreMethodRepo
                 : entity === UserLocationAccess
                   ? accessRepo
+                  : entity === UserCompanyRole
+                  ? platformRoleRepo
                   : entity === IdempotencyKey
                     ? keyRepo
                     : entity === Sale
                       ? txSaleRepo
-                      : undefined,
+                      : entity === InventoryReservation
+                        ? txReservationRepo
+                        : undefined,
   };
   const dataSource = {
     transaction: vi.fn(async (fn: (manager: unknown) => unknown) => fn(manager)),
   };
+
+  // Al cobrar, la venta suelta lo que ella misma tenía apartado y descuenta de esa bodega.
+  const reservations = { findForSource: vi.fn().mockResolvedValue([]) };
 
   const service = new SalePaymentService(
     paymentRepo as never,
@@ -192,9 +214,13 @@ function createService() {
     cashSessions as never,
     returns as never,
     notifications as never,
+    inventoryBalances as never,
+    inventoryMovements as never,
+    reservations as never,
   );
   return {
     service,
+    reservations,
     paymentRepo,
     txPaymentRepo,
     txRequestRepo,
@@ -532,8 +558,9 @@ describe('SalePaymentService', () => {
     });
   });
 
-  // Solo cobra el cajero asignado a la venta: ni siquiera el administrador que abre y cierra turnos cobra
-  // la venta de otro cajero, ni opera una tienda que no tiene asignada.
+  // Solo cobra normalmente el cajero asignado a la venta, salvo quien abre y cierra turnos
+  // (cash.open_close_shift): ese interviene cualquier caja, igual que crea ventas y mueve dinero en
+  // turnos ajenos.
   describe('complete, who can charge', () => {
     it('does not let a cashier charge the sale of another cashier', async () => {
       const { service, sales, accessRepo, cashSessions, txRequestRepo, txPaymentRepo, txSaleRepo } =
@@ -555,24 +582,23 @@ describe('SalePaymentService', () => {
       expect(txSaleRepo.save).not.toHaveBeenCalled();
     });
 
-    it('does not let whoever opens and closes shifts charge it either, when they are not its cashier', async () => {
-      const { service, sales, accessRepo, cashSessions, txPaymentRepo, txSaleRepo } = createService();
+    it('lets whoever opens and closes shifts charge a sale that is not theirs', async () => {
+      const { service, sales, cashSessions, txPaymentRepo, txSaleRepo } = createService();
       sales.lockAnyStatus.mockResolvedValue(draftSale());
 
-      await expect(service.complete(COMPANY, admin, charge([cash('100000')]))).rejects.toThrow(
-        'Solo el cajero de la venta puede cobrarla',
-      );
-      expect(accessRepo.existsBy).not.toHaveBeenCalled();
-      expect(cashSessions.lockOpen).not.toHaveBeenCalled();
-      expect(txPaymentRepo.save).not.toHaveBeenCalled();
-      expect(txSaleRepo.save).not.toHaveBeenCalled();
+      const sale = await service.complete(COMPANY, admin, charge([cash('100000')]));
+
+      expect(sale).toMatchObject({ cashierId: 'cashier-1', status: SaleStatus.COMPLETED });
+      expect(cashSessions.lockOpen).toHaveBeenCalledWith(expect.anything(), COMPANY, 'session-1', admin);
+      expect(txPaymentRepo.save).toHaveBeenCalled();
+      expect(txSaleRepo.save).toHaveBeenCalled();
     });
 
     it('does not spend a consecutive number on a charge that was refused', async () => {
       const { service, sales } = createService();
       sales.lockAnyStatus.mockResolvedValue(draftSale());
 
-      await expect(service.complete(COMPANY, admin, charge([cash('100000')]))).rejects.toThrow(
+      await expect(service.complete(COMPANY, otherCashier, charge([cash('100000')]))).rejects.toThrow(
         ForbiddenException,
       );
       expect(sales.assignNumber).not.toHaveBeenCalled();
@@ -753,17 +779,29 @@ describe('SalePaymentService', () => {
       },
     );
 
-    it.each([
-      ['another cashier', otherCashier],
-      ['whoever opens and closes shifts, when they are not the cashier of the sale', admin],
-    ])('does not take it for a retry when it comes from %s, so it does not reveal the payments', async (_who, actor) => {
+    it('does not take it for a retry when it comes from another cashier, so it does not reveal the payments', async () => {
       const { service, sales, txPaymentRepo, cashSessions } = createService();
       sales.lockAnyStatus.mockResolvedValue(completedSale());
       txPaymentRepo.find.mockResolvedValue([stored('method-cash', '100000')]);
 
-      await expect(service.complete(COMPANY, actor, charge([cash('100000')]))).rejects.toThrow(ConflictException);
+      await expect(service.complete(COMPANY, otherCashier, charge([cash('100000')]))).rejects.toThrow(
+        ConflictException,
+      );
       // Ni siquiera se comparan los pagos
       expect(txPaymentRepo.find).not.toHaveBeenCalled();
+      expect(cashSessions.lockOpen).not.toHaveBeenCalled();
+    });
+
+    it('does not take it for a retry when whoever opens and closes shifts received other payments than the ones stored', async () => {
+      // Puede cobrar cualquier caja, pero el reintento solo reconoce lo que ESE actor cobró: si lo stored
+      // lo recibió otra persona (el cajero original), no es el mismo cobro aunque los importes cuadren.
+      const { service, sales, txPaymentRepo, cashSessions } = createService();
+      sales.lockAnyStatus.mockResolvedValue(completedSale());
+      txPaymentRepo.find.mockResolvedValue([stored('method-cash', '100000')]);
+
+      await expect(service.complete(COMPANY, admin, charge([cash('100000')]))).rejects.toThrow(
+        ConflictException,
+      );
       expect(cashSessions.lockOpen).not.toHaveBeenCalled();
     });
 
@@ -862,27 +900,28 @@ describe('SalePaymentService', () => {
 
     it('charges a sale with a pending discount request instead of waiting for it: it withdraws the request and charges today’s total', async () => {
       const { service, txRequestRepo } = createService();
-      txRequestRepo.find.mockResolvedValue([pendingRequest]);
+      txRequestRepo.find.mockResolvedValue([{ ...pendingRequest }]);
 
       await service.complete(COMPANY, cashier, charge([cash('100000')]));
 
       // Solo las pendientes: una ya aprobada trae su descuento aplicado en el total que se cobra
       expect(txRequestRepo.find).toHaveBeenCalledWith({
         where: { saleId: In(['sale-1']), status: In([DiscountRequestStatus.PENDING]) },
+        lock: { mode: 'pessimistic_write' },
       });
-      expect(txRequestRepo.update).toHaveBeenCalledWith(
-        { id: In(['req-1']) },
+      expect(txRequestRepo.save).toHaveBeenCalledWith([
         expect.objectContaining({
+          id: 'req-1',
           status: DiscountRequestStatus.CANCELLED,
           resolvedBy: cashier.userId,
           resolutionNotes: expect.stringContaining('Retirada automáticamente'),
         }),
-      );
+      ]);
     });
 
     it('tells the approvers: the new-request notice is read and their pending list refreshes', async () => {
       const { service, txRequestRepo, notifications } = createService();
-      txRequestRepo.find.mockResolvedValue([pendingRequest]);
+      txRequestRepo.find.mockResolvedValue([{ ...pendingRequest }]);
 
       await service.complete(COMPANY, cashier, charge([cash('100000')]));
 
@@ -908,7 +947,7 @@ describe('SalePaymentService', () => {
 
       await service.complete(COMPANY, cashier, charge([cash('100000')]));
 
-      expect(txRequestRepo.update).not.toHaveBeenCalled();
+      expect(txRequestRepo.save).not.toHaveBeenCalled();
       expect(notifications.signalChange).not.toHaveBeenCalled();
     });
   });

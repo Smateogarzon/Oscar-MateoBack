@@ -1,4 +1,5 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
+import { assertDestructiveDownAllowed } from '../../config/destructive-down.js';
 
 export class AddIdempotency1790364397036 implements MigrationInterface {
   name = 'AddIdempotency1790364397036';
@@ -10,6 +11,7 @@ export class AddIdempotency1790364397036 implements MigrationInterface {
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
+    assertDestructiveDownAllowed(this.name);
     await queryRunner.query(`DROP INDEX "public"."IDX_1627cdea30692e6fb381417213"`);
     await queryRunner.query(`DROP INDEX "public"."IDX_39829cdd18d40184d32a8a4abe"`);
     await queryRunner.query(`DROP TABLE "idempotency_keys"`);

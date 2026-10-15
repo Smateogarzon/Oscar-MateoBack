@@ -2,6 +2,7 @@ import { Decimal } from 'decimal.js';
 import { Column, Entity, Index, JoinColumn, ManyToOne } from 'typeorm';
 import { BaseEntity } from '../../../common/entities/base.entity.js';
 import { decimalTransformer } from '../../../common/transformers/decimal.transformer.js';
+import { ProductVariant } from '../../product-variant/entities/product-variant.entity.js';
 import { SaleItemType } from './sale-item-type.enum.js';
 import { Sale } from './sale.entity.js';
 
@@ -23,11 +24,17 @@ export class SaleItem extends BaseEntity {
   @Column({ type: 'enum', enum: SaleItemType, enumName: 'sale_item_type' })
   type: SaleItemType;
 
-  // Variante de producto vendida (solo INVENTORIED). Todavía no hay catálogo: sin llave
-  // foránea por ahora; se agrega en la migración que cree product_variants.
+  // Variante de producto vendida (solo INVENTORIED); null en una línea GENERIC. La agrega
+  // SaleService.addItem cuando AddSaleItemInput trae productVariantId (desde el buscador de
+  // Ventas). Al cobrar, SalePaymentService.complete descuenta cada línea de la bodega STOCK donde
+  // esa variante esté registrada (no la tienda que vendió: ver InventoryBalanceService.findStockLocationForSale).
   @Index()
   @Column({ type: 'uuid', nullable: true })
   productVariantId: string | null;
+
+  @ManyToOne(() => ProductVariant, { nullable: true })
+  @JoinColumn({ name: 'productVariantId' })
+  productVariant: ProductVariant | null;
 
   @Column({ type: 'varchar', length: 180 })
   description: string;

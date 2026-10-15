@@ -2,4 +2,9 @@ export enum NotificationEntityType {
   DISCOUNT_REQUEST = 'DISCOUNT_REQUEST',
   SALE_RETURN = 'SALE_RETURN',
   CASH_SESSION = 'CASH_SESSION',
+  INVENTORY_BALANCE = 'INVENTORY_BALANCE',
+  PURCHASE_ORDER = 'PURCHASE_ORDER',
+  INTERNAL_ORDER = 'INTERNAL_ORDER',
+  // El cajón de devoluciones de una tienda (entityId = la tienda).
+  RETURNS_BIN = 'RETURNS_BIN',
 }

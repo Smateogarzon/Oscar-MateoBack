@@ -136,30 +136,39 @@ describe.skipIf(!dbAvailable)('CashSession OPEN partial unique indexes (real Pos
   });
 
   afterAll(async () => {
+    // `cash_sessions` está protegida contra DELETE por los triggers de
+    // ../../migrations/common/V0.4_protect_ledger.ts: un turno no se borra nunca. Borrar los
+    // turnos de mentira que crea este archivo es justo el caso para el que existe la llave
+    // explícita, así que se pide permiso y queda un WARNING en el log de Postgres. Va por UNA
+    // conexión tomada del pool (no `pool.query`, que puede repartir cada consulta en una conexión
+    // distinta y perder el parámetro de sesión).
+    const client = await pool.connect();
     try {
+      await client.query(`SET app.ledger_override = 'ON'`);
       // FK-safe order: cash_sessions -> cash_registers -> locations -> companies, then users
       // (users are only referenced by cash_sessions, already gone by this point).
       const registerIds = [registerAId, registerBId, registerCId].filter(Boolean);
       if (registerIds.length > 0) {
-        await pool.query(`DELETE FROM cash_sessions WHERE "cashRegisterId" = ANY($1::uuid[])`, [
+        await client.query(`DELETE FROM cash_sessions WHERE "cashRegisterId" = ANY($1::uuid[])`, [
           registerIds,
         ]);
       }
       if (createdSessionIds.length > 0) {
-        await pool.query(`DELETE FROM cash_sessions WHERE id = ANY($1::uuid[])`, [
+        await client.query(`DELETE FROM cash_sessions WHERE id = ANY($1::uuid[])`, [
           createdSessionIds,
         ]);
       }
       if (registerIds.length > 0) {
-        await pool.query(`DELETE FROM cash_registers WHERE id = ANY($1::uuid[])`, [registerIds]);
+        await client.query(`DELETE FROM cash_registers WHERE id = ANY($1::uuid[])`, [registerIds]);
       }
-      if (storeId) await pool.query(`DELETE FROM locations WHERE id = $1`, [storeId]);
-      if (companyId) await pool.query(`DELETE FROM companies WHERE id = $1`, [companyId]);
+      if (storeId) await client.query(`DELETE FROM locations WHERE id = $1`, [storeId]);
+      if (companyId) await client.query(`DELETE FROM companies WHERE id = $1`, [companyId]);
       const userIds = [adminId, cashierOneId, cashierTwoId, cashierThreeId].filter(Boolean);
       if (userIds.length > 0) {
-        await pool.query(`DELETE FROM users WHERE id = ANY($1::uuid[])`, [userIds]);
+        await client.query(`DELETE FROM users WHERE id = ANY($1::uuid[])`, [userIds]);
       }
     } finally {
+      client.release();
       await pool.end();
     }
   });

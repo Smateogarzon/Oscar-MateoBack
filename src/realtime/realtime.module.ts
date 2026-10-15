@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { PushModule } from '../push/push.module.js';
 import { InMemoryRealtimeBus } from './in-memory-realtime-bus.js';
 import { RealtimeBus } from './realtime-bus.js';
 import { RealtimeOutboxSubscriber } from './realtime-outbox.subscriber.js';
@@ -9,6 +10,7 @@ import { RealtimeService } from './realtime.service.js';
 // cada persona la reciben (RealtimeResolver). Por dónde viajan se decide aquí: hoy, la memoria de este
 // proceso; con varias instancias del backend, se cambia el bus por otro (ver RealtimeBus).
 @Module({
+  imports: [PushModule],
   providers: [
     { provide: RealtimeBus, useClass: InMemoryRealtimeBus },
     RealtimeService,

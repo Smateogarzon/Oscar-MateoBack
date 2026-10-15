@@ -1,11 +1,21 @@
 import { randomBytes } from 'node:crypto';
-import { HttpException, HttpStatus, Injectable, Logger, UnauthorizedException } from '@nestjs/common';
+import {
+  HttpException,
+  HttpStatus,
+  Injectable,
+  Logger,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { JwtService } from '@nestjs/jwt';
 import bcrypt from 'bcryptjs';
 import { DataSource, In, Repository } from 'typeorm';
 import { isPlatformRole } from '../../common/access/platform-role.js';
 import { RecordStatus } from '../../common/enums/record-status.enum.js';
+import { AuditLogService } from '../../audit/audit-log.service.js';
+import { AuditAction } from '../../audit/entities/audit-action.enum.js';
+import { RoleCode } from '../../common/enums/role-code.enum.js';
+import { PASSWORD_SALT_ROUNDS } from '../../common/utils/password.js';
 import { Role } from '../role/entities/role.entity.js';
 import { UserCompanyRole } from '../user-company-role/entities/user-company-role.entity.js';
 import { User } from '../user/entities/user.entity.js';
@@ -13,8 +23,6 @@ import { UserService } from '../user/user.service.js';
 import { ADMIN_TOKEN_TTL, DEFAULT_TOKEN_TTL } from './auth-cookie.constants.js';
 import { LoginInput } from './dto/login.input.js';
 import type { JwtPayload } from './interface/jwt-payload.interface.js';
-
-const ADMIN_ROLE_CODE = 'ADMIN';
 
 // Contra la fuerza bruta por cuenta: tras 5 contraseñas equivocadas seguidas para un mismo correo (en
 // 15 minutos) ese correo queda bloqueado 15 minutos. Se cuenta igual para un correo que existe que para
@@ -24,12 +32,14 @@ const MAX_FAILED_LOGINS = 5;
 const FAILURE_WINDOW_MS = 15 * 60 * 1000;
 const LOGIN_LOCK_MS = 15 * 60 * 1000;
 const MAX_TRACKED_EMAILS = 5000;
-const PASSWORD_SALT_ROUNDS = 10;
 
 // Un hash cualquiera para comparar cuando el correo no existe o la cuenta no está activa: así una
 // respuesta de "credenciales inválidas" tarda lo mismo exista o no el correo (si no, el tiempo delataba
 // cuáles correos son de la app).
-const DUMMY_HASH = bcrypt.hashSync(randomBytes(16).toString('hex'), PASSWORD_SALT_ROUNDS);
+const DUMMY_HASH = bcrypt.hashSync(
+  randomBytes(16).toString('hex'),
+  PASSWORD_SALT_ROUNDS,
+);
 
 interface FailureRecord {
   count: number;
@@ -56,6 +66,7 @@ export class AuthService {
     @InjectRepository(UserCompanyRole)
     private readonly userCompanyRoleRepository: Repository<UserCompanyRole>,
     private readonly dataSource: DataSource,
+    private readonly auditLogService: AuditLogService,
   ) {}
 
   private async validateCredentials(
@@ -64,13 +75,19 @@ export class AuthService {
     ip: string | undefined,
   ): Promise<User> {
     const found = await this.userService.findByEmail(email);
-    const activeUser = found && found.status === RecordStatus.ACTIVE ? found : null;
+    const activeUser =
+      found && found.status === RecordStatus.ACTIVE ? found : null;
 
     // Siempre se compara contra un hash (el real o uno falso): mismo tiempo en los dos casos.
-    const passwordMatches = await bcrypt.compare(password, activeUser?.passwordHash ?? DUMMY_HASH);
+    const passwordMatches = await bcrypt.compare(
+      password,
+      activeUser?.passwordHash ?? DUMMY_HASH,
+    );
     if (!activeUser || !passwordMatches) {
       this.registerFailure(email);
-      this.logger.warn(`Inicio de sesión fallido: correo=${email} ip=${ip ?? 'desconocida'}`);
+      this.logger.warn(
+        `Inicio de sesión fallido: correo=${email} ip=${ip ?? 'desconocida'}`,
+      );
       throw new UnauthorizedException('Credenciales inválidas');
     }
 
@@ -89,12 +106,16 @@ export class AuthService {
     if (roleIds.length === 0) return false;
 
     const roles = await this.roleRepository.findBy({ id: In(roleIds) });
-    return roles.some((role) => role.code === ADMIN_ROLE_CODE || isPlatformRole(role));
+    return roles.some(
+      (role) => role.code === RoleCode.ADMIN || isPlatformRole(role),
+    );
   }
 
   // El token de una sesión nueva de este usuario, y si dura menos (administradores). Lo usan el inicio de
   // sesión y el cambio de contraseña (que renueva la sesión de quien la cambia).
-  async issueSession(user: Pick<User, 'id' | 'email'>): Promise<{ accessToken: string; isAdmin: boolean }> {
+  async issueSession(
+    user: Pick<User, 'id' | 'email'>,
+  ): Promise<{ accessToken: string; isAdmin: boolean }> {
     const isAdmin = await this.isAdminInAnyCompany(user.id);
     const payload: JwtPayload = { sub: user.id, email: user.email };
     const accessToken = this.jwtService.sign(payload, {
@@ -112,18 +133,50 @@ export class AuthService {
     this.failures.delete(email);
 
     const { accessToken, isAdmin } = await this.issueSession(user);
-    this.logger.log(`Inicio de sesión: usuario=${user.id} ip=${ip ?? 'desconocida'}`);
-
-    // update() no toca el objeto en memoria: se guarda el acceso de ahora pero `user`
-    // conserva el anterior, que es el que tiene sentido mostrar como "último acceso".
-    await this.dataSource.transaction((manager) =>
-      manager.getRepository(User).update(user.id, { lastLoginAt: new Date() }),
+    this.logger.log(
+      `Inicio de sesión: usuario=${user.id} ip=${ip ?? 'desconocida'}`,
     );
+
+    // Solo se guarda el acceso de ahora: `user` conserva el anterior, que es el que tiene sentido mostrar
+    // como "último acceso". Sin callListeners el subscriber de auditoría dejaría una fila UPDATE genérica
+    // por este acceso; lo cubre el registro LOGIN de abajo, en la misma transacción.
+    await this.dataSource.transaction(async (manager) => {
+      await manager
+        .createQueryBuilder()
+        .update(User)
+        .set({ lastLoginAt: new Date() })
+        .whereInIds(user.id)
+        .callListeners(false)
+        .execute();
+      await this.auditLogService.record(manager, {
+        companyId: null,
+        userId: user.id,
+        action: AuditAction.LOGIN,
+        entityType: User.name,
+        entityId: user.id,
+        oldValues: null,
+        newValues: null,
+        description: 'Inicio de sesión',
+      });
+    });
 
     return { accessToken, user, isAdmin };
   }
 
-  logout(): boolean {
+  // No hay nada que deshacer en la base de datos (el token simplemente expira; las cookies las
+  // borra el resolver), así que no hay un .save()/.remove() del que AuditLogSubscriber pueda
+  // colgarse. Se registra a mano.
+  async logout(userId: string): Promise<boolean> {
+    await this.auditLogService.record(this.dataSource.manager, {
+      companyId: null,
+      userId,
+      action: AuditAction.LOGOUT,
+      entityType: User.name,
+      entityId: userId,
+      oldValues: null,
+      newValues: null,
+      description: 'Cierre de sesión',
+    });
     return true;
   }
 
@@ -162,7 +215,10 @@ export class AuthService {
   private pruneFailures(now: number): void {
     if (this.failures.size < MAX_TRACKED_EMAILS) return;
     for (const [email, record] of this.failures) {
-      if (record.lockedUntil <= now && now - record.firstAt >= FAILURE_WINDOW_MS) {
+      if (
+        record.lockedUntil <= now &&
+        now - record.firstAt >= FAILURE_WINDOW_MS
+      ) {
         this.failures.delete(email);
       }
     }
