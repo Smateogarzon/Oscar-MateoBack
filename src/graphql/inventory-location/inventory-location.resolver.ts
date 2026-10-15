@@ -1,6 +1,9 @@
 import { UseGuards } from '@nestjs/common';
 import { Args, ID, Mutation, Query, Resolver } from '@nestjs/graphql';
-import { CurrentCompanyId } from '../../common/decorators/current-company.decorator.js';
+import { DataSource } from 'typeorm';
+import type { CompanyAccess } from '../../common/access/company-access.js';
+import { assertVisibleLocation, visibleLocationIds } from '../../common/access/location-scope.js';
+import { CurrentCompanyAccess, CurrentCompanyId } from '../../common/decorators/current-company.decorator.js';
 import { CurrentUser } from '../../common/decorators/current-user.decorator.js';
 import { IdempotencyKeyHeader } from '../../common/decorators/idempotency-key.decorator.js';
 import {
@@ -21,17 +24,24 @@ import { InventoryLocationService } from './inventory-location.service.js';
 @Resolver(() => InventoryLocationObjectType)
 @UseGuards(JwtAuthGuard, PermissionsGuard, CsrfGuard)
 export class InventoryLocationResolver {
-  constructor(private readonly inventoryLocationService: InventoryLocationService) {}
+  constructor(
+    private readonly inventoryLocationService: InventoryLocationService,
+    private readonly dataSource: DataSource,
+  ) {}
 
+  // Solo los cajones de las sedes que tiene asignadas quien consulta; el administrador, todos.
   @Query(() => [InventoryLocationObjectType])
   @RequireCompanyMembership()
-  inventoryLocations(
+  async inventoryLocations(
     @CurrentCompanyId() companyId: string,
+    @CurrentUser() user: JwtPayload,
+    @CurrentCompanyAccess() access: CompanyAccess,
     @Args('type', { type: () => InventoryLocationType, nullable: true }) type?: InventoryLocationType,
     @Args('locationId', { type: () => ID, nullable: true }) locationId?: string,
     @Args('status', { type: () => RecordStatus, nullable: true }) status?: RecordStatus,
   ) {
-    return this.inventoryLocationService.findAll(companyId, { type, locationId, status });
+    const locationIds = await visibleLocationIds(this.dataSource.manager, companyId, user.sub, access);
+    return this.inventoryLocationService.findAll(companyId, { type, locationId, status, locationIds });
   }
 
   @Query(() => InventoryLocationObjectType)
@@ -42,12 +52,16 @@ export class InventoryLocationResolver {
 
   @Mutation(() => InventoryLocationObjectType)
   @RequirePermissions(PermissionCode.INVENTORY_MANAGE_PRODUCTS)
-  createInventoryLocation(
+  async createInventoryLocation(
     @CurrentCompanyId() companyId: string,
     @CurrentUser() currentUser: JwtPayload,
+    @CurrentCompanyAccess() access: CompanyAccess,
     @Args('input') input: CreateInventoryLocationInput,
     @IdempotencyKeyHeader() idempotencyKey?: string,
   ) {
+    // Un cajón se crea en una sede propia: si no se viera, se crearía uno duplicado al lado del que
+    // ya tiene (nada impide dos del mismo tipo en la misma sede) y el inventario quedaría partido.
+    await assertVisibleLocation(this.dataSource.manager, companyId, currentUser.sub, access, input.locationId ?? null);
     return this.inventoryLocationService.create(companyId, currentUser.sub, input, idempotencyKey);
   }
 

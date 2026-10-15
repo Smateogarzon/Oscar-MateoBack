@@ -148,8 +148,9 @@ export class SaleResolver {
   }
 
   // "Nueva venta": quien la crea es el usuario de la sesión. Queda atada al turno que manda
-  // `input.cashSessionId` desde que nace (SaleService.create lo valida y bloquea). Una venta en blanco
-  // exige sales.create; la caja (sin ese permiso) solo abre la del cambio de una devolución aprobada.
+  // `input.cashSessionId` desde que nace (SaleService.create lo valida y bloquea). Vender catálogo en
+  // una venta en blanco exige sales.create; la caja (sin ese permiso) abre la del cambio de una
+  // devolución aprobada y ventas de puros no inventariados (ver `Sale.genericOnly`).
   @Mutation(() => SaleObjectType)
   @RequireAnyPermission(PermissionCode.SALES_CREATE, PermissionCode.CASH_CHARGE_ORDERS, PermissionCode.CASH_REGISTER_PAYMENT)
   createSale(
@@ -164,7 +165,7 @@ export class SaleResolver {
       cashActor(currentUser.sub, access.permissionCodes),
       input,
       idempotencyKey,
-      { canCreateBlank: access.permissionCodes.includes(PermissionCode.SALES_CREATE) },
+      { canSellCatalog: access.permissionCodes.includes(PermissionCode.SALES_CREATE) },
     );
   }
 

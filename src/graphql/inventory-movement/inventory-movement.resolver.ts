@@ -11,11 +11,13 @@ import {
   RequireCompanyMembership,
 } from '../../common/decorators/permissions.decorator.js';
 import { PermissionCode } from '../../common/enums/permission-code.enum.js';
+import { visibleLocationIds } from '../../common/access/location-scope.js';
 import { CsrfGuard } from '../../common/guards/csrf.guard.js';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard.js';
 import { PermissionsGuard } from '../../common/guards/permissions.guard.js';
 import type { CompanyAccess } from '../../common/access/company-access.js';
 import type { JwtPayload } from '../auth/interface/jwt-payload.interface.js';
+import { DataSource } from 'typeorm';
 import { CreateInventoryMovementInput } from './dto/create-inventory-movement.input.js';
 import { InventoryMovementObjectType } from './dto/inventory-movement.object-type.js';
 import { InventoryMovementType } from './entities/inventory-movement-type.enum.js';
@@ -24,17 +26,24 @@ import { InventoryMovementService } from './inventory-movement.service.js';
 @Resolver(() => InventoryMovementObjectType)
 @UseGuards(JwtAuthGuard, PermissionsGuard, CsrfGuard)
 export class InventoryMovementResolver {
-  constructor(private readonly inventoryMovementService: InventoryMovementService) {}
+  constructor(
+    private readonly inventoryMovementService: InventoryMovementService,
+    private readonly dataSource: DataSource,
+  ) {}
 
+  // Solo los movimientos que pasaron por una sede de quien consulta; el administrador, todos.
   @Query(() => [InventoryMovementObjectType])
   @RequireCompanyMembership()
-  inventoryMovements(
+  async inventoryMovements(
     @CurrentCompanyId() companyId: string,
+    @CurrentUser() user: JwtPayload,
+    @CurrentCompanyAccess() access: CompanyAccess,
     @Args('productVariantId', { type: () => ID, nullable: true }) productVariantId?: string,
     @Args('fromLocationId', { type: () => ID, nullable: true }) fromLocationId?: string,
     @Args('toLocationId', { type: () => ID, nullable: true }) toLocationId?: string,
   ) {
-    return this.inventoryMovementService.findAll(companyId, { productVariantId, fromLocationId, toLocationId });
+    const locationIds = await visibleLocationIds(this.dataSource.manager, companyId, user.sub, access);
+    return this.inventoryMovementService.findAll(companyId, { productVariantId, fromLocationId, toLocationId, locationIds });
   }
 
   @Query(() => InventoryMovementObjectType)

@@ -20,6 +20,11 @@ export class CategoryObjectType extends BaseObjectType {
   @Field(() => String, { nullable: true })
   description: string | null;
 
+  // Esta mercancía vive en la tienda y no pasa por corredor (ver `Category.directSale`). Se hereda
+  // a las subcategorías: este campo dice lo que quedó marcado en ESTA, no lo heredado.
+  @Field()
+  directSale: boolean;
+
   @Field(() => RecordStatus)
   status: RecordStatus;
 }

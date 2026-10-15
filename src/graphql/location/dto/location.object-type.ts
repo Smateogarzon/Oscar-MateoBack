@@ -33,6 +33,11 @@ export class LocationObjectType extends BaseObjectType {
   @Field(() => String, { nullable: true })
   email: string | null;
 
+  // La tienda no tiene corredores: vende directo en caja desde su propio stock y no se le puede
+  // pedir a bodega (ver `Location.directSale`). Siempre false en una bodega.
+  @Field()
+  directSale: boolean;
+
   @Field(() => RecordStatus)
   status: RecordStatus;
 }

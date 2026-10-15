@@ -36,6 +36,14 @@ export class Location extends BaseEntity {
   @Column({ type: 'varchar', length: 150, nullable: true })
   email: string | null;
 
+  // La tienda no tiene corredores: lo que vende ya está ahí, así que se cobra directo en caja
+  // (descontando de su propio STOCK) en vez de pedirlo a una bodega y esperar que alguien lo lleve.
+  // Por eso tampoco se le puede pedir a bodega (ver InternalOrderService.request) y la caja sí vende
+  // catálogo en una venta en blanco (ver `Sale.genericOnly`). Solo tiene sentido en una tienda; una
+  // bodega lo deja en false.
+  @Column({ type: 'boolean', default: false })
+  directSale: boolean;
+
   @Column({
     type: 'enum',
     enum: RecordStatus,

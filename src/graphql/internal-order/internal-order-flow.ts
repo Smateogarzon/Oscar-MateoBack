@@ -175,6 +175,18 @@ export const RUNNER_ENGAGED_STATUSES: readonly S[] = [
   S.DELIVERED_TO_DESTINATION,
 ];
 
+// Los pasos que hace la bodega con la mercancía delante, y en qué sede de la orden está esa
+// mercancía. Quien los da tiene que tener esa sede asignada (Configuración → Personal por
+// ubicación): un bodeguero alista y despacha lo de SUS bodegas, no lo de cualquiera. Alistar
+// (PACK/READY) pasa en el origen; recibir una devolución (VERIFY_RETURN/CLOSE_RETURN), en el
+// destino, que en una RE es la bodega que la recibe.
+export const WAREHOUSE_EFFECT_AT: Partial<Record<FlowEffect, 'SOURCE' | 'DESTINATION'>> = {
+  PACK: 'SOURCE',
+  READY: 'SOURCE',
+  VERIFY_RETURN: 'DESTINATION',
+  CLOSE_RETURN: 'DESTINATION',
+};
+
 export function stepFor(type: InternalOrderType, from: S, to: S): FlowStep | undefined {
   return FLOWS[type].find((step) => step.from === from && step.to === to);
 }
