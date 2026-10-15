@@ -12,6 +12,7 @@ import { NotificationEntityType } from '../notification/entities/notification-en
 import { NotificationType } from '../notification/entities/notification-type.enum.js';
 import { NotificationService } from '../notification/notification.service.js';
 import { ProductVariant } from '../product-variant/entities/product-variant.entity.js';
+import { isManualAdjustment, openAdjustmentIncident } from './adjustment-incidents.js';
 import { CreateInventoryMovementInput } from './dto/create-inventory-movement.input.js';
 import { InventoryMovement } from './entities/inventory-movement.entity.js';
 import type { InventoryMovementType } from './entities/inventory-movement-type.enum.js';
@@ -129,7 +130,15 @@ export class InventoryMovementService {
           input,
           resourceType: 'inventoryMovement',
         },
-        () => this.recordInTransaction(manager, companyId, userId, params),
+        async () => {
+          const movement = await this.recordInTransaction(manager, companyId, userId, params);
+          // Un ajuste a mano no lo explica ningún documento: deja novedad abierta, dentro de esta
+          // misma transacción (ver adjustment-incidents.ts).
+          if (isManualAdjustment(params.type, params.sourceType)) {
+            await openAdjustmentIncident(manager, movement);
+          }
+          return movement;
+        },
         (id) => manager.getRepository(InventoryMovement).findOneByOrFail({ id }),
       ),
     );

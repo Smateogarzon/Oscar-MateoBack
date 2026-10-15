@@ -30,6 +30,19 @@ export function quantitiesOf(
   return quantities;
 }
 
+// Dónde guardó quien recibe cada referencia, por variante. Es opcional y renglón por renglón: solo
+// entran las que escribió, y las demás conservan la posición que ya tuvieran en esa sede.
+export function positionsOf(
+  lines: readonly { productVariantId: string; position: string }[] = [],
+): Map<string, string> {
+  const positions = new Map<string, string>();
+  for (const line of lines) {
+    const position = line.position.trim();
+    if (position) positions.set(line.productVariantId, position);
+  }
+  return positions;
+}
+
 // Todo lo que una orden aparta o mueve de inventario. Cada orden aparta en UN solo lugar a la vez
 // (la bodega de origen antes de que el corredor la recoja; la tienda cuando una SO ya llegó), con
 // sourceType TRANSFER_REQUEST y sourceId = la orden: así se suelta entera de una vez. Los movimientos
@@ -113,13 +126,14 @@ export class InternalOrderStock {
     quantities: VariantQuantities,
     into: 'STOCK' | 'RETURNS',
     actorId: string,
+    positions?: ReadonlyMap<string, string>,
   ): Promise<void> {
     const bag = await this.inventoryLocations.findOrCreateRunnerLocation(manager, companyId, runnerId);
     const to =
       into === 'RETURNS'
         ? await this.inventoryLocations.findOrCreateReturnsLocation(manager, companyId, order.destinationLocationId)
         : await this.inventoryLocations.findStockLocation(manager, companyId, order.destinationLocationId);
-    await this.move(manager, companyId, order, bag.id, to.id, quantities, InventoryMovementType.RUNNER_DELIVERY, actorId);
+    await this.move(manager, companyId, order, bag.id, to.id, quantities, InventoryMovementType.RUNNER_DELIVERY, actorId, positions);
   }
 
   // Bodega cierra una devolución: lo verificado pasa del cajón de devoluciones a su STOCK, donde
@@ -136,6 +150,8 @@ export class InternalOrderStock {
     await this.move(manager, companyId, order, from.id, to.id, quantities, InventoryMovementType.RETURN, actorId);
   }
 
+  // `positions` (opcional) dice dónde queda cada referencia en el destino: la escribe quien recibe y
+  // se guarda en la balanza de llegada. Una referencia sin posición conserva la que ya tenía ahí.
   private async move(
     manager: EntityManager,
     companyId: string,
@@ -145,6 +161,7 @@ export class InternalOrderStock {
     quantities: VariantQuantities,
     type: InventoryMovementType,
     actorId: string,
+    positions?: ReadonlyMap<string, string>,
   ): Promise<void> {
     for (const [productVariantId, quantity] of quantities) {
       await this.movements.recordInTransaction(manager, companyId, actorId, {
@@ -157,6 +174,7 @@ export class InternalOrderStock {
         sourceId: order.id,
         sourceNumber: order.orderNumber,
         notes: `Orden #${order.orderNumber}`,
+        position: positions?.get(productVariantId),
       });
     }
   }

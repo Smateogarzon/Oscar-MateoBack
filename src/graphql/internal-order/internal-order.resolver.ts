@@ -48,10 +48,12 @@ const actorOf = (user: JwtPayload, access: CompanyAccess): OrderActor => ({
 export class InternalOrderResolver {
   constructor(private readonly internalOrderService: InternalOrderService) {}
 
-  // Leer pedidos exige orders.view (la sección de pedidos). Lo que cada quien ve dentro (todas, las de
-  // su bodega, las que lleva o puede tomar, las que pidió) lo decide internal-order-visibility.ts.
+  // Leer pedidos exige orders.view (la sección de Pedidos) o cash.charge_orders: la caja no entra a
+  // Pedidos, pero cobra las órdenes que el vendedor le manda y necesita verlas en su pantalla de Venta.
+  // Lo que cada quien ve dentro (todas, las de su bodega, las que lleva o puede tomar, las que pidió o
+  // las que llegan a su sede) lo decide internal-order-visibility.ts.
   @Query(() => [InternalOrderObjectType])
-  @RequirePermissions(PermissionCode.ORDERS_VIEW)
+  @RequireAnyPermission(PermissionCode.ORDERS_VIEW, PermissionCode.CASH_CHARGE_ORDERS)
   internalOrders(
     @CurrentCompanyId() companyId: string,
     @CurrentUser() user: JwtPayload,
