@@ -191,6 +191,8 @@ export class SaleResolver {
       cashActor(currentUser.sub, access.permissionCodes),
       input,
       idempotencyKey,
+      // Sin sales.create (la caja) no se agrega catálogo a la venta que cobra una orden.
+      { canSellCatalog: access.permissionCodes.includes(PermissionCode.SALES_CREATE) },
     );
   }
 

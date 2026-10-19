@@ -44,11 +44,13 @@ export class InventoryLocationService {
         ...(filter.locationId ? { locationId: filter.locationId } : locationIds && { locationId: In(locationIds) }),
       },
       order: { createdAt: 'ASC' },
+      // Para poner nombre a la bolsa de un corredor sin una consulta por ubicación.
+      relations: { custodianUser: true },
     });
   }
 
   async findOne(companyId: string, id: string): Promise<InventoryLocation> {
-    const inventoryLocation = await this.inventoryLocationRepository.findOneBy({ id, companyId });
+    const inventoryLocation = await this.inventoryLocationRepository.findOne({ where: { id, companyId }, relations: { custodianUser: true } });
     if (!inventoryLocation) throw new NotFoundException(`Ubicación de inventario ${id} no encontrada`);
     return inventoryLocation;
   }

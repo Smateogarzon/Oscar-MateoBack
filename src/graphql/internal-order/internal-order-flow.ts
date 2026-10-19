@@ -45,7 +45,9 @@ export type FlowEffect =
 //   REQUESTER  quien la pidió, o quien tenga el permiso
 //   ADMIN      solo quien administra la empresa (Administrador) o la plataforma (super admin); no
 //              depende de permisos
-export type FlowActor = 'RUNNER' | 'REQUESTER' | 'ADMIN';
+//   REQUESTER_OR_ADMIN  quien la pidió —mientras ningún corredor la haya tomado— o el
+//              administrador, siempre. Es la regla para anular una SO (ver `CANCEL_SO`).
+export type FlowActor = 'RUNNER' | 'REQUESTER' | 'ADMIN' | 'REQUESTER_OR_ADMIN';
 
 export interface FlowStep {
   from: S;
@@ -65,9 +67,15 @@ const DELIVERY = [P.RUNNER_CONFIRM_DELIVERY];
 const RECEIPT = [P.ORDERS_CONFIRM_RECEIPT];
 const RECEIPT_OR_WAREHOUSE = [P.ORDERS_CONFIRM_RECEIPT, P.WAREHOUSE_FULFILL_ORDERS];
 const CASH_DESK = [P.CASH_CHARGE_ORDERS, P.CASH_REGISTER_PAYMENT, P.ORDERS_CONFIRM_RECEIPT];
-// Anular una SO, un TR o un RS antes de que lo recoja el corredor es solo del administrador (ni bodega,
-// ni el corredor, ni quien lo pidió). Cancelar una devolución (RE) sigue su propia regla.
+// Anular un TR o un RS antes de que lo recoja el corredor es solo del administrador (ni bodega, ni el
+// corredor, ni quien lo pidió). Cancelar una devolución (RE) sigue su propia regla.
 const CANCEL = { effect: 'CANCEL' as const, permissions: [], actor: 'ADMIN' as const };
+
+// Anular una SO: el vendedor que la pidió puede, mientras ningún corredor la haya tomado (acordado
+// con el usuario, 2026-10-15). En cuanto un corredor la toma hay alguien yendo por ella, y solo el
+// administrador la anula. Si bodega ya la había tomado se le avisa que se anuló (ver
+// `PACKED_STATUSES` y `InternalOrderService.cancel`); si nadie la había tocado, se anula sin avisar.
+const CANCEL_SO = { effect: 'CANCEL' as const, permissions: [], actor: 'REQUESTER_OR_ADMIN' as const };
 
 export const FLOWS: Record<InternalOrderType, readonly FlowStep[]> = {
   [InternalOrderType.SO]: [
@@ -82,10 +90,10 @@ export const FLOWS: Record<InternalOrderType, readonly FlowStep[]> = {
     { from: S.RECEIVED_BY_SELLER, to: S.RETURNED, effect: 'RETURN_REQUEST', permissions: RECEIPT, detail: 'Cliente no compra · al cajón de devoluciones' },
     { from: S.PENDING_PAYMENT, to: S.RECEIVED_BY_SELLER, effect: 'BACK_TO_SELLER', permissions: CASH_DESK, detail: 'Vuelve al vendedor · el cliente aún no decide' },
     { from: S.PENDING_PAYMENT, to: S.RETURNED, effect: 'RETURN_REQUEST', permissions: CASH_DESK, detail: 'Cliente no compra · al cajón de devoluciones' },
-    { from: S.NEW, to: S.CANCELLED, ...CANCEL, detail: 'Orden anulada' },
-    { from: S.ACCEPTED_BY_WAREHOUSE, to: S.CANCELLED, ...CANCEL, detail: 'Orden anulada' },
-    { from: S.PACKING, to: S.CANCELLED, ...CANCEL, detail: 'Orden anulada' },
-    { from: S.READY_FOR_RUNNER, to: S.CANCELLED, ...CANCEL, detail: 'Orden anulada' },
+    { from: S.NEW, to: S.CANCELLED, ...CANCEL_SO, detail: 'Orden anulada' },
+    { from: S.ACCEPTED_BY_WAREHOUSE, to: S.CANCELLED, ...CANCEL_SO, detail: 'Orden anulada' },
+    { from: S.PACKING, to: S.CANCELLED, ...CANCEL_SO, detail: 'Orden anulada' },
+    { from: S.READY_FOR_RUNNER, to: S.CANCELLED, ...CANCEL_SO, detail: 'Orden anulada' },
   ],
   [InternalOrderType.RE]: [
     { from: S.WAITING_FOR_RUNNER, to: S.IN_TRANSIT_TO_WAREHOUSE, effect: 'PICK_UP', permissions: PICKUP, detail: 'Corredor transporta hacia bodega' },
@@ -137,6 +145,10 @@ export const FINAL_STATUSES: readonly S[] = [
 ];
 
 export const isFinalStatus = (status: S): boolean => FINAL_STATUSES.includes(status);
+
+// Bodega ya tomó la orden: hay trabajo hecho y mercancía separada en el muelle. Anular desde aquí
+// le avisa (no así desde NEW, que nadie la había tocado).
+export const PACKED_STATUSES: readonly S[] = [S.ACCEPTED_BY_WAREHOUSE, S.PACKING, S.READY_FOR_RUNNER];
 
 // Estados en que la mercancía ya salió del origen: de ahí en adelante no se cancela (hay que
 // entregarla y devolverla).

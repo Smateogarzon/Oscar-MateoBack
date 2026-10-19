@@ -113,7 +113,10 @@ export class InternalOrderResolver {
 
   // ─── Mutaciones ────────────────────────────────────────────────────────────────────────────
 
-  @Mutation(() => InternalOrderObjectType)
+  // Devuelve una lista: lo que un vendedor pide puede estar repartido en varias bodegas, y entonces
+  // nace una orden por bodega (ver `InternalOrderService.request`). Un pedido de una sola bodega, y
+  // cualquier transferencia, devuelve una sola.
+  @Mutation(() => [InternalOrderObjectType])
   @RequireAnyPermission(PermissionCode.ORDERS_REQUEST_FROM_WAREHOUSE, PermissionCode.INVENTORY_TRANSFER, PermissionCode.WAREHOUSE_FULFILL_ORDERS)
   async requestInternalOrder(
     @CurrentCompanyId() companyId: string,
@@ -122,8 +125,8 @@ export class InternalOrderResolver {
     @Args('input') input: RequestInternalOrderInput,
     @IdempotencyKeyHeader() idempotencyKey?: string,
   ) {
-    const order = await this.internalOrderService.request(companyId, actorOf(user, access), input, idempotencyKey);
-    return this.internalOrderService.findView(companyId, order.id);
+    const orders = await this.internalOrderService.request(companyId, actorOf(user, access), input, idempotencyKey);
+    return Promise.all(orders.map((order) => this.internalOrderService.findView(companyId, order.id)));
   }
 
   @Mutation(() => InternalOrderObjectType)
@@ -211,7 +214,9 @@ export class InternalOrderResolver {
     return this.internalOrderService.returnsBinContents(companyId, actorOf(user, access));
   }
 
-  @Mutation(() => InternalOrderObjectType)
+  // Devuelve una lista: lo marcado puede haber salido de varias bodegas y entonces nace una RE por
+  // bodega (ver `InternalOrderService.createReturnFromBin`).
+  @Mutation(() => [InternalOrderObjectType])
   @RequireCompanyMembership()
   async createReturnFromBin(
     @CurrentCompanyId() companyId: string,
@@ -219,8 +224,8 @@ export class InternalOrderResolver {
     @CurrentCompanyAccess() access: CompanyAccess,
     @Args('input') input: CreateReturnFromBinInput,
   ) {
-    const order = await this.internalOrderService.createReturnFromBin(companyId, actorOf(user, access), input);
-    return this.internalOrderService.findView(companyId, order.id);
+    const orders = await this.internalOrderService.createReturnFromBin(companyId, actorOf(user, access), input);
+    return Promise.all(orders.map((order) => this.internalOrderService.findView(companyId, order.id)));
   }
 
   // El corredor responde dónde va (a "Contactar al corredor").

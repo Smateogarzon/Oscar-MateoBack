@@ -123,6 +123,11 @@ const TEXTS: Record<
     title: 'Retorno a bodega por error',
     message: (p) => `${p.actorName} reportó que llegó una referencia equivocada en la orden #${ref(p)}.`,
   },
+  [NotificationType.ORDER_CANCELLED]: {
+    title: 'Pedido anulado',
+    message: (p) =>
+      `${p.actorName} anuló la orden #${ref(p)}${p.locationName ? `, que estaba alistando ${p.locationName}` : ''}${p.notes ? `: ${p.notes}` : ''}.`,
+  },
   [NotificationType.INVENTORY_LOW_STOCK]: {
     title: 'Existencia baja',
     message: (p) => {

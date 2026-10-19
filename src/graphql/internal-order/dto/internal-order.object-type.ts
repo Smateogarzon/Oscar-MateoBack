@@ -49,8 +49,10 @@ export class InternalOrderObjectType extends BaseObjectType {
   @Field(() => ID)
   destinationLocationId: string;
 
-  @Field(() => String, { nullable: true })
-  deliveryPoint: string | null;
+  // Las órdenes de un mismo envío comparten grupo: lo que un vendedor pide repartido en varias
+  // bodegas nace como una orden por bodega (ver `InternalOrder.requestGroupId`).
+  @Field(() => ID, { nullable: true })
+  requestGroupId: string | null;
 
   @Field(() => ID, { nullable: true })
   requestedBy: string | null;

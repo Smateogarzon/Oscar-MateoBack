@@ -38,21 +38,17 @@ export class RequestInternalOrderInput {
   @IsEnum(InternalOrderOrigin)
   origin: InternalOrderOrigin;
 
-  @Field(() => ID)
+  // De dónde sale la mercancía. En una SO no se manda: lo decide el servidor, que busca la bodega
+  // con lo pedido y, si está repartido, crea una orden por bodega (ver `InternalOrderService.request`).
+  // Una transferencia (TR / RS) sí dice de dónde sale: elegirlo ES la transferencia.
+  @Field(() => ID, { nullable: true })
+  @IsOptional()
   @IsUUID()
-  sourceLocationId: string;
+  sourceLocationId?: string;
 
   @Field(() => ID)
   @IsUUID()
   destinationLocationId: string;
-
-  // Dónde, dentro del destino, lo entrega el corredor ("Probador #02").
-  @Field({ nullable: true })
-  @IsOptional()
-  @Trim()
-  @IsString()
-  @MaxLength(80)
-  deliveryPoint?: string;
 
   @Field({ nullable: true })
   @IsOptional()

@@ -1,8 +1,6 @@
-import { Type } from 'class-transformer';
 import { Field, ID, InputType, ObjectType } from '@nestjs/graphql';
-import { ArrayMaxSize, ArrayMinSize, IsArray, IsUUID, ValidateNested } from 'class-validator';
+import { ArrayMaxSize, ArrayMinSize, IsArray, IsUUID } from 'class-validator';
 import { InternalOrderItemVariantObjectType } from './internal-order-item-variant.object-type.js';
-import { InternalOrderLineInput } from './request-internal-order.input.js';
 
 // Lo que hay en el cajón de devoluciones de una tienda: cada entrada dice qué variante, cuánto, de qué
 // documento llegó (el pedido, la venta o la devolución) y desde cuándo está ahí.
@@ -29,6 +27,14 @@ export class ReturnsBinLineObjectType {
   @Field(() => String, { nullable: true })
   sourceNumber: string | null;
 
+  // La bodega que despachó esto y a la que vuelve. Null si no salió de ninguna (la tienda lo vendía
+  // directo): eso no se puede mandar a bodega y se queda en el cajón.
+  @Field(() => ID, { nullable: true })
+  originWarehouseId: string | null;
+
+  @Field(() => String, { nullable: true })
+  originWarehouseName: string | null;
+
   @Field(() => String, { nullable: true })
   addedByName: string | null;
 
@@ -36,22 +42,19 @@ export class ReturnsBinLineObjectType {
   createdAt: Date;
 }
 
-// Mandar a bodega lo del cajón de una tienda: a qué bodega y cuánto de cada variante.
+// Mandar a bodega lo del cajón de una tienda: qué referencias. A qué bodega va cada una no se manda:
+// lo decide el servidor con el documento que la dejó en el cajón (ver `InternalOrderService
+// .createReturnFromBin`), y va TODO lo que el cajón tenga de esas referencias.
 @InputType()
 export class CreateReturnFromBinInput {
   @Field(() => ID)
   @IsUUID()
   storeId: string;
 
-  @Field(() => ID)
-  @IsUUID()
-  warehouseId: string;
-
-  @Field(() => [InternalOrderLineInput])
+  @Field(() => [ID])
   @IsArray()
   @ArrayMinSize(1)
   @ArrayMaxSize(500)
-  @ValidateNested({ each: true })
-  @Type(() => InternalOrderLineInput)
-  lines: InternalOrderLineInput[];
+  @IsUUID(undefined, { each: true })
+  productVariantIds: string[];
 }

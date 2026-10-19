@@ -290,11 +290,14 @@ export class SaleService {
   // los descuentos solo llegan por una solicitud aprobada. Agregar líneas se puede aunque haya
   // una solicitud activa. Devuelve la venta con sus totales al día. Con `idempotencyKey`, repetir la
   // misma petición (doble clic, reintento tras perder la respuesta) no duplica la línea.
+  // `canSellCatalog` es de quien opera (lo trae el resolver desde `sales.create`): sin ese permiso
+  // —la caja— solo se quitan líneas y se agregan no inventariados. Ver el bloqueo más abajo.
   async addItem(
     companyId: string,
     actor: CashActor,
     input: AddSaleItemInput,
     idempotencyKey?: string,
+    options: { canSellCatalog: boolean } = { canSellCatalog: true },
   ): Promise<Sale> {
     const description = input.description.trim();
     if (!description) throw new BadRequestException('La descripción de la línea no puede estar vacía');
@@ -325,6 +328,16 @@ export class SaleService {
             // catálogo se vende con una orden del vendedor, no desde aquí.
             if (sale.genericOnly) {
               throw new ForbiddenException('Esta venta solo acepta productos no inventariados: el catálogo se cobra desde una orden del vendedor');
+            }
+            // Cobrando una orden del vendedor, la caja solo quita líneas y agrega no inventariados
+            // (acordado con el usuario, 2026-10-15): agregar catálogo aquí sería vender algo que
+            // nadie trajo de bodega ni apartó para este cliente. El cambio de una devolución sí lo
+            // acepta —no viene de una orden— y una tienda sin corredores también, porque ahí la
+            // caja ES quien vende.
+            if (!options.canSellCatalog && sale.internalOrderId) {
+              throw new ForbiddenException(
+                'Esta venta cobra una orden del vendedor: desde la caja solo se quitan líneas o se agregan productos no inventariados',
+              );
             }
             const exists = await manager
               .getRepository(ProductVariant)

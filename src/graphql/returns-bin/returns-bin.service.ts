@@ -1,4 +1,4 @@
-import { ConflictException, Injectable } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { Decimal } from 'decimal.js';
 import { DataSource, In, type EntityManager } from 'typeorm';
 import { InventoryLocationType } from '../inventory-location/entities/inventory-location-type.enum.js';
@@ -9,9 +9,13 @@ import { InventoryReservationService } from '../inventory-reservation/inventory-
 import { releaseReservations } from '../inventory-reservation/reserved-quantity.js';
 import { LocationType } from '../location/entities/location-type.enum.js';
 import { Location } from '../location/entities/location.entity.js';
+import { InternalOrder } from '../internal-order/entities/internal-order.entity.js';
+import { SaleReturn } from '../sale-return/entities/sale-return.entity.js';
+import { Sale } from '../sale/entities/sale.entity.js';
 import { NotificationEntityType } from '../notification/entities/notification-entity-type.enum.js';
 import { NotificationType } from '../notification/entities/notification-type.enum.js';
 import { NotificationService } from '../notification/notification.service.js';
+import { RecordStatus } from '../../common/enums/record-status.enum.js';
 
 // Cantidad por variante.
 export type BinQuantities = Map<string, Decimal>;
@@ -92,45 +96,113 @@ export class ReturnsBinService {
     });
   }
 
-  // Toma del cajón de `storeId` estas cantidades (lo más viejo primero) para mandarlas a bodega: suelta
-  // esas reservas —quien las tome las vuelve a apartar a su nombre en la misma transacción— y devuelve
-  // de qué documentos salieron. Si el cajón no tiene tanto, no toma nada.
-  async take(manager: EntityManager, companyId: string, storeId: string, quantities: BinQuantities): Promise<string[]> {
+  // Las entradas del cajón de `storeId` de esas variantes, bloqueadas para trabajar con ellas (crear
+  // la RE las saca del cajón). Lo más viejo primero, como se muestran.
+  async lockFor(
+    manager: EntityManager,
+    companyId: string,
+    storeId: string,
+    productVariantIds: readonly string[],
+  ): Promise<InventoryReservation[]> {
+    if (productVariantIds.length === 0) return [];
     const stock = await this.inventoryLocations.findStockLocation(manager, companyId, storeId);
-    const repo = manager.getRepository(InventoryReservation);
-    const rows = await repo.find({
-      where: { sourceType: InventorySourceType.RETURNS_BIN, inventoryLocationId: stock.id, productVariantId: In([...quantities.keys()]) },
+    return manager.getRepository(InventoryReservation).find({
+      where: {
+        sourceType: InventorySourceType.RETURNS_BIN,
+        inventoryLocationId: stock.id,
+        productVariantId: In([...productVariantIds]),
+      },
       order: { createdAt: 'ASC' },
       lock: { mode: 'pessimistic_write' },
     });
-    const origins = new Set<string>();
-    for (const [productVariantId, wanted] of quantities) {
-      let pending = wanted;
-      for (const row of rows.filter((candidate) => candidate.productVariantId === productVariantId)) {
-        if (pending.lessThanOrEqualTo(0)) break;
-        const taken = Decimal.min(pending, row.quantity);
-        pending = pending.minus(taken);
-        if (row.sourceNumber) origins.add(row.sourceNumber);
-        // Una reserva no se edita: se borra y, si sobra, queda una nueva con lo que sigue en el cajón.
-        await repo.remove(row);
-        const left = row.quantity.minus(taken);
-        if (left.greaterThan(0)) {
-          await repo.save(
-            repo.create({
-              productVariantId: row.productVariantId,
-              inventoryLocationId: row.inventoryLocationId,
-              quantity: left,
-              sourceType: row.sourceType,
-              sourceId: row.sourceId,
-              sourceNumber: row.sourceNumber,
-              reservedBy: row.reservedBy,
-            }),
-          );
-        }
-      }
-      if (pending.greaterThan(0)) throw new ConflictException('El cajón de devoluciones ya no tiene esas cantidades: vuelve a cargarlo');
+  }
+
+  // Saca del cajón estas entradas, enteras: quien las tome las vuelve a apartar a su nombre en la
+  // misma transacción. Se toman filas completas y no cantidades, porque cada fila es lo que llegó de
+  // UN documento y es ella la que sabe de qué bodega salió: partirla perdería esa cuenta.
+  async takeRows(manager: EntityManager, rows: readonly InventoryReservation[]): Promise<string[]> {
+    if (rows.length === 0) return [];
+    await manager.getRepository(InventoryReservation).remove([...rows]);
+    return [...new Set(rows.flatMap((row) => (row.sourceNumber ? [row.sourceNumber] : [])))];
+  }
+
+  /**
+   * De qué bodega salió cada cosa del cajón, por el documento que la dejó ahí (`sourceId`), para
+   * devolverla a donde era (acordado con el usuario, 2026-10-15). Se resuelve en tres saltos:
+   *
+   *   · el cajón lo llenó un pedido (SO)  → la bodega que lo despachó;
+   *   · lo llenó una venta (caja le quitó una línea) → la bodega del pedido que esa venta cobraba;
+   *   · lo llenó una devolución de venta  → lo mismo, por la venta original.
+   *
+   * Devuelve un mapa por `sourceId`; lo que no lleva a ninguna bodega activa no entra en el mapa, y
+   * eso es una respuesta válida: la mercancía que la tienda vendía directo nunca salió de una bodega
+   * y no hay a dónde devolverla (se queda en el cajón).
+   */
+  async originWarehouses(
+    manager: EntityManager,
+    companyId: string,
+    rows: readonly InventoryReservation[],
+  ): Promise<Map<string, Location>> {
+    const sourceIds = [...new Set(rows.flatMap((row) => (row.sourceId ? [row.sourceId] : [])))];
+    if (sourceIds.length === 0) return new Map();
+
+    // Salto 1: los que ya son un pedido.
+    const orderOfSource = new Map<string, string>();
+    const orders = await manager.getRepository(InternalOrder).find({
+      select: { id: true, sourceLocationId: true },
+      where: { id: In(sourceIds), companyId },
+    });
+    for (const order of orders) orderOfSource.set(order.id, order.sourceLocationId);
+
+    // Salto 2: una venta, o la venta original de una devolución, que cobraba un pedido.
+    const returns = await manager.getRepository(SaleReturn).find({
+      select: { id: true, saleId: true },
+      where: { id: In(sourceIds), companyId },
+    });
+    const saleOfSource = new Map<string, string>(returns.map((saleReturn) => [saleReturn.id, saleReturn.saleId]));
+    const saleIds = [...new Set([...sourceIds, ...saleOfSource.values()])];
+    const sales = await manager.getRepository(Sale).find({
+      select: { id: true, internalOrderId: true },
+      where: { id: In(saleIds), companyId },
+    });
+    const orderOfSale = new Map<string, string>(
+      sales.flatMap((sale) => (sale.internalOrderId ? [[sale.id, sale.internalOrderId] as [string, string]] : [])),
+    );
+
+    // Salto 3: la bodega de esos pedidos.
+    const pendingOrderIds = [...new Set(orderOfSale.values())].filter((id) => !orderOfSource.has(id));
+    if (pendingOrderIds.length > 0) {
+      const more = await manager.getRepository(InternalOrder).find({
+        select: { id: true, sourceLocationId: true },
+        where: { id: In(pendingOrderIds), companyId },
+      });
+      for (const order of more) orderOfSource.set(order.id, order.sourceLocationId);
     }
-    return [...origins];
+
+    const locationOf = (sourceId: string): string | undefined => {
+      const direct = orderOfSource.get(sourceId);
+      if (direct) return direct;
+      const saleId = saleOfSource.get(sourceId) ?? sourceId;
+      const orderId = orderOfSale.get(saleId);
+      return orderId ? orderOfSource.get(orderId) : undefined;
+    };
+
+    // Solo bodegas activas: una sede desactivada (o una tienda, si el origen fue un traslado entre
+    // tiendas) no es un destino al que mandar un corredor.
+    const locationIds = [...new Set(sourceIds.flatMap((id) => { const at = locationOf(id); return at ? [at] : []; }))];
+    if (locationIds.length === 0) return new Map();
+    const warehouses = await manager.getRepository(Location).find({
+      where: { id: In(locationIds), companyId, type: LocationType.WAREHOUSE, status: RecordStatus.ACTIVE },
+    });
+    const byId = new Map(warehouses.map((warehouse) => [warehouse.id, warehouse]));
+
+    const result = new Map<string, Location>();
+    for (const sourceId of sourceIds) {
+      const at = locationOf(sourceId);
+      const warehouse = at ? byId.get(at) : undefined;
+      if (warehouse) result.set(sourceId, warehouse);
+    }
+    return result;
   }
 
   private async notifyAdmins(manager: EntityManager, companyId: string, storeId: string, origin: BinOrigin, total: Decimal, actorId: string): Promise<void> {

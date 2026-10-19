@@ -1,5 +1,5 @@
 import { UseGuards } from '@nestjs/common';
-import { Args, ID, Mutation, Query, Resolver } from '@nestjs/graphql';
+import { Args, ID, Mutation, Parent, Query, ResolveField, Resolver } from '@nestjs/graphql';
 import { DataSource } from 'typeorm';
 import type { CompanyAccess } from '../../common/access/company-access.js';
 import { assertVisibleLocation, visibleLocationIds } from '../../common/access/location-scope.js';
@@ -19,6 +19,7 @@ import type { JwtPayload } from '../auth/interface/jwt-payload.interface.js';
 import { CreateInventoryLocationInput } from './dto/create-inventory-location.input.js';
 import { InventoryLocationObjectType } from './dto/inventory-location.object-type.js';
 import { InventoryLocationType } from './entities/inventory-location-type.enum.js';
+import type { InventoryLocation } from './entities/inventory-location.entity.js';
 import { InventoryLocationService } from './inventory-location.service.js';
 
 @Resolver(() => InventoryLocationObjectType)
@@ -28,6 +29,14 @@ export class InventoryLocationResolver {
     private readonly inventoryLocationService: InventoryLocationService,
     private readonly dataSource: DataSource,
   ) {}
+
+  // Quién tiene encima lo que hay en este cajón: el corredor, en un RUNNER. Con esto Inventario
+  // nombra su bolsa en vez de mostrarla como una ubicación desconocida.
+  @ResolveField(() => String, { nullable: true })
+  custodianName(@Parent() inventoryLocation: InventoryLocation): string | null {
+    const custodian = inventoryLocation.custodianUser;
+    return custodian ? `${custodian.firstName} ${custodian.lastName}`.trim() : null;
+  }
 
   // Solo los cajones de las sedes que tiene asignadas quien consulta; el administrador, todos.
   @Query(() => [InventoryLocationObjectType])

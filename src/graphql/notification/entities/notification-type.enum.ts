@@ -40,6 +40,9 @@ export enum NotificationType {
   //   ORDER_RUNNER_CALLED      el corredor asignado: el vendedor pregunta por la orden
   //   ORDER_RUNNER_REPLIED     quien la pidió: el corredor responde dónde va
   //   ORDER_CORRECTION         corredores y bodega: llegó una referencia equivocada
+  //   ORDER_CANCELLED          bodega: se anuló una orden que ya había tomado (ver
+  //                            `InternalOrderService.cancel`). Una que nadie había tocado se anula
+  //                            sin avisar: no hay trabajo que parar.
   ORDER_REQUESTED = 'ORDER_REQUESTED',
   ORDER_READY_FOR_RUNNER = 'ORDER_READY_FOR_RUNNER',
   ORDER_DELIVERED = 'ORDER_DELIVERED',
@@ -49,6 +52,7 @@ export enum NotificationType {
   ORDER_RUNNER_CALLED = 'ORDER_RUNNER_CALLED',
   ORDER_RUNNER_REPLIED = 'ORDER_RUNNER_REPLIED',
   ORDER_CORRECTION = 'ORDER_CORRECTION',
+  ORDER_CANCELLED = 'ORDER_CANCELLED',
 }
 
 export const CHANNEL_OF_TYPE: Record<NotificationType, NotificationChannel> = {
@@ -81,4 +85,5 @@ export const CHANNEL_OF_TYPE: Record<NotificationType, NotificationChannel> = {
   [NotificationType.ORDER_RUNNER_CALLED]: NotificationChannel.ORDERS,
   [NotificationType.ORDER_RUNNER_REPLIED]: NotificationChannel.ORDERS,
   [NotificationType.ORDER_CORRECTION]: NotificationChannel.ORDERS,
+  [NotificationType.ORDER_CANCELLED]: NotificationChannel.ORDERS,
 };

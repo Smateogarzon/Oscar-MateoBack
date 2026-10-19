@@ -77,9 +77,13 @@ export class InternalOrder extends BaseEntity {
   @JoinColumn({ name: 'destinationLocationId' })
   destinationLocation: Location;
 
-  // Dónde, dentro del destino, lo entrega el corredor ("Probador #02", "Mostrador POS").
-  @Column({ type: 'varchar', length: 80, nullable: true })
-  deliveryPoint: string | null;
+  // Las órdenes nacidas de un mismo envío comparten este id. Lo que un vendedor pide puede estar
+  // repartido en varias bodegas, y entonces se crea una orden por bodega (ver
+  // `InternalOrderService.request`): el grupo es lo que permite volver a encontrarlas juntas. Una
+  // orden que nació sola también lo lleva; las anteriores a esto lo tienen en null.
+  @Index('IDX_internal_orders_requestGroupId')
+  @Column({ type: 'uuid', nullable: true })
+  requestGroupId: string | null;
 
   @Column({ type: 'uuid', nullable: true })
   requestedBy: string | null;
