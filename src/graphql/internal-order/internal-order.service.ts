@@ -1939,7 +1939,7 @@ export class InternalOrderService {
       }
       if (groups.size === 0) {
         throw new ConflictException(
-          'Nada de lo que marcaste salió de una bodega: eso se vendía directo en la tienda y se queda en el cajón',
+          'Nada de lo que marcaste tiene bodega a la que volver, así que se queda en el cajón: lo que la tienda vende directo nunca salió de una, y lo dañado espera a que se cierre su novedad',
         );
       }
 
@@ -1981,8 +1981,8 @@ export class InternalOrderService {
         await signalInternalOrderChange(manager, this.notifications, companyId, ret, actor.userId);
         orders.push(ret);
       }
-      // Si el cajón de la tienda quedó vacío, el aviso de que algo había llegado ahí ya no pide nada.
-      await this.returnsBin.settleNoticesIfEmpty(manager, companyId, store.id);
+      // Si en el cajón ya no queda nada que mandar a una bodega, su aviso deja de pedir algo.
+      await this.returnsBin.settleNoticesWhenNothingToSend(manager, companyId, store.id);
       return orders;
     });
   }

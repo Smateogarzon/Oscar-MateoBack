@@ -72,18 +72,26 @@ export class ReturnsBinService {
     }
   }
 
-  // El cajón de una tienda quedó vacío: lo que avisó que algo había llegado ahí ya no le pide nada al
-  // administrador, así que se marca leído (pasa a "Resueltas") para todos los que no lo abrieron. Si
-  // todavía queda algo en el cajón el aviso sigue pendiente: eso es justamente lo que falta por hacer.
-  // Lo llama quien saca cosas del cajón (`InternalOrderService.createReturnFromBin`), en su misma
-  // transacción.
-  async settleNoticesIfEmpty(manager: EntityManager, companyId: string, storeId: string): Promise<void> {
+  /**
+   * El aviso de "algo llegó al cajón" le pide UNA cosa al administrador: mandarlo a la bodega que lo
+   * despachó. Deja de pedirla cuando en el cajón ya no queda nada QUE SE PUEDA MANDAR, que no es lo
+   * mismo que cuando queda vacío.
+   *
+   * La diferencia no es teórica: lo que la tienda vende directo nunca salió de una bodega, así que no
+   * hay a dónde devolverlo y se queda en el cajón para siempre. Con la regla de "vacío", su aviso se
+   * quedaba pendiente para siempre también, pidiendo algo que nadie puede hacer. Lo dañado está en el
+   * mismo caso y además no lo necesita: lo apartó su propia novedad, que trae su aviso y su cierre.
+   *
+   * Lo llama quien saca cosas del cajón (`InternalOrderService.createReturnFromBin`), en su misma
+   * transacción.
+   */
+  async settleNoticesWhenNothingToSend(manager: EntityManager, companyId: string, storeId: string): Promise<void> {
     const stock = await this.inventoryLocations.findStockLocation(manager, companyId, storeId);
-    const left = await manager.getRepository(InventoryReservation).existsBy({
-      sourceType: InventorySourceType.RETURNS_BIN,
-      inventoryLocationId: stock.id,
+    const rows = await manager.getRepository(InventoryReservation).find({
+      where: { sourceType: InventorySourceType.RETURNS_BIN, inventoryLocationId: stock.id },
     });
-    if (left) return;
+    const warehouses = await this.originWarehouses(manager, companyId, rows);
+    if (rows.some((row) => row.sourceId && warehouses.has(row.sourceId))) return;
     await this.notifications.markEntityRead(manager, NotificationEntityType.RETURNS_BIN, storeId, [
       NotificationType.RETURNS_BIN_ADDED,
     ]);

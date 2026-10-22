@@ -1,17 +1,17 @@
 import { Brackets, type SelectQueryBuilder } from 'typeorm';
 import { PermissionCode } from '../../common/enums/permission-code.enum.js';
-import { InternalOrderStatus as S } from './entities/internal-order-status.enum.js';
 import type { InternalOrder } from './entities/internal-order.entity.js';
-import { FINAL_STATUSES, WAITING_RUNNER_STATUSES } from './internal-order-flow.js';
+import { WAITING_RUNNER_STATUSES } from './internal-order-flow.js';
 
 // Qué órdenes ve cada quien. Se decide por permisos (no por nombre de rol) y los alcances se suman
 // cuando alguien tiene varios:
 //   todas        orders.view_all, o el super admin.
-//   bodega       warehouse.fulfill_orders / warehouse.receive_returns: lo que pasa por sus manos en
-//                sus sedes (Configuración → Personal por ubicación). Lo que SALE de su bodega, siempre
-//                (lo pide, lo alista y lo despacha; lo despachado lo ve como cerrado para ella). Lo
-//                que LLEGA a su bodega (una devolución, un traslado), solo desde que el corredor lo
-//                entrega allí: mientras el corredor lo lleva no es asunto suyo.
+//   bodega       warehouse.fulfill_orders / warehouse.receive_returns: lo que pasa por sus sedes
+//                (Configuración → Personal por ubicación), SALGA de ellas o LLEGUE a ellas. Las dos
+//                bodegas de un traslado participan en él desde que se pide, así que las dos lo ven
+//                (acordado con el usuario, 2026-10-22). Antes, la de destino no lo veía hasta que el
+//                corredor se lo entregaba: se enteraba de que venía algo cuando ya estaba en la
+//                puerta. La que no es ni origen ni destino no lo ve: no participa.
 //   corredor     runner.pickup_orders / runner.confirm_delivery: las que tomó o lleva (o llevó), y
 //                las que esperan corredor sin tomar y salen de o llegan a sus sedes.
 //   solicitante  quien pide o recibe (vendedor), o quien no tiene ningún alcance de los anteriores
@@ -36,16 +36,6 @@ const WAREHOUSE_SCOPE: readonly string[] = [P.WAREHOUSE_FULFILL_ORDERS, P.WAREHO
 const RUNNER_SCOPE: readonly string[] = [P.RUNNER_PICKUP_ORDERS, P.RUNNER_CONFIRM_DELIVERY];
 const REQUESTER_SCOPE: readonly string[] = [P.ORDERS_REQUEST_FROM_WAREHOUSE, P.ORDERS_CONFIRM_RECEIPT];
 
-// Lo que llega a una bodega deja de estar en manos del corredor cuando la entrega allí: desde ahí
-// (verificar, recibir, cerrar) y una vez cerrado, es de la bodega.
-const ARRIVED_AT_WAREHOUSE: readonly S[] = [
-  S.DELIVERED_TO_WAREHOUSE,
-  S.RECEIVED_BY_WAREHOUSE,
-  S.DELIVERED_TO_DESTINATION,
-  S.RECEIVED_BY_DESTINATION,
-  ...FINAL_STATUSES,
-];
-
 export function visibilityOf(actor: VisibilityActor, locationIds: readonly string[]): OrderVisibility {
   const holds = (codes: readonly string[]) => codes.some((code) => actor.permissionCodes.includes(code));
   const all = actor.isSuperAdmin || actor.permissionCodes.includes(P.ORDERS_VIEW_ALL);
@@ -59,7 +49,7 @@ export function canSeeOrder(visibility: OrderVisibility, order: Pick<InternalOrd
   if (visibility.all) return true;
   const fromMine = visibility.locationIds.includes(order.sourceLocationId);
   const toMine = visibility.locationIds.includes(order.destinationLocationId);
-  if (visibility.warehouse && (fromMine || (toMine && ARRIVED_AT_WAREHOUSE.includes(order.status)))) return true;
+  if (visibility.warehouse && (fromMine || toMine)) return true;
   if (visibility.requester && (fromMine || toMine || order.requestedBy === visibility.userId)) return true;
   if (visibility.runner) {
     if (order.runnerId === visibility.userId) return true;
@@ -80,7 +70,7 @@ export function applyVisibility(query: SelectQueryBuilder<InternalOrder>, alias:
       // Una condición siempre falsa para poder sumar con OR lo que aplique.
       where.where('1 = 0');
       if (visibility.warehouse && hasLocations) {
-        where.orWhere(`(${fromMine} OR (${toMine} AND ${alias}.status IN (:...arrivedAtWarehouse)))`);
+        where.orWhere(`(${fromMine} OR ${toMine})`);
       }
       if (visibility.requester) {
         if (hasLocations) where.orWhere(`(${fromMine} OR ${toMine})`);
@@ -97,7 +87,6 @@ export function applyVisibility(query: SelectQueryBuilder<InternalOrder>, alias:
       visibleUserId: userId,
       visibleLocationIds: hasLocations ? locationIds : [null],
       waitingRunner: WAITING_RUNNER_STATUSES,
-      arrivedAtWarehouse: ARRIVED_AT_WAREHOUSE,
     },
   );
 }
