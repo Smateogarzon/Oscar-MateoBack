@@ -1350,7 +1350,7 @@ export class InternalOrderService {
         asked.map((line) => ({ productVariantId: line.productVariantId, quantity: new Decimal(line.quantity), notes: line.notes ?? null })),
       );
       if (added.some((line) => line.quantity.lessThanOrEqualTo(0))) throw new BadRequestException('La cantidad de cada referencia nueva debe ser mayor que cero');
-      if (added.length > 0) await this.assertNothingSoldDirect(manager, companyId, destination, added);
+      if (added.length > 0) await this.assertNotAlreadyInStore(manager, companyId, destination, added);
 
       const inWarehouse = !PICKED_UP_STATUSES.includes(order.status);
       const detail = describeEdit(removed.length, added.length);
