@@ -74,3 +74,43 @@ describe('de qué bodega sale cada línea de un pedido', () => {
     expect(planBySource([line('a', 1)], [...availability].reverse()).groups[0].locationId).toBe('norte');
   });
 });
+
+/**
+ * Un cambio de pedido es UNA sub-orden (lleva su propio consecutivo, su corredor y su recorrido, y
+ * al llegar absorbe a la original), así que no se puede partir entre bodegas como un pedido nuevo:
+ * tiene que salir entero de una. `InternalOrderService.dispatchFor` exige por eso que el plan traiga
+ * exactamente un grupo, y el vendedor ya no elige la bodega.
+ */
+describe('de qué bodega sale un cambio de pedido', () => {
+  const singleWarehouse = (plan: ReturnType<typeof planBySource>) => plan.missing.length === 0 && plan.groups.length === 1;
+
+  it('sale de la bodega que tiene todo lo que cambia', () => {
+    const plan = planBySource([line('a', 1), line('b', 1)], [at('norte', 'a', 5), at('norte', 'b', 5), at('sur', 'a', 5)]);
+
+    expect(singleWarehouse(plan)).toBe(true);
+    expect(plan.groups[0].locationId).toBe('norte');
+  });
+
+  // Repartido entre dos no sirve: ninguna puede despachar el cambio entero.
+  it('no vale si lo que cambia está repartido entre dos bodegas', () => {
+    const plan = planBySource([line('a', 1), line('b', 1)], [at('norte', 'a', 5), at('sur', 'b', 5)]);
+
+    expect(singleWarehouse(plan)).toBe(false);
+    expect(plan.groups).toHaveLength(2);
+  });
+
+  it('tampoco si lo que cambia no lo tiene nadie', () => {
+    const plan = planBySource([line('a', 1)], [at('norte', 'b', 5)]);
+
+    expect(singleWarehouse(plan)).toBe(false);
+    expect(plan.missing).toHaveLength(1);
+  });
+
+  // La bodega de donde salió la orden original no cuenta para nada: lo que manda es quién lo tiene.
+  it('no se queda con la bodega de origen si otra es la que lo tiene', () => {
+    const plan = planBySource([line('a', 2)], [at('norte', 'a', 1), at('sur', 'a', 4)]);
+
+    expect(singleWarehouse(plan)).toBe(true);
+    expect(plan.groups[0].locationId).toBe('sur');
+  });
+});

@@ -72,6 +72,23 @@ export class ReturnsBinService {
     }
   }
 
+  // El cajón de una tienda quedó vacío: lo que avisó que algo había llegado ahí ya no le pide nada al
+  // administrador, así que se marca leído (pasa a "Resueltas") para todos los que no lo abrieron. Si
+  // todavía queda algo en el cajón el aviso sigue pendiente: eso es justamente lo que falta por hacer.
+  // Lo llama quien saca cosas del cajón (`InternalOrderService.createReturnFromBin`), en su misma
+  // transacción.
+  async settleNoticesIfEmpty(manager: EntityManager, companyId: string, storeId: string): Promise<void> {
+    const stock = await this.inventoryLocations.findStockLocation(manager, companyId, storeId);
+    const left = await manager.getRepository(InventoryReservation).existsBy({
+      sourceType: InventorySourceType.RETURNS_BIN,
+      inventoryLocationId: stock.id,
+    });
+    if (left) return;
+    await this.notifications.markEntityRead(manager, NotificationEntityType.RETURNS_BIN, storeId, [
+      NotificationType.RETURNS_BIN_ADDED,
+    ]);
+  }
+
   // Cuánto tiene en el cajón un origen (para avisar solo cuando crece).
   async heldFor(manager: EntityManager, originId: string): Promise<Decimal> {
     const rows = await this.reservations.findForSource(manager, InventorySourceType.RETURNS_BIN, originId);

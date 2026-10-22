@@ -53,6 +53,15 @@ export enum NotificationType {
   ORDER_RUNNER_REPLIED = 'ORDER_RUNNER_REPLIED',
   ORDER_CORRECTION = 'ORDER_CORRECTION',
   ORDER_CANCELLED = 'ORDER_CANCELLED',
+  // Alguien reportó una novedad sobre una orden (producto dañado, faltante, problema al recoger o al
+  // entregar). Va a bodega y a quien la pidió —que son quienes trabajan la orden— y también al
+  // administrador, aunque sea del canal ORDERS: es el único que puede cerrarla (ver
+  // ADMIN_NOTIFICATION_TYPES), y lo dañado queda esperando que él decida qué hacer con ello.
+  ORDER_INCIDENT = 'ORDER_INCIDENT',
+  // El vendedor editó un pedido que bodega todavía tiene: quitó o agregó referencias. Hay que
+  // rehacer el alistamiento, y hasta que bodega lo vuelva a dejar listo ningún corredor se lo lleva
+  // (ver `InternalOrderService.editOrder`).
+  ORDER_EDITED = 'ORDER_EDITED',
 }
 
 export const CHANNEL_OF_TYPE: Record<NotificationType, NotificationChannel> = {
@@ -86,4 +95,6 @@ export const CHANNEL_OF_TYPE: Record<NotificationType, NotificationChannel> = {
   [NotificationType.ORDER_RUNNER_REPLIED]: NotificationChannel.ORDERS,
   [NotificationType.ORDER_CORRECTION]: NotificationChannel.ORDERS,
   [NotificationType.ORDER_CANCELLED]: NotificationChannel.ORDERS,
+  [NotificationType.ORDER_INCIDENT]: NotificationChannel.ORDERS,
+  [NotificationType.ORDER_EDITED]: NotificationChannel.ORDERS,
 };

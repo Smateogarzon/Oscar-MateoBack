@@ -72,6 +72,10 @@ export class InternalOrderObjectType extends BaseObjectType {
   @Field(() => ID, { nullable: true })
   relatedOrderId: string | null;
 
+  // Los consecutivos de los que viene lo que lleva una devolución; vacía en el resto.
+  @Field(() => [String])
+  originNumbers: string[];
+
   @Field(() => ID, { nullable: true })
   saleId: string | null;
 

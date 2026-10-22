@@ -15,6 +15,7 @@ import type { JwtPayload } from '../auth/interface/jwt-payload.interface.js';
 import { IncidentObjectType } from '../incident/dto/incident.object-type.js';
 import { LocationObjectType } from '../location/dto/location.object-type.js';
 import { InternalOrderChangeInput } from './dto/internal-order-change.input.js';
+import { EditInternalOrderInput } from './dto/edit-internal-order.input.js';
 import { InternalOrderItemObjectType } from './dto/internal-order-item.object-type.js';
 import {
   InternalOrderCorrectionObjectType,
@@ -150,6 +151,20 @@ export class InternalOrderResolver {
     @Args('input') input: InternalOrderChangeInput,
   ) {
     const order = await this.internalOrderService.requestChange(companyId, actorOf(user, access), input);
+    return this.internalOrderService.findView(companyId, order.id);
+  }
+
+  // El vendedor cambia lo que pidió mientras el pedido sigue vivo: quita referencias, agrega otras o
+  // las dos cosas. Lo que pasa con cada una depende de dónde esté la mercancía (ver `editOrder`).
+  @Mutation(() => InternalOrderObjectType)
+  @RequireAnyPermission(PermissionCode.ORDERS_CONFIRM_RECEIPT, PermissionCode.ORDERS_REQUEST_FROM_WAREHOUSE)
+  async editInternalOrder(
+    @CurrentCompanyId() companyId: string,
+    @CurrentUser() user: JwtPayload,
+    @CurrentCompanyAccess() access: CompanyAccess,
+    @Args('input') input: EditInternalOrderInput,
+  ) {
+    const order = await this.internalOrderService.editOrder(companyId, actorOf(user, access), input);
     return this.internalOrderService.findView(companyId, order.id);
   }
 
@@ -320,6 +335,15 @@ export class InternalOrderResolver {
   @ResolveField(() => String, { nullable: true })
   relatedOrderStatus(@Parent() order: InternalOrderView) {
     return order.relatedOrder?.status ?? null;
+  }
+
+  // De dónde viene lo que lleva una devolución. Se guarda al crearla (`originNumbers`); las que
+  // nacieron de un cambio de pedido tienen además su orden en `relatedOrder`, y se responde con esa
+  // aunque la columna venga vacía (devoluciones anteriores a que se guardara).
+  @ResolveField(() => [String])
+  originNumbers(@Parent() order: InternalOrderView): string[] {
+    if (order.originNumbers && order.originNumbers.length > 0) return order.originNumbers;
+    return order.relatedOrder ? [order.relatedOrder.orderNumber] : [];
   }
 
   @ResolveField(() => String, { nullable: true })

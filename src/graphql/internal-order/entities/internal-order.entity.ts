@@ -138,6 +138,12 @@ export class InternalOrder extends BaseEntity {
   @Column({ type: 'varchar', length: 500, nullable: true })
   notes: string | null;
 
+  // De qué documentos viene lo que lleva una devolución (RE): los consecutivos del pedido, la venta
+  // o la devolución de los que salió cada cosa. Una RE armada desde el cajón junta lo de varios, por
+  // eso es una lista. Vacía en todo lo que no es una RE.
+  @Column({ type: 'simple-array', nullable: true })
+  originNumbers: string[] | null;
+
   @Column({ type: 'timestamptz', nullable: true })
   cancelledAt: Date | null;
 

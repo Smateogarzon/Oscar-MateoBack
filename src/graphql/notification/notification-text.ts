@@ -128,6 +128,14 @@ const TEXTS: Record<
     message: (p) =>
       `${p.actorName} anuló la orden #${ref(p)}${p.locationName ? `, que estaba alistando ${p.locationName}` : ''}${p.notes ? `: ${p.notes}` : ''}.`,
   },
+  [NotificationType.ORDER_INCIDENT]: {
+    title: 'Novedad en un pedido',
+    message: (p) => `${p.actorName} reportó una novedad en la orden #${ref(p)}.`,
+  },
+  [NotificationType.ORDER_EDITED]: {
+    title: 'Pedido modificado',
+    message: (p) => `${p.actorName} cambió lo que pidió en la orden #${ref(p)}: hay que alistarla otra vez antes de que se la lleven.`,
+  },
   [NotificationType.INVENTORY_LOW_STOCK]: {
     title: 'Existencia baja',
     message: (p) => {
@@ -177,6 +185,8 @@ const TYPES_WITH_NOTES = new Set<NotificationType>([
   NotificationType.PURCHASE_ORDER_OVERAGE_REJECTED,
   NotificationType.ORDER_STOCK_QUESTION,
   NotificationType.ORDER_CORRECTION,
+  NotificationType.ORDER_INCIDENT,
+  NotificationType.ORDER_EDITED,
 ]);
 
 export function buildNotificationText(

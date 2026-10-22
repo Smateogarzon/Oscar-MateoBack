@@ -11,6 +11,7 @@ import { DocumentSequenceService } from '../document-sequence/document-sequence.
 import { runIdempotent } from '../idempotency/idempotency.js';
 import { IncidentStatus } from '../incident/entities/incident-status.enum.js';
 import { IncidentType } from '../incident/entities/incident-type.enum.js';
+import { ORDER_INCIDENT_ENTITY, ORDER_ITEM_INCIDENT_ENTITY } from './internal-order-entities.js';
 import { Incident } from '../incident/entities/incident.entity.js';
 import { InventoryLocationType } from '../inventory-location/entities/inventory-location-type.enum.js';
 import { LocationType } from '../location/entities/location-type.enum.js';
@@ -24,6 +25,7 @@ import { Sale } from '../sale/entities/sale.entity.js';
 import { UserLocationAccess } from '../user-location-access/entities/user-location-access.entity.js';
 import { User } from '../user/entities/user.entity.js';
 import type { InternalOrderChangeInput } from './dto/internal-order-change.input.js';
+import { EditInternalOrderInput } from './dto/edit-internal-order.input.js';
 import type { InternalOrderLineCountInput } from './dto/internal-order-line-count.input.js';
 import type { InternalOrdersFilterInput } from './dto/internal-orders-filter.input.js';
 import type { RequestInternalOrderInput } from './dto/request-internal-order.input.js';
@@ -56,7 +58,12 @@ import {
 import { formatInternalOrderNumber, INTERNAL_ORDER_SERIES } from './internal-order-number.js';
 import { InternalOrderStock, positionsOf, quantitiesOf, type VariantQuantities } from './internal-order-stock.js';
 import { applyVisibility, canSeeOrder, visibilityOf, type OrderVisibility } from './internal-order-visibility.js';
-import { notifyInternalOrder, signalInternalOrderChange } from './internal-order-watchers.js';
+import {
+  notifyInternalOrder,
+  settleCorrectionNotices,
+  settleInternalOrderNotices,
+  signalInternalOrderChange,
+} from './internal-order-watchers.js';
 
 // Quién hace la operación: sus permisos en la empresa activa (los del token ya resueltos), si es
 // super admin (lo puede todo, también hacer un paso por el corredor asignado) y si administra la
@@ -93,14 +100,34 @@ export const ORDER_INCIDENT_TYPES: readonly IncidentType[] = [
 
 export interface OrderIncidentReport {
   orderId: string;
-  itemId?: string;
+  /** Las líneas afectadas; vacío = la novedad es de toda la orden. */
+  itemIds?: string[];
   type: IncidentType;
   description: string;
 }
 
-// Con qué valores de entityType una novedad queda ligada a una orden o a una de sus líneas.
-export const ORDER_INCIDENT_ENTITY = 'INTERNAL_ORDER';
-export const ORDER_ITEM_INCIDENT_ENTITY = 'INTERNAL_ORDER_ITEM';
+// Qué novedades sacan del pedido la línea afectada: lo dañado y lo que no llegó dejan de ser parte
+// de lo que el pedido promete, así que el pedido sigue solo con lo que de verdad va a entregar. Las
+// otras dos (problema al recoger, problema en la entrega) son de toda la orden y no tocan líneas.
+const INCIDENT_REMOVES_LINE: readonly IncidentType[] = [IncidentType.DAMAGE, IncidentType.NOT_FOUND];
+
+// Mientras el corredor lleva la orden encima: la tomó y todavía no la ha entregado. Es hasta donde
+// puede reportar una novedad sobre ella (ver `assertCanReport`): en cuanto marca la entrega, lo que
+// pase después lo reporta quien la recibió.
+const CARRYING_STATUSES: readonly S[] = [...WAITING_RUNNER_STATUSES, S.IN_TRANSIT, S.IN_TRANSIT_TO_WAREHOUSE];
+
+// Estados en los que la mercancía va en la bolsa del corredor: la recogió y todavía nadie le ha
+// confirmado el recibo. Es lo que decide de dónde sale lo dañado (ver `setDamagedAside`).
+const IN_RUNNER_HANDS: readonly S[] = [
+  S.IN_TRANSIT,
+  S.IN_TRANSIT_TO_WAREHOUSE,
+  S.DELIVERED_TO_STORE,
+  S.DELIVERED_TO_WAREHOUSE,
+  S.DELIVERED_TO_DESTINATION,
+];
+
+// Se re-exportan para no cambiar a quien ya las importaba de aquí (ver internal-order-entities.ts).
+export { ORDER_INCIDENT_ENTITY, ORDER_ITEM_INCIDENT_ENTITY };
 
 const INCIDENT_TITLES: Partial<Record<IncidentType, string>> = {
   [IncidentType.NOT_FOUND]: 'Producto faltante',
@@ -873,8 +900,6 @@ export class InternalOrderService {
       await this.assertCanSee(manager, companyId, actor, order);
       await assertStoreAccess(manager, actor.userId, order.destinationLocationId);
       await this.assertNoOpenSale(manager, order);
-      const dispatch = await this.activeLocation(manager, companyId, input.sourceLocationId);
-      if (dispatch.type !== LocationType.WAREHOUSE) throw new BadRequestException(`${dispatch.name} no es una bodega`);
 
       if (order.status === S.DELIVERED_TO_STORE) {
         await this.handOver(manager, companyId, order, quantitiesOf(await this.currentItems(manager, order)), actor.userId);
@@ -911,6 +936,8 @@ export class InternalOrderService {
         });
       }
       if (outgoing.length === 0) throw new BadRequestException('Marca al menos una línea para cambiar');
+      // De qué bodega sale lo nuevo: lo decide lo que hay disponible, no el vendedor.
+      const dispatch = await this.dispatchFor(manager, companyId, input.sourceLocationId, incoming);
       // La sub-orden del cambio viaja con un corredor igual que la original: lo que ya está en la
       // tienda no entra por ahí. Un cliente que quiere cambiar su par por una camisa la paga en caja,
       // y la sub-orden se quedaría esperando a un corredor que no tiene nada que traer.
@@ -961,6 +988,211 @@ export class InternalOrderService {
       }
       return order;
     });
+  }
+
+  /**
+   * De qué bodega sale lo nuevo de un cambio de pedido. El vendedor ya no la elige: pide lo que el
+   * cliente quiere y el sistema busca dónde está, igual que en un pedido normal (ver `request`).
+   *
+   * Con una diferencia: un cambio es UNA sub-orden, así que tiene que salir entero de UNA bodega
+   * —no se puede partir en varias como un pedido nuevo—. `planBySource` ya se queda con la bodega
+   * que cubre más, así que basta con exigir que cubra todo; si no hay ninguna que lo tenga completo,
+   * se dice cuál falta en vez de dejar al vendedor adivinando bodega por bodega.
+   *
+   * Si llega una bodega explícita se respeta (compatibilidad): alguien que ya la eligió sigue
+   * funcionando igual.
+   */
+  private async dispatchFor(
+    manager: EntityManager,
+    companyId: string,
+    chosenId: string | undefined,
+    incoming: readonly NewLine[],
+  ): Promise<Location> {
+    if (chosenId) {
+      const chosen = await this.activeLocation(manager, companyId, chosenId);
+      if (chosen.type !== LocationType.WAREHOUSE) throw new BadRequestException(`${chosen.name} no es una bodega`);
+      return chosen;
+    }
+    const availability = await this.warehouseAvailability(manager, companyId, incoming.map((line) => line.productVariantId));
+    const plan = planBySource(incoming, availability);
+    const [first] = plan.groups;
+    if (plan.missing.length > 0 || plan.groups.length !== 1 || !first) {
+      const variants = await this.variantsById(manager, companyId, incoming.map((line) => line.productVariantId));
+      const short = plan.missing[0] ?? incoming[0];
+      throw new ConflictException(
+        `Ninguna bodega tiene junto todo lo que cambia el cliente: ${describeVariant(variants.get(short.productVariantId))} no alcanza. Pide las referencias por separado`,
+      );
+    }
+    return this.activeLocation(manager, companyId, first.locationId);
+  }
+
+  // ─── Editar un pedido en curso ────────────────────────────────────────────
+
+  /**
+   * El vendedor cambia lo que pidió, en cualquier momento: quita referencias, agrega otras, o las
+   * dos cosas. Nada se sobrescribe — el pedido pasa a una versión nueva y la anterior queda en su
+   * recorrido (acordado con el usuario, 2026-10-20).
+   *
+   * Lo que pasa con cada cosa depende de dónde esté la mercancía:
+   *
+   *   Todavía en bodega (nadie la ha recogido)
+   *     Lo que sale vuelve a estar disponible ahí mismo y lo que entra se suma al MISMO pedido: es
+   *     un solo viaje, y bodega todavía lo tiene en las manos. Se le avisa y, si ya lo había dejado
+   *     listo, vuelve a `PACKING`: así ningún corredor se lo lleva hasta que lo aliste otra vez
+   *     (`PICK_UP` solo sale de READY_FOR_RUNNER). Agregar exige que la bodega de origen tenga esa
+   *     referencia: es de ahí de donde va a salir el viaje.
+   *
+   *   Ya salió de bodega
+   *     Lo que sale se queda en el cajón de devoluciones de la tienda (como un cambio de pedido) y
+   *     lo que entra viene en una sub-orden que, al llegar, se funde con esta y es la que se cobra
+   *     (`absorbParent`). El pedido queda esperando esa sub-orden en ITEM_CHANGE_REQUESTED.
+   *
+   * Un pedido que se queda sin una sola referencia se anula con el motivo.
+   */
+  async editOrder(companyId: string, actor: OrderActor, input: EditInternalOrderInput): Promise<InternalOrder> {
+    if (!this.has(actor, [PermissionCode.ORDERS_CONFIRM_RECEIPT, PermissionCode.ORDERS_REQUEST_FROM_WAREHOUSE])) {
+      throw new ForbiddenException('No tienes permiso para cambiar un pedido');
+    }
+    return this.dataSource.transaction(async (manager) => {
+      const order = await this.lock(manager, companyId, input.orderId);
+      if (order.type !== InternalOrderType.SO) throw new ConflictException('Solo una orden de venta se edita');
+      if (isFinalStatus(order.status)) throw new ConflictException('La orden ya está cerrada');
+      await this.assertCanSee(manager, companyId, actor, order);
+      await this.assertNoOpenSale(manager, order);
+
+      const removeIds = [...new Set(input.removeItemIds ?? [])];
+      const asked = input.addLines ?? [];
+      if (removeIds.length === 0 && asked.length === 0) throw new BadRequestException('Quita o agrega al menos una referencia');
+
+      const current = await this.currentItems(manager, order);
+      const removed = current.filter((item) => removeIds.includes(item.id));
+      if (removed.length !== removeIds.length) throw new NotFoundException('Alguna línea no está en la versión vigente de la orden');
+      const kept = current.filter((item) => !removeIds.includes(item.id));
+
+      const destination = await this.activeLocation(manager, companyId, order.destinationLocationId);
+      const added = await this.pricedLines(
+        manager,
+        companyId,
+        InternalOrderType.SO,
+        asked.map((line) => ({ productVariantId: line.productVariantId, quantity: new Decimal(line.quantity), notes: line.notes ?? null })),
+      );
+      if (added.some((line) => line.quantity.lessThanOrEqualTo(0))) throw new BadRequestException('La cantidad de cada referencia nueva debe ser mayor que cero');
+      if (added.length > 0) await this.assertNothingSoldDirect(manager, companyId, destination, added);
+
+      const inWarehouse = !PICKED_UP_STATUSES.includes(order.status);
+      const detail = describeEdit(removed.length, added.length);
+
+      return inWarehouse
+        ? this.editInWarehouse(manager, companyId, order, kept, added, detail, actor.userId)
+        : this.editAfterPickup(manager, companyId, order, kept, removed, added, detail, actor.userId);
+    });
+  }
+
+  // Bodega todavía la tiene: lo que sale se queda ahí y lo que entra se suma a este mismo pedido.
+  private async editInWarehouse(
+    manager: EntityManager,
+    companyId: string,
+    order: InternalOrder,
+    kept: InternalOrderItem[],
+    added: NewLine[],
+    detail: string,
+    actorId: string,
+  ): Promise<InternalOrder> {
+    const lines = [...kept.map(lineOf), ...added];
+    await this.newVersion(manager, order, detail, lines, actorId);
+    if (lines.length === 0) {
+      await this.cancelEmptied(manager, companyId, order, detail, actorId);
+      return order;
+    }
+    // Lo apartado pasa a ser exactamente lo que ahora pide: si lo nuevo no alcanza en esta bodega,
+    // `reserveAt` lo dice con el nombre de la referencia y la edición entera se deshace.
+    await this.stock.reserveAt(manager, companyId, order, order.sourceLocationId, quantitiesOf(await this.currentItems(manager, order)), actorId);
+    // Lo que ya estaba alistado dejó de valer: vuelve a alistamiento, y así ningún corredor se lo
+    // lleva hasta que bodega lo deje listo otra vez.
+    if (order.status === S.READY_FOR_RUNNER) {
+      await this.setStatus(manager, order, S.PACKING, actorId, `${detail} · hay que alistarla otra vez`, order.sourceLocationId);
+    }
+    await notifyInternalOrder(manager, this.notifications, companyId, order, NotificationType.ORDER_EDITED, ['WAREHOUSE'], actorId, {
+      notes: detail,
+      locationId: order.sourceLocationId,
+    });
+    await signalInternalOrderChange(manager, this.notifications, companyId, order, actorId);
+    return order;
+  }
+
+  // Ya salió de bodega: lo que sale va al cajón de la tienda y lo que entra viene en una sub-orden.
+  private async editAfterPickup(
+    manager: EntityManager,
+    companyId: string,
+    order: InternalOrder,
+    kept: InternalOrderItem[],
+    removed: InternalOrderItem[],
+    added: NewLine[],
+    detail: string,
+    actorId: string,
+  ): Promise<InternalOrder> {
+    // Lo que sale deja de estar apartado para el pedido y se queda en el cajón de la tienda, a
+    // nombre del propio pedido: de ahí lo manda el administrador a la bodega que lo despachó.
+    if (removed.length > 0) {
+      await this.stock.release(manager, order.id);
+      await this.returnsBin.hold(manager, companyId, {
+        storeId: order.destinationLocationId,
+        origin: { id: order.id, number: order.orderNumber },
+        quantities: quantitiesOf(removed),
+        actorId,
+        notify: true,
+      });
+    }
+
+    const sub = added.length > 0 ? await this.createEditSubOrder(manager, companyId, order, added, detail, actorId) : null;
+
+    await this.newVersion(manager, order, detail, kept.map(lineOf), actorId);
+    if (kept.length === 0 && sub === null) {
+      await this.cancelEmptied(manager, companyId, order, detail, actorId);
+      return order;
+    }
+    await this.stock.reserveAt(manager, companyId, order, order.destinationLocationId, quantitiesOf(await this.currentItems(manager, order)), actorId);
+    // Con algo en camino, el pedido espera a su sub-orden: ella llega, se queda con lo que el
+    // cliente conserva y es la que pasa a caja. Sin nada en camino sigue su curso de siempre.
+    if (sub !== null) {
+      await this.setStatus(manager, order, S.ITEM_CHANGE_REQUESTED, actorId, `${detail} · llega en #${sub.orderNumber}`, order.destinationLocationId);
+      await signalInternalOrderChange(manager, this.notifications, companyId, sub, actorId);
+    }
+    await signalInternalOrderChange(manager, this.notifications, companyId, order, actorId);
+    return order;
+  }
+
+  // La sub-orden que trae lo que se agregó a un pedido que ya salió de bodega. Sale de la bodega que
+  // tenga todo lo nuevo (la elige el sistema, igual que un cambio de pedido) y viaja con prioridad
+  // alta: el cliente está esperando en la tienda.
+  private async createEditSubOrder(
+    manager: EntityManager,
+    companyId: string,
+    order: InternalOrder,
+    added: NewLine[],
+    detail: string,
+    actorId: string,
+  ): Promise<InternalOrder> {
+    const dispatch = await this.dispatchFor(manager, companyId, undefined, added);
+    const sub = await this.createOrder(manager, companyId, actorId, {
+      type: InternalOrderType.SO,
+      origin: order.origin,
+      priority: InternalOrderPriority.HIGH,
+      sourceLocationId: dispatch.id,
+      destinationLocationId: order.destinationLocationId,
+      requestGroupId: null,
+      requestedBy: order.requestedBy,
+      parentOrderId: order.id,
+      relatedOrderId: null,
+      notes: `Añadido a #${order.orderNumber}`,
+      reason: `Añadido a #${order.orderNumber}`,
+      createdDetail: `${detail} · ${added.length} ${added.length === 1 ? 'referencia' : 'referencias'} desde ${dispatch.name}`,
+      createdAt: order.destinationLocationId,
+      lines: added,
+    });
+    await this.stock.reserveAt(manager, companyId, sub, dispatch.id, quantitiesOf(await this.currentItems(manager, sub)), actorId);
+    await notifyInternalOrder(manager, this.notifications, companyId, sub, NotificationType.ORDER_REQUESTED, ['WAREHOUSE'], actorId);
+    return sub;
   }
 
   // ─── Retorno a bodega por error ────────────────────────────────────────────────────────────
@@ -1076,6 +1308,7 @@ export class InternalOrderService {
       correction.step += 1;
       await repo.save(correction);
       await this.addEvent(manager, order, InternalOrderEventKind.CORRECTION, actor.userId, stop.detail, stop.at);
+      if (correction.closedAt) await settleCorrectionNotices(manager, this.notifications, order.id);
       await signalInternalOrderChange(manager, this.notifications, companyId, order, actor.userId);
       return order;
     });
@@ -1149,6 +1382,10 @@ export class InternalOrderService {
       order.runnerId = actor.userId;
       await manager.getRepository(InternalOrder).save(order);
       await this.addEvent(manager, order, InternalOrderEventKind.NOTE, actor.userId, `${await this.nameOf(manager, actor.userId)} tomó la orden`, order.sourceLocationId);
+      // Ya tiene dueño: a los demás corredores el aviso de "lista para recoger" deja de pedirles
+      // nada. Hay que decirlo aquí porque tomarla no cambia el estado, que es lo que normalmente
+      // dispara la liquidación (ver `setStatus`).
+      await settleInternalOrderNotices(manager, this.notifications, order);
       await signalInternalOrderChange(manager, this.notifications, companyId, order, actor.userId);
       return order;
     });
@@ -1167,32 +1404,196 @@ export class InternalOrderService {
       const order = await this.lock(manager, companyId, input.orderId);
       await this.assertCanSee(manager, companyId, actor, order);
       if (isFinalStatus(order.status)) throw new ConflictException('La orden ya está cerrada');
-      const item = input.itemId ? (await this.currentItems(manager, order)).find((line) => line.id === input.itemId) : undefined;
-      if (input.itemId && !item) throw new NotFoundException(`Línea ${input.itemId} no está en la versión vigente de la orden`);
+      this.assertCanReport(actor, order);
+
+      const current = await this.currentItems(manager, order);
+      const removesLine = INCIDENT_REMOVES_LINE.includes(input.type);
+      const asked = [...new Set(input.itemIds ?? [])];
+      const chosen = current.filter((item) => asked.includes(item.id));
+      if (asked.length !== chosen.length) throw new NotFoundException('Alguna línea no está en la versión vigente de la orden');
+      // Una orden de una sola línea no pregunta cuál es: no hay nada que elegir.
+      const affected = chosen.length > 0 ? chosen : removesLine && current.length === 1 ? current : [];
+      if (removesLine && affected.length === 0) throw new BadRequestException('Elige qué producto tuvo la novedad');
 
       const title = `${INCIDENT_TITLES[input.type] ?? 'Novedad'} · #${order.orderNumber}`;
-      const repo = manager.getRepository(Incident);
-      await repo.save(
-        repo.create({
-          companyId,
-          type: input.type,
-          status: IncidentStatus.OPEN,
-          title,
-          description: text.slice(0, 500),
-          entityType: item ? ORDER_ITEM_INCIDENT_ENTITY : ORDER_INCIDENT_ENTITY,
-          entityId: item ? item.id : order.id,
-          // Antes de salir de bodega pasa en el origen; después, en el destino.
-          locationId: PICKED_UP_STATUSES.includes(order.status) ? order.destinationLocationId : order.sourceLocationId,
-          productVariantId: item?.productVariantId ?? null,
-          reportedBy: actor.userId,
-          resolvedBy: null,
-          resolvedAt: null,
-        }),
-      );
-      await this.addEvent(manager, order, InternalOrderEventKind.NOTE, actor.userId, `Novedad reportada · ${title} · ${text}`, order.destinationLocationId);
+      // Una novedad por línea afectada: el administrador decide referencia por referencia qué hacer
+      // con cada una, y cerrar una no da por cerradas las demás. Sin líneas, una sola de la orden.
+      const incidents = await this.openIncidents(manager, companyId, order, affected, input.type, title, text, actor.userId);
+
+      // La bitácora cuenta la historia en orden: primero lo que se reportó y después sus consecuencias
+      // (la versión sin esas líneas, la anulación si no queda ninguna). Dentro de una transacción
+      // todos los eventos quedan con la MISMA hora —`now()` en Postgres es la del inicio de la
+      // transacción—, así que lo único que los ordena es el orden en que se escriben.
+      const what = affected.length > 0 ? ` · ${affected.length} ${affected.length === 1 ? 'referencia' : 'referencias'}` : '';
+      await this.addEvent(manager, order, InternalOrderEventKind.NOTE, actor.userId, `Novedad reportada · ${title}${what} · ${text}`, order.destinationLocationId);
+
+      if (removesLine) {
+        if (input.type === IncidentType.DAMAGE) {
+          for (const [index, item] of affected.entries()) {
+            await this.setDamagedAside(manager, companyId, order, item, incidents[index].id, actor.userId);
+          }
+        }
+        await this.dropLines(manager, companyId, order, affected, title, actor.userId);
+      }
+      await notifyInternalOrder(manager, this.notifications, companyId, order, NotificationType.ORDER_INCIDENT, ['WAREHOUSE', 'REQUESTER'], actor.userId, {
+        notes: `${INCIDENT_TITLES[input.type] ?? 'Novedad'} · ${text}`,
+      });
       await signalInternalOrderChange(manager, this.notifications, companyId, order, actor.userId);
       return order;
     });
+  }
+
+  /**
+   * Quién puede reportar una novedad de ESTA orden, ahora.
+   *
+   * Bodega y quien recibe responden por ella de punta a punta, así que reportan mientras siga
+   * abierta. El corredor no: responde por ella mientras la lleva, y al marcar la entrega deja de ser
+   * asunto suyo (acordado con el usuario, 2026-10-20). Antes bastaba con tener el permiso, así que un
+   * corredor podía reportar sobre pedidos ya entregados y sobre otros que nunca tocó.
+   */
+  private assertCanReport(actor: OrderActor, order: InternalOrder): void {
+    if (this.has(actor, [PermissionCode.ORDERS_CONFIRM_RECEIPT, PermissionCode.WAREHOUSE_FULFILL_ORDERS])) return;
+    if (order.runnerId === actor.userId && CARRYING_STATUSES.includes(order.status)) return;
+    throw new ForbiddenException('Solo puedes reportar novedades de una orden mientras la llevas');
+  }
+
+  // Abre la novedad de cada línea afectada (o una sola de la orden, si no hay líneas). Devuelve las
+  // novedades en el mismo orden que `affected`, para poder atar a cada una lo que se aparta por ella.
+  private async openIncidents(
+    manager: EntityManager,
+    companyId: string,
+    order: InternalOrder,
+    affected: readonly InternalOrderItem[],
+    type: IncidentType,
+    title: string,
+    description: string,
+    actorId: string,
+  ): Promise<Incident[]> {
+    const repo = manager.getRepository(Incident);
+    // Antes de salir de bodega pasa en el origen; después, en el destino.
+    const locationId = PICKED_UP_STATUSES.includes(order.status) ? order.destinationLocationId : order.sourceLocationId;
+    const base = {
+      companyId,
+      type,
+      status: IncidentStatus.OPEN,
+      title,
+      description: description.slice(0, 500),
+      locationId,
+      reportedBy: actorId,
+      resolvedBy: null,
+      resolvedAt: null,
+    };
+    if (affected.length === 0) {
+      const incident = await repo.save(
+        repo.create({ ...base, entityType: ORDER_INCIDENT_ENTITY, entityId: order.id, productVariantId: null }),
+      );
+      return [incident];
+    }
+    const opened: Incident[] = [];
+    for (const item of affected) {
+      opened.push(
+        await repo.save(
+          repo.create({
+            ...base,
+            // El título lleva de qué referencia es: la línea sale del pedido (ver `dropLines`), así
+            // que quien mire la novedad después ya no la encuentra entre las líneas vigentes.
+            title: `${title} · ${describeVariant(item.productVariant)}`.slice(0, 150),
+            entityType: ORDER_ITEM_INCIDENT_ENTITY,
+            entityId: item.id,
+            productVariantId: item.productVariantId,
+          }),
+        ),
+      );
+    }
+    return opened;
+  }
+
+  /**
+   * Dónde queda lo dañado, según dónde esté la mercancía cuando se reporta (acordado con el usuario,
+   * 2026-10-20):
+   *   · todavía en el origen → se queda ahí; basta con que deje de estar apartada para la orden, y de
+   *     eso se encarga `dropLines` al volver a apartar solo lo que queda;
+   *   · con el corredor      → la baja en la tienda y queda en su cajón de devoluciones;
+   *   · ya en el destino     → pasa de la existencia de la tienda a su cajón.
+   *
+   * Lo que queda en el cajón se aparta a nombre de SU NOVEDAD, no de la orden: así no se lo lleva una
+   * RE junto con todo lo demás (`createReturnFromBin` solo manda lo que sabe de qué bodega salió), que
+   * es justo lo que no debe pasar — esta referencia la decide el administrador una por una.
+   */
+  private async setDamagedAside(
+    manager: EntityManager,
+    companyId: string,
+    order: InternalOrder,
+    item: InternalOrderItem,
+    incidentId: string,
+    actorId: string,
+  ): Promise<void> {
+    if (!PICKED_UP_STATUSES.includes(order.status)) return;
+    const quantities = quantitiesOf([item]);
+    if (quantities.size === 0) return;
+
+    if (IN_RUNNER_HANDS.includes(order.status)) {
+      if (!order.runnerId) throw new ConflictException('Esta orden no tiene corredor');
+      await this.stock.fromRunner(manager, companyId, order, order.runnerId, quantities, 'STOCK', actorId);
+    }
+    await this.returnsBin.hold(manager, companyId, {
+      storeId: order.destinationLocationId,
+      origin: { id: incidentId, number: order.orderNumber },
+      quantities,
+      actorId,
+      // El aviso de la novedad ya le llega al administrador con el porqué: no hace falta otro.
+      notify: false,
+    });
+  }
+
+  // Saca del pedido las líneas afectadas: nueva versión con lo que queda y se vuelve a apartar solo
+  // eso. Un pedido que se queda sin nada que traer se anula con el motivo.
+  private async dropLines(
+    manager: EntityManager,
+    companyId: string,
+    order: InternalOrder,
+    affected: readonly InternalOrderItem[],
+    reason: string,
+    actorId: string,
+  ): Promise<void> {
+    const dropped = new Set(affected.map((item) => item.id));
+    const kept = (await this.currentItems(manager, order)).filter((item) => !dropped.has(item.id));
+    await this.newVersion(manager, order, `${reason} · fuera del pedido`, kept.map(lineOf), actorId);
+    if (kept.length === 0) {
+      await this.cancelEmptied(manager, companyId, order, reason, actorId);
+      return;
+    }
+    // Lo apartado vuelve a ser solo lo que queda, y donde la orden lo tenga apartado: en el origen
+    // hasta que la recogen, en el destino una vez recibida. Mientras va en la bolsa del corredor no
+    // hay nada apartado en ninguna sede (se soltó al recoger) y la mercancía no está en ningún STOCK:
+    // volver a apartarla ahí fallaría por falta de existencia.
+    if (IN_RUNNER_HANDS.includes(order.status)) return;
+    const at = PICKED_UP_STATUSES.includes(order.status) ? order.destinationLocationId : order.sourceLocationId;
+    await this.stock.reserveAt(manager, companyId, order, at, quantitiesOf(await this.currentItems(manager, order)), actorId);
+  }
+
+  // El pedido se quedó sin una sola línea: ya no hay nada que alistar, llevar ni cobrar, así que se
+  // anula dejando dicho por qué. Si bodega lo tenía en las manos se le avisa, con la misma regla que
+  // una anulación a mano (ver `cancel`).
+  private async cancelEmptied(
+    manager: EntityManager,
+    companyId: string,
+    order: InternalOrder,
+    reason: string,
+    actorId: string,
+  ): Promise<void> {
+    const from = order.status;
+    await this.stock.release(manager, order.id);
+    order.cancelledAt = new Date();
+    order.cancelledBy = actorId;
+    order.cancellationReason = `Sin referencias · ${reason}`.slice(0, 500);
+    await this.setStatus(manager, order, S.CANCELLED, actorId, `Orden anulada · se quedó sin referencias · ${reason}`, null);
+    if (order.type === InternalOrderType.SO && PACKED_STATUSES.includes(from)) {
+      await notifyInternalOrder(manager, this.notifications, companyId, order, NotificationType.ORDER_CANCELLED, ['WAREHOUSE'], actorId, {
+        notes: order.cancellationReason,
+        locationId: order.sourceLocationId,
+      });
+    }
   }
 
   // ─── Cajón de devoluciones ─────────────────────────────────────────────────────────────────
@@ -1257,6 +1658,7 @@ export class InternalOrderService {
           requestedBy: actor.userId,
           parentOrderId: null,
           relatedOrderId: null,
+          originNumbers: origins,
           notes: `Cajón de devoluciones de ${store.name}${origins.length > 0 ? ` · ${origins.map((number) => `#${number}`).join(', ')}` : ''}`.slice(0, 500),
           reason: `Cajón de devoluciones de ${store.name}`,
           createdDetail: `Devolución creada desde el cajón de ${store.name} hacia ${warehouse.name}, que la despachó${groups.size > 1 ? ' · el cajón se repartió entre varias bodegas' : ''}`,
@@ -1271,6 +1673,8 @@ export class InternalOrderService {
         await signalInternalOrderChange(manager, this.notifications, companyId, ret, actor.userId);
         orders.push(ret);
       }
+      // Si el cajón de la tienda quedó vacío, el aviso de que algo había llegado ahí ya no pide nada.
+      await this.returnsBin.settleNoticesIfEmpty(manager, companyId, store.id);
       return orders;
     });
   }
@@ -1409,6 +1813,8 @@ export class InternalOrderService {
       requestedBy: string | null;
       parentOrderId: string | null;
       relatedOrderId: string | null;
+      // De qué documentos viene lo que lleva (solo una RE).
+      originNumbers?: string[];
       notes: string | null;
       reason: string;
       createdDetail: string;
@@ -1440,6 +1846,7 @@ export class InternalOrderService {
         receivedBy: null,
         parentOrderId: data.parentOrderId,
         relatedOrderId: data.relatedOrderId,
+        originNumbers: data.originNumbers ?? null,
         saleId: null,
         notes: data.notes,
         cancelledAt: null,
@@ -1504,6 +1911,10 @@ export class InternalOrderService {
     order.statusChangedAt = new Date();
     await manager.getRepository(InternalOrder).save(order);
     await this.addEvent(manager, order, InternalOrderEventKind.STATUS, actorId, detail, locationId, { from, to });
+    // El paso que pedían los avisos del estado anterior ya lo dio alguien: dejan de estar pendientes
+    // para todos los que no los abrieron. Va aquí, antes de que el paso deje su propio aviso, para
+    // que el nuevo no se liquide junto con los viejos.
+    await settleInternalOrderNotices(manager, this.notifications, order);
   }
 
   private async addEvent(
@@ -1781,4 +2192,12 @@ function mergeLines(items: { productVariantId: string; quantity: string; notes?:
 function describeVariant(variant: ProductVariant | undefined): string {
   if (!variant) return 'otra referencia';
   return `${variant.product?.name ?? ''} ${variant.color?.name ?? ''} / ${variant.size?.name ?? ''}`.trim();
+}
+
+// Lo que dice una edición del pedido en la bitácora y en el aviso a bodega.
+function describeEdit(removed: number, added: number): string {
+  const parts: string[] = [];
+  if (removed > 0) parts.push(`${removed} ${removed === 1 ? 'referencia quitada' : 'referencias quitadas'}`);
+  if (added > 0) parts.push(`${added} ${added === 1 ? 'referencia agregada' : 'referencias agregadas'}`);
+  return `Pedido modificado · ${parts.join(' y ')}`;
 }
