@@ -8,7 +8,6 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { Decimal } from 'decimal.js';
 import { DataSource, EntityManager, In, Repository } from 'typeorm';
-import { isDirectLine } from '../../common/access/direct-sale.js';
 import { assertStoreAccess } from '../../common/access/store-access.js';
 import { RecordStatus } from '../../common/enums/record-status.enum.js';
 import { MAX_AMOUNT } from '../../common/utils/money.js';
@@ -510,37 +509,11 @@ export class SaleService {
         reservedBy,
       },
       desired,
-      await this.storeHeldVariants(manager, companyId, sale, [...desired.keys()]),
+      // Todo sale del cajón de la tienda que vende: lo que no esté ahí no se cobra, se pide a
+      // bodega (ver InventoryBalanceService.findStockLocationForSale). Antes había que decirle
+      // línea por línea cuál era "de la tienda"; ahora lo son todas.
+      sale.storeId,
     );
-  }
-
-  /**
-   * Qué variantes de la venta se apartan en el STOCK de la tienda que vende, en vez de en "la bodega
-   * que más tenga" (variante → cajón de esa tienda). Son dos casos:
-   *   · la venta cobra una orden de venta (SO): todo, porque el corredor ya trajo la mercancía ahí;
-   *   · la venta es directa: lo que vive en la tienda y no pasa por corredor (ver `isDirectLine`) —
-   *     la ropa de una tienda mixta, o todo en una tienda sin corredores.
-   * Si no hay ninguna, no se busca el cajón de la tienda: una tienda que nunca vende directo no
-   * necesita tenerlo.
-   */
-  private async storeHeldVariants(
-    manager: EntityManager,
-    companyId: string,
-    sale: Sale,
-    productVariantIds: readonly string[],
-  ): Promise<ReadonlyMap<string, string>> {
-    if (productVariantIds.length === 0) return new Map();
-    const fromStore = sale.internalOrderId
-      ? productVariantIds
-      : (
-          await Promise.all(
-            productVariantIds.map(async (id) => ((await isDirectLine(manager, companyId, sale.storeId, id)) ? id : null)),
-          )
-        ).filter((id): id is string => id !== null);
-    if (fromStore.length === 0) return new Map();
-
-    const stockLocation = await this.inventoryLocations.findStockLocation(manager, companyId, sale.storeId);
-    return new Map(fromStore.map((id) => [id, stockLocation.id]));
   }
 
   // La caja abre el cobro de una orden de venta (SO) que el vendedor dejó pendiente de pago: un

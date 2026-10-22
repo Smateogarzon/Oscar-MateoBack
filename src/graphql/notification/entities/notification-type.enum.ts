@@ -18,6 +18,10 @@ export enum NotificationType {
   // encima a estar en o por debajo, no en cada movimiento siguiente mientras siga baja (ver
   // InventoryMovementService.maybeNotifyLowStock).
   INVENTORY_LOW_STOCK = 'INVENTORY_LOW_STOCK',
+  // Se vendió algo del mostrador de una tienda y no hay con qué reponerlo: ninguna bodega tiene esa
+  // talla ni otra del mismo modelo. Le llega al administrador del punto para que escoja qué surtir
+  // (ver InternalOrderService.restockStore).
+  DISPLAY_RESTOCK_NEEDED = 'DISPLAY_RESTOCK_NEEDED',
   // Compras (ver purchase-order-watchers.ts): quién recibe cada uno está en esa tabla, no aquí.
   PURCHASE_ORDER_SENT = 'PURCHASE_ORDER_SENT',
   PURCHASE_ORDER_OVERAGE_PENDING = 'PURCHASE_ORDER_OVERAGE_PENDING',
@@ -77,6 +81,7 @@ export const CHANNEL_OF_TYPE: Record<NotificationType, NotificationChannel> = {
   [NotificationType.RETURN_CANCELLED]: NotificationChannel.RETURNS,
   [NotificationType.RETURNS_BIN_ADDED]: NotificationChannel.RETURNS,
   [NotificationType.INVENTORY_LOW_STOCK]: NotificationChannel.INVENTORY,
+  [NotificationType.DISPLAY_RESTOCK_NEEDED]: NotificationChannel.INVENTORY,
   [NotificationType.PURCHASE_ORDER_SENT]: NotificationChannel.PURCHASING,
   [NotificationType.PURCHASE_ORDER_OVERAGE_PENDING]: NotificationChannel.PURCHASING,
   [NotificationType.PURCHASE_ORDER_SHIPPED]: NotificationChannel.PURCHASING,

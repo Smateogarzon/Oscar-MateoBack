@@ -123,17 +123,17 @@ export class InventoryReservationService {
   // vez que cambian las líneas de una venta en curso, así lo reservado y lo que se va a cobrar nunca
   // se separan.
   //
-  // Por defecto la bodega la elige `findStockLocationForSale` (la que más disponible tenga). `preferred`
-  // (variante → cajón) manda sobre eso para las variantes que estén en él, y se decide línea por línea
-  // porque en una misma venta pueden convivir las dos cosas: una venta que cobra una orden de venta
-  // (SO) aparta todo en el STOCK de la tienda a la que el corredor ya trajo la mercancía, y una venta
-  // directa aparta ahí lo que vive en la tienda (la ropa) mientras lo demás sale de la bodega.
+  // Todo se aparta en el cajón de la tienda que vende, y lo resuelve `findStockLocationForSale`, que
+  // es también quien rechaza lo que esa tienda no tiene. Antes se llamaba sin saber dónde se estaba
+  // vendiendo y entonces apartaba "donde más hubiera" —incluso en otra tienda—; hoy lo que no está
+  // en la tienda no se cobra, se pide a bodega (ver InventoryBalanceService.findStockLocationForSale).
   async syncForSource(
     manager: EntityManager,
     companyId: string,
     source: ReservationSourceInfo,
     desired: Map<string, Decimal>,
-    preferred: ReadonlyMap<string, string> = new Map(),
+    /** La tienda que vende: de su cajón sale todo lo de este documento. */
+    storeId: string,
   ): Promise<void> {
     const repo = manager.getRepository(InventoryReservation);
     const existing = await repo.findBy({ sourceType: source.sourceType, sourceId: source.sourceId });
@@ -157,9 +157,13 @@ export class InventoryReservationService {
     }
 
     for (const [productVariantId, quantity] of pending) {
-      const inventoryLocationId =
-        preferred.get(productVariantId) ??
-        (await this.balances.findStockLocationForSale(manager, companyId, productVariantId, quantity));
+      const inventoryLocationId = await this.balances.findStockLocationForSale(
+        manager,
+        companyId,
+        productVariantId,
+        quantity,
+        storeId,
+      );
       await this.reserveInTransaction(manager, companyId, {
         productVariantId,
         inventoryLocationId,

@@ -49,6 +49,7 @@ function createService() {
 }
 
 const COMPANY = 'company-1';
+const STORE = 'store-1';
 const USER = 'user-1';
 const SALE = { sourceType: InventorySourceType.SALE, sourceId: 'sale-1', reservedBy: USER };
 
@@ -170,16 +171,17 @@ describe('InventoryReservationService', () => {
   // Lo que mantiene a la venta y lo apartado siempre iguales: es lo que bloquea el último par para el
   // vendedor que lo tomó primero.
   describe('syncForSource', () => {
-    it('reserves what the document asks for, at the location with the most available', async () => {
+    it('reserves what the document asks for, in the bin of the store that is selling', async () => {
       const { service, manager, txReservationRepo, balances } = createService();
 
-      await service.syncForSource(manager as never, COMPANY, SALE, new Map([['variant-1', new Decimal('2')]]));
+      await service.syncForSource(manager as never, COMPANY, SALE, new Map([['variant-1', new Decimal('2')]]), STORE);
 
       expect(balances.findStockLocationForSale).toHaveBeenCalledWith(
         manager,
         COMPANY,
         'variant-1',
         expect.any(Decimal),
+        STORE,
       );
       expect(txReservationRepo.create).toHaveBeenCalledWith(
         expect.objectContaining({ productVariantId: 'variant-1', inventoryLocationId: 'inv-loc-1', reservedBy: USER }),
@@ -192,7 +194,7 @@ describe('InventoryReservationService', () => {
         { id: 'res-1', productVariantId: 'variant-1', quantity: new Decimal('2') },
       ]);
 
-      await service.syncForSource(manager as never, COMPANY, SALE, new Map([['variant-1', new Decimal('2')]]));
+      await service.syncForSource(manager as never, COMPANY, SALE, new Map([['variant-1', new Decimal('2')]]), STORE);
 
       expect(txReservationRepo.remove).not.toHaveBeenCalled();
       expect(txReservationRepo.save).not.toHaveBeenCalled();
@@ -204,7 +206,7 @@ describe('InventoryReservationService', () => {
         { id: 'res-1', productVariantId: 'variant-1', quantity: new Decimal('2') },
       ]);
 
-      await service.syncForSource(manager as never, COMPANY, SALE, new Map([['variant-1', new Decimal('5')]]));
+      await service.syncForSource(manager as never, COMPANY, SALE, new Map([['variant-1', new Decimal('5')]]), STORE);
 
       expect(txReservationRepo.remove).toHaveBeenCalledWith([expect.objectContaining({ id: 'res-1' })]);
       expect(txReservationRepo.create.mock.calls[0][0].quantity.toFixed(2)).toBe('5.00');
@@ -216,7 +218,7 @@ describe('InventoryReservationService', () => {
         { id: 'res-1', productVariantId: 'variant-1', quantity: new Decimal('2') },
       ]);
 
-      await service.syncForSource(manager as never, COMPANY, SALE, new Map());
+      await service.syncForSource(manager as never, COMPANY, SALE, new Map(), STORE);
 
       expect(txReservationRepo.remove).toHaveBeenCalledWith([expect.objectContaining({ id: 'res-1' })]);
       expect(txReservationRepo.save).not.toHaveBeenCalled();
@@ -225,7 +227,7 @@ describe('InventoryReservationService', () => {
     it('adds up several lines of the same variant into one reservation', async () => {
       const { service, manager, txReservationRepo } = createService();
 
-      await service.syncForSource(manager as never, COMPANY, SALE, new Map([['variant-1', new Decimal('3')]]));
+      await service.syncForSource(manager as never, COMPANY, SALE, new Map([['variant-1', new Decimal('3')]]), STORE);
 
       expect(txReservationRepo.save).toHaveBeenCalledTimes(1);
       expect(txReservationRepo.create.mock.calls[0][0].quantity.toFixed(2)).toBe('3.00');

@@ -42,6 +42,10 @@ const ADMIN_NOTIFICATION_CHANNELS: readonly NotificationChannel[] = [
   NotificationChannel.PURCHASING,
   NotificationChannel.DISCOUNTS,
   NotificationChannel.RETURNS,
+  // Inventario entra porque sus avisos son justamente para quien administra: la existencia que
+  // cruzó su mínimo y el mostrador que se quedó sin con qué reponerse. Sin esto se filtraban todos
+  // sus destinatarios y el aviso no le llegaba a nadie.
+  NotificationChannel.INVENTORY,
 ];
 
 // Avisos sueltos que sí son del administrador aunque su canal no lo sea. La regla de arriba es por

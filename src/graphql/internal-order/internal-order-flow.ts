@@ -146,6 +146,11 @@ export const FINAL_STATUSES: readonly S[] = [
 
 export const isFinalStatus = (status: S): boolean => FINAL_STATUSES.includes(status);
 
+// Una orden deja de estar "en camino" cuando termina o cuando el destino ya la recibió: desde ese
+// momento su mercancía ya está sumada en la existencia de la sede, y volver a contarla haría creer
+// que viene el doble. Lo usan "Qué surtir" y la reposición automática.
+export const NOT_ON_THE_WAY_STATUSES: readonly S[] = [...FINAL_STATUSES, S.RECEIVED_BY_STORE, S.RECEIVED_BY_DESTINATION];
+
 // Bodega ya tomó la orden: hay trabajo hecho y mercancía separada en el muelle. Anular desde aquí
 // le avisa (no así desde NEW, que nadie la había tocado).
 export const PACKED_STATUSES: readonly S[] = [S.ACCEPTED_BY_WAREHOUSE, S.PACKING, S.READY_FOR_RUNNER];

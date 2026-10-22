@@ -76,6 +76,7 @@ export const AUDITABLE_ENTITIES: ReadonlySet<Function> = new Set<Function>([
   Incident,
   InventoryReservation,
   InventoryLocation,
+  StoreModelMinimum,
 ]);
 
 // Nunca se guarda su valor real, así haya cambiado: ni en old_values ni en new_values.

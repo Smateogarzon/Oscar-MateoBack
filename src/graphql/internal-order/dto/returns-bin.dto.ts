@@ -58,3 +58,9 @@ export class CreateReturnFromBinInput {
   @IsUUID(undefined, { each: true })
   productVariantIds: string[];
 }
+
+// Dejar en el mostrador lo del cajón de una tienda: las mismas referencias, la otra salida. Va TODO
+// lo que el cajón tenga de ellas, igual que al mandarlas a bodega (ver
+// `InternalOrderService.keepBinInStore`).
+@InputType()
+export class KeepBinInStoreInput extends CreateReturnFromBinInput {}

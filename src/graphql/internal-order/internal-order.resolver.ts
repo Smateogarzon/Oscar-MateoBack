@@ -1,5 +1,5 @@
 import { UseGuards } from '@nestjs/common';
-import { Args, ID, Mutation, Parent, Query, ResolveField, Resolver } from '@nestjs/graphql';
+import { Args, ID, Int, Mutation, Parent, Query, ResolveField, Resolver } from '@nestjs/graphql';
 import { isCompanyAdmin, type CompanyAccess } from '../../common/access/company-access.js';
 import { CurrentCompanyAccess, CurrentCompanyId } from '../../common/decorators/current-company.decorator.js';
 import { CurrentUser } from '../../common/decorators/current-user.decorator.js';
@@ -27,7 +27,7 @@ import {
 import { InternalOrdersFilterInput } from './dto/internal-orders-filter.input.js';
 import { ReportInternalOrderIncidentInput } from './dto/report-internal-order-incident.input.js';
 import { RequestInternalOrderInput } from './dto/request-internal-order.input.js';
-import { CreateReturnFromBinInput, ReturnsBinLineObjectType } from './dto/returns-bin.dto.js';
+import { CreateReturnFromBinInput, KeepBinInStoreInput, ReturnsBinLineObjectType } from './dto/returns-bin.dto.js';
 import { TransitionInternalOrderInput } from './dto/transition-internal-order.input.js';
 import { InternalOrderNudge } from './entities/internal-order-nudge.enum.js';
 import { InternalOrderService, type InternalOrderView, type OrderActor } from './internal-order.service.js';
@@ -241,6 +241,19 @@ export class InternalOrderResolver {
   ) {
     const orders = await this.internalOrderService.createReturnFromBin(companyId, actorOf(user, access), input);
     return Promise.all(orders.map((order) => this.internalOrderService.findView(companyId, order.id)));
+  }
+
+  // La otra salida del cajón: lo revisado se queda en el mostrador de esa tienda y vuelve a estar a
+  // la venta. Devuelve cuántas entradas del cajón salieron.
+  @Mutation(() => Int)
+  @RequireCompanyMembership()
+  keepBinInStore(
+    @CurrentCompanyId() companyId: string,
+    @CurrentUser() user: JwtPayload,
+    @CurrentCompanyAccess() access: CompanyAccess,
+    @Args('input') input: KeepBinInStoreInput,
+  ) {
+    return this.internalOrderService.keepBinInStore(companyId, actorOf(user, access), input);
   }
 
   // El corredor responde dónde va (a "Contactar al corredor").

@@ -136,6 +136,13 @@ const TEXTS: Record<
     title: 'Pedido modificado',
     message: (p) => `${p.actorName} cambió lo que pidió en la orden #${ref(p)}: hay que alistarla otra vez antes de que se la lleven.`,
   },
+  [NotificationType.DISPLAY_RESTOCK_NEEDED]: {
+    title: 'Sin con qué surtir el mostrador',
+    message: (p) => {
+      const where = p.locationName ? ` en ${p.locationName}` : '';
+      return `${p.actorName} vendió ${p.reference ?? 'una referencia'}${where} y ninguna bodega tiene esa talla ni otra del mismo modelo: escoge qué surtir.`;
+    },
+  },
   [NotificationType.INVENTORY_LOW_STOCK]: {
     title: 'Existencia baja',
     message: (p) => {
