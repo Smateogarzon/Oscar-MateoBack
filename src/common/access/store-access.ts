@@ -1,5 +1,5 @@
 import { ForbiddenException } from '@nestjs/common';
-import type { EntityManager } from 'typeorm';
+import { In, type EntityManager } from 'typeorm';
 import { UserCompanyRole } from '../../graphql/user-company-role/entities/user-company-role.entity.js';
 import { UserLocationAccess } from '../../graphql/user-location-access/entities/user-location-access.entity.js';
 import { RecordStatus } from '../enums/record-status.enum.js';
@@ -52,4 +52,34 @@ export async function assertStoreAccess(
   if (!(await hasStoreAccess(manager, userId, storeId))) {
     throw new ForbiddenException('No tienes acceso a esta tienda');
   }
+}
+
+/**
+ * De `userIds`, los que trabajan en esa sede (Configuración → Personal por ubicación), más los de
+ * plataforma, que entran a todas. Es `hasStoreAccess` para una lista: dos consultas en vez de una
+ * por persona.
+ *
+ * Lo usan los avisos, para no molestar a quien no opera esa sede: un bodeguero no tiene por qué
+ * enterarse de lo que llega a una bodega que no es suya (y si le llega el aviso, al tocarlo no
+ * encuentra nada, porque tampoco la ve).
+ */
+export async function usersWithStoreAccess(
+  manager: EntityManager,
+  userIds: readonly string[],
+  // Una sede, o varias cuando basta con tener cualquiera de ellas: un corredor entra a una orden que
+  // SALE DE o LLEGA A una sede suya, no hace falta que tenga las dos.
+  locationId: string | readonly string[],
+): Promise<string[]> {
+  if (userIds.length === 0) return [];
+  const locationIds = typeof locationId === 'string' ? [locationId] : [...new Set(locationId)];
+  if (locationIds.length === 0) return [];
+  const assigned = await manager.getRepository(UserLocationAccess).find({
+    select: { userId: true },
+    where: { userId: In([...userIds]), locationId: In(locationIds), status: RecordStatus.ACTIVE },
+  });
+  const platform = await manager.getRepository(UserCompanyRole).find({
+    select: { userId: true },
+    where: { userId: In([...userIds]), status: RecordStatus.ACTIVE, role: PLATFORM_ROLE },
+  });
+  return [...new Set([...assigned.map((row) => row.userId), ...platform.map((row) => row.userId)])];
 }

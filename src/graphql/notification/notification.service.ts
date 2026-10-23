@@ -42,7 +42,18 @@ const ADMIN_NOTIFICATION_CHANNELS: readonly NotificationChannel[] = [
   NotificationChannel.PURCHASING,
   NotificationChannel.DISCOUNTS,
   NotificationChannel.RETURNS,
+  // Inventario entra porque sus avisos son justamente para quien administra: la existencia que
+  // cruzó su mínimo y el mostrador que se quedó sin con qué reponerse. Sin esto se filtraban todos
+  // sus destinatarios y el aviso no le llegaba a nadie.
+  NotificationChannel.INVENTORY,
 ];
+
+// Avisos sueltos que sí son del administrador aunque su canal no lo sea. La regla de arriba es por
+// canal porque casi siempre el canal basta; esta es la excepción, tipo por tipo.
+//   ORDER_INCIDENT  una novedad de un pedido solo la cierra él (resolveIncident pide
+//                   inventory.manage_products), y lo dañado se queda esperando que decida qué hacer
+//                   con ello. Sin esto se enteraba todo el mundo menos quien tiene que actuar.
+const ADMIN_NOTIFICATION_TYPES: readonly NotificationType[] = [NotificationType.ORDER_INCIDENT];
 
 export interface NotifyInput {
   companyId: string;
@@ -124,9 +135,10 @@ export class NotificationService {
     const candidates = [...new Set(input.recipientIds)].filter(
       (id) => id !== input.actorId,
     );
-    const admins = ADMIN_NOTIFICATION_CHANNELS.includes(channel)
-      ? new Set<string>()
-      : await this.adminsAmong(manager, input.companyId, candidates);
+    const admins =
+      ADMIN_NOTIFICATION_CHANNELS.includes(channel) || ADMIN_NOTIFICATION_TYPES.includes(input.type)
+        ? new Set<string>()
+        : await this.adminsAmong(manager, input.companyId, candidates);
     const recipientIds = candidates.filter((id) => !admins.has(id));
     if (recipientIds.length === 0) return null;
 

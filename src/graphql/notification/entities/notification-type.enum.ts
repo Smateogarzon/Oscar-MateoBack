@@ -18,6 +18,10 @@ export enum NotificationType {
   // encima a estar en o por debajo, no en cada movimiento siguiente mientras siga baja (ver
   // InventoryMovementService.maybeNotifyLowStock).
   INVENTORY_LOW_STOCK = 'INVENTORY_LOW_STOCK',
+  // Se vendió algo del mostrador de una tienda y no hay con qué reponerlo: ninguna bodega tiene esa
+  // talla ni otra del mismo modelo. Le llega al administrador del punto para que escoja qué surtir
+  // (ver InternalOrderService.restockStore).
+  DISPLAY_RESTOCK_NEEDED = 'DISPLAY_RESTOCK_NEEDED',
   // Compras (ver purchase-order-watchers.ts): quién recibe cada uno está en esa tabla, no aquí.
   PURCHASE_ORDER_SENT = 'PURCHASE_ORDER_SENT',
   PURCHASE_ORDER_OVERAGE_PENDING = 'PURCHASE_ORDER_OVERAGE_PENDING',
@@ -40,6 +44,9 @@ export enum NotificationType {
   //   ORDER_RUNNER_CALLED      el corredor asignado: el vendedor pregunta por la orden
   //   ORDER_RUNNER_REPLIED     quien la pidió: el corredor responde dónde va
   //   ORDER_CORRECTION         corredores y bodega: llegó una referencia equivocada
+  //   ORDER_CANCELLED          bodega: se anuló una orden que ya había tomado (ver
+  //                            `InternalOrderService.cancel`). Una que nadie había tocado se anula
+  //                            sin avisar: no hay trabajo que parar.
   ORDER_REQUESTED = 'ORDER_REQUESTED',
   ORDER_READY_FOR_RUNNER = 'ORDER_READY_FOR_RUNNER',
   ORDER_DELIVERED = 'ORDER_DELIVERED',
@@ -49,6 +56,16 @@ export enum NotificationType {
   ORDER_RUNNER_CALLED = 'ORDER_RUNNER_CALLED',
   ORDER_RUNNER_REPLIED = 'ORDER_RUNNER_REPLIED',
   ORDER_CORRECTION = 'ORDER_CORRECTION',
+  ORDER_CANCELLED = 'ORDER_CANCELLED',
+  // Alguien reportó una novedad sobre una orden (producto dañado, faltante, problema al recoger o al
+  // entregar). Va a bodega y a quien la pidió —que son quienes trabajan la orden— y también al
+  // administrador, aunque sea del canal ORDERS: es el único que puede cerrarla (ver
+  // ADMIN_NOTIFICATION_TYPES), y lo dañado queda esperando que él decida qué hacer con ello.
+  ORDER_INCIDENT = 'ORDER_INCIDENT',
+  // El vendedor editó un pedido que bodega todavía tiene: quitó o agregó referencias. Hay que
+  // rehacer el alistamiento, y hasta que bodega lo vuelva a dejar listo ningún corredor se lo lleva
+  // (ver `InternalOrderService.editOrder`).
+  ORDER_EDITED = 'ORDER_EDITED',
 }
 
 export const CHANNEL_OF_TYPE: Record<NotificationType, NotificationChannel> = {
@@ -64,6 +81,7 @@ export const CHANNEL_OF_TYPE: Record<NotificationType, NotificationChannel> = {
   [NotificationType.RETURN_CANCELLED]: NotificationChannel.RETURNS,
   [NotificationType.RETURNS_BIN_ADDED]: NotificationChannel.RETURNS,
   [NotificationType.INVENTORY_LOW_STOCK]: NotificationChannel.INVENTORY,
+  [NotificationType.DISPLAY_RESTOCK_NEEDED]: NotificationChannel.INVENTORY,
   [NotificationType.PURCHASE_ORDER_SENT]: NotificationChannel.PURCHASING,
   [NotificationType.PURCHASE_ORDER_OVERAGE_PENDING]: NotificationChannel.PURCHASING,
   [NotificationType.PURCHASE_ORDER_SHIPPED]: NotificationChannel.PURCHASING,
@@ -81,4 +99,7 @@ export const CHANNEL_OF_TYPE: Record<NotificationType, NotificationChannel> = {
   [NotificationType.ORDER_RUNNER_CALLED]: NotificationChannel.ORDERS,
   [NotificationType.ORDER_RUNNER_REPLIED]: NotificationChannel.ORDERS,
   [NotificationType.ORDER_CORRECTION]: NotificationChannel.ORDERS,
+  [NotificationType.ORDER_CANCELLED]: NotificationChannel.ORDERS,
+  [NotificationType.ORDER_INCIDENT]: NotificationChannel.ORDERS,
+  [NotificationType.ORDER_EDITED]: NotificationChannel.ORDERS,
 };

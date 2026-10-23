@@ -1,7 +1,12 @@
 import { UseGuards } from '@nestjs/common';
 import { Args, ID, Parent, Query, ResolveField, Resolver } from '@nestjs/graphql';
-import { CurrentCompanyId } from '../../common/decorators/current-company.decorator.js';
+import { DataSource } from 'typeorm';
+import type { CompanyAccess } from '../../common/access/company-access.js';
+import { visibleLocationIds } from '../../common/access/location-scope.js';
+import { CurrentCompanyAccess, CurrentCompanyId } from '../../common/decorators/current-company.decorator.js';
+import { CurrentUser } from '../../common/decorators/current-user.decorator.js';
 import { RequireCompanyMembership } from '../../common/decorators/permissions.decorator.js';
+import type { JwtPayload } from '../auth/interface/jwt-payload.interface.js';
 import { fullName } from '../../common/utils/text.js';
 import { CsrfGuard } from '../../common/guards/csrf.guard.js';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard.js';
@@ -13,16 +18,22 @@ import { InventoryReservationService } from './inventory-reservation.service.js'
 @Resolver(() => InventoryReservationObjectType)
 @UseGuards(JwtAuthGuard, PermissionsGuard, CsrfGuard)
 export class InventoryReservationResolver {
-  constructor(private readonly inventoryReservationService: InventoryReservationService) {}
+  constructor(
+    private readonly inventoryReservationService: InventoryReservationService,
+    private readonly dataSource: DataSource,
+  ) {}
 
   @Query(() => [InventoryReservationObjectType])
   @RequireCompanyMembership()
-  inventoryReservations(
+  async inventoryReservations(
     @CurrentCompanyId() companyId: string,
+    @CurrentUser() user: JwtPayload,
+    @CurrentCompanyAccess() access: CompanyAccess,
     @Args('productVariantId', { type: () => ID, nullable: true }) productVariantId?: string,
     @Args('inventoryLocationId', { type: () => ID, nullable: true }) inventoryLocationId?: string,
   ) {
-    return this.inventoryReservationService.findAll(companyId, { productVariantId, inventoryLocationId });
+    const locationIds = await visibleLocationIds(this.dataSource.manager, companyId, user.sub, access);
+    return this.inventoryReservationService.findAll(companyId, { productVariantId, inventoryLocationId, locationIds });
   }
 
   @Query(() => InventoryReservationObjectType)

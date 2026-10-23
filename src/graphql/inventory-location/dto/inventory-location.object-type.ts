@@ -23,6 +23,11 @@ export class InventoryLocationObjectType extends BaseObjectType {
   @Field(() => ID, { nullable: true })
   custodianUserId: string | null;
 
+  // Quién lo tiene encima, por su nombre: el corredor de un RUNNER. Sin él, Inventario mostraba la
+  // bolsa de un corredor como "Ubicación desconocida" (ver locationDirectory.ts en el front).
+  @Field(() => String, { nullable: true })
+  custodianName: string | null;
+
   @Field(() => RecordStatus)
   status: RecordStatus;
 }

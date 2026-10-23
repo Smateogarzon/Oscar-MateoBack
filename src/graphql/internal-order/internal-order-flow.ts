@@ -45,7 +45,9 @@ export type FlowEffect =
 //   REQUESTER  quien la pidió, o quien tenga el permiso
 //   ADMIN      solo quien administra la empresa (Administrador) o la plataforma (super admin); no
 //              depende de permisos
-export type FlowActor = 'RUNNER' | 'REQUESTER' | 'ADMIN';
+//   REQUESTER_OR_ADMIN  quien la pidió —mientras ningún corredor la haya tomado— o el
+//              administrador, siempre. Es la regla para anular una SO (ver `CANCEL_SO`).
+export type FlowActor = 'RUNNER' | 'REQUESTER' | 'ADMIN' | 'REQUESTER_OR_ADMIN';
 
 export interface FlowStep {
   from: S;
@@ -65,9 +67,15 @@ const DELIVERY = [P.RUNNER_CONFIRM_DELIVERY];
 const RECEIPT = [P.ORDERS_CONFIRM_RECEIPT];
 const RECEIPT_OR_WAREHOUSE = [P.ORDERS_CONFIRM_RECEIPT, P.WAREHOUSE_FULFILL_ORDERS];
 const CASH_DESK = [P.CASH_CHARGE_ORDERS, P.CASH_REGISTER_PAYMENT, P.ORDERS_CONFIRM_RECEIPT];
-// Anular una SO, un TR o un RS antes de que lo recoja el corredor es solo del administrador (ni bodega,
-// ni el corredor, ni quien lo pidió). Cancelar una devolución (RE) sigue su propia regla.
+// Anular un TR o un RS antes de que lo recoja el corredor es solo del administrador (ni bodega, ni el
+// corredor, ni quien lo pidió). Cancelar una devolución (RE) sigue su propia regla.
 const CANCEL = { effect: 'CANCEL' as const, permissions: [], actor: 'ADMIN' as const };
+
+// Anular una SO: el vendedor que la pidió puede, mientras ningún corredor la haya tomado (acordado
+// con el usuario, 2026-10-15). En cuanto un corredor la toma hay alguien yendo por ella, y solo el
+// administrador la anula. Si bodega ya la había tomado se le avisa que se anuló (ver
+// `PACKED_STATUSES` y `InternalOrderService.cancel`); si nadie la había tocado, se anula sin avisar.
+const CANCEL_SO = { effect: 'CANCEL' as const, permissions: [], actor: 'REQUESTER_OR_ADMIN' as const };
 
 export const FLOWS: Record<InternalOrderType, readonly FlowStep[]> = {
   [InternalOrderType.SO]: [
@@ -82,10 +90,14 @@ export const FLOWS: Record<InternalOrderType, readonly FlowStep[]> = {
     { from: S.RECEIVED_BY_SELLER, to: S.RETURNED, effect: 'RETURN_REQUEST', permissions: RECEIPT, detail: 'Cliente no compra · al cajón de devoluciones' },
     { from: S.PENDING_PAYMENT, to: S.RECEIVED_BY_SELLER, effect: 'BACK_TO_SELLER', permissions: CASH_DESK, detail: 'Vuelve al vendedor · el cliente aún no decide' },
     { from: S.PENDING_PAYMENT, to: S.RETURNED, effect: 'RETURN_REQUEST', permissions: CASH_DESK, detail: 'Cliente no compra · al cajón de devoluciones' },
-    { from: S.NEW, to: S.CANCELLED, ...CANCEL, detail: 'Orden anulada' },
-    { from: S.ACCEPTED_BY_WAREHOUSE, to: S.CANCELLED, ...CANCEL, detail: 'Orden anulada' },
-    { from: S.PACKING, to: S.CANCELLED, ...CANCEL, detail: 'Orden anulada' },
-    { from: S.READY_FOR_RUNNER, to: S.CANCELLED, ...CANCEL, detail: 'Orden anulada' },
+    // Salvavidas del administrador para las que quedaron esperando una devolución que ya no llega
+    // (ver `RETURN_REQUESTED` en SERVICE_STATUSES). No toca inventario: lo del cliente ya está en el
+    // cajón de la tienda desde que se pidió el cambio.
+    { from: S.RETURN_REQUESTED, to: S.RETURNED, effect: 'CLOSE', permissions: [], actor: 'ADMIN', detail: 'Cerrada como devuelta · lo del cliente ya está en el cajón' },
+    { from: S.NEW, to: S.CANCELLED, ...CANCEL_SO, detail: 'Orden anulada' },
+    { from: S.ACCEPTED_BY_WAREHOUSE, to: S.CANCELLED, ...CANCEL_SO, detail: 'Orden anulada' },
+    { from: S.PACKING, to: S.CANCELLED, ...CANCEL_SO, detail: 'Orden anulada' },
+    { from: S.READY_FOR_RUNNER, to: S.CANCELLED, ...CANCEL_SO, detail: 'Orden anulada' },
   ],
   [InternalOrderType.RE]: [
     { from: S.WAITING_FOR_RUNNER, to: S.IN_TRANSIT_TO_WAREHOUSE, effect: 'PICK_UP', permissions: PICKUP, detail: 'Corredor transporta hacia bodega' },
@@ -117,6 +129,25 @@ export const FLOWS: Record<InternalOrderType, readonly FlowStep[]> = {
   ],
 };
 
+// Los estados a los que una orden llega sin que esta tabla los nombre: los pone el servicio dentro
+// de la operación que los provoca. Cada uno dice QUIÉN lo saca de ahí, y la prueba
+// "ningún estado sin salida" (internal-order-flow.spec.ts) exige que todo estado no final tenga un
+// paso en FLOWS o una explicación aquí. Esa pregunta —"¿quién cierra esto?"— es la que faltaba
+// hacerse cuando SO-000008 quedó congelada en RETURN_REQUESTED esperando una RE que nadie creaba.
+export const SERVICE_STATUSES: Record<InternalOrderType, Partial<Record<S, string>>> = {
+  [InternalOrderType.SO]: {
+    [S.ITEM_CHANGE_REQUESTED]:
+      'La resuelve la sub-orden del cambio: al llegar a la tienda absorbe a la original (CLOSED_BY_CHANGE) y, si se anula, la original vuelve al vendedor con lo que se quedó o se cierra como devuelta si no se quedó con nada.',
+    [S.RETURN_REQUESTED]:
+      'Heredado: las nuevas ya no llegan aquí (releaseParentAfterSubCancelled las cierra en el acto). Las que quedaron atascadas las cierra el administrador con el paso "Cerrar como devuelta", y una RE enlazada también las cierra al llegar a bodega (closeReturnedSale).',
+  },
+  [InternalOrderType.RE]: {
+    [S.RETURN_CREATED]: 'El servicio la pasa a WAITING_FOR_RUNNER en la misma operación que la crea.',
+  },
+  [InternalOrderType.TR]: {},
+  [InternalOrderType.RS]: {},
+};
+
 // Con qué estado nace cada tipo.
 export const INITIAL_STATUS: Record<InternalOrderType, S> = {
   [InternalOrderType.SO]: S.NEW,
@@ -137,6 +168,15 @@ export const FINAL_STATUSES: readonly S[] = [
 ];
 
 export const isFinalStatus = (status: S): boolean => FINAL_STATUSES.includes(status);
+
+// Una orden deja de estar "en camino" cuando termina o cuando el destino ya la recibió: desde ese
+// momento su mercancía ya está sumada en la existencia de la sede, y volver a contarla haría creer
+// que viene el doble. Lo usan "Qué surtir" y la reposición automática.
+export const NOT_ON_THE_WAY_STATUSES: readonly S[] = [...FINAL_STATUSES, S.RECEIVED_BY_STORE, S.RECEIVED_BY_DESTINATION];
+
+// Bodega ya tomó la orden: hay trabajo hecho y mercancía separada en el muelle. Anular desde aquí
+// le avisa (no así desde NEW, que nadie la había tocado).
+export const PACKED_STATUSES: readonly S[] = [S.ACCEPTED_BY_WAREHOUSE, S.PACKING, S.READY_FOR_RUNNER];
 
 // Estados en que la mercancía ya salió del origen: de ahí en adelante no se cancela (hay que
 // entregarla y devolverla).
@@ -175,10 +215,39 @@ export const RUNNER_ENGAGED_STATUSES: readonly S[] = [
   S.DELIVERED_TO_DESTINATION,
 ];
 
+// Los pasos que hace la bodega con la mercancía delante, y en qué sede de la orden está esa
+// mercancía. Quien los da tiene que tener esa sede asignada (Configuración → Personal por
+// ubicación): un bodeguero alista y despacha lo de SUS bodegas, no lo de cualquiera. Alistar
+// (PACK/READY) pasa en el origen; recibir una devolución (VERIFY_RETURN/CLOSE_RETURN), en el
+// destino, que en una RE es la bodega que la recibe.
+export const WAREHOUSE_EFFECT_AT: Partial<Record<FlowEffect, 'SOURCE' | 'DESTINATION'>> = {
+  PACK: 'SOURCE',
+  READY: 'SOURCE',
+  VERIFY_RETURN: 'DESTINATION',
+  CLOSE_RETURN: 'DESTINATION',
+};
+
 export function stepFor(type: InternalOrderType, from: S, to: S): FlowStep | undefined {
   return FLOWS[type].find((step) => step.from === from && step.to === to);
 }
 
 export function stepsFrom(type: InternalOrderType, from: S): FlowStep[] {
   return FLOWS[type].filter((step) => step.from === from);
+}
+
+/**
+ * El paso de bodega pendiente desde este estado, o `undefined` si ahora mismo no hay nada que hacer
+ * en bodega (lo tiene el corredor, la tienda o la caja). Es el paso que un bodeguero "toma": sale de
+ * `WAREHOUSE_EFFECT_AT`, así que alistar y despachar miran la sede de origen, y recibir una
+ * devolución, la de destino. Nunca hay dos a la vez: desde un estado, bodega tiene un solo paso.
+ */
+export function warehouseStepFrom(type: InternalOrderType, from: S): FlowStep | undefined {
+  return stepsFrom(type, from).find((step) => WAREHOUSE_EFFECT_AT[step.effect] !== undefined);
+}
+
+/** En qué sede está la mercancía que mueve un paso de bodega. */
+export function warehouseStepLocation(order: { sourceLocationId: string; destinationLocationId: string }, step: FlowStep): string | null {
+  const at = WAREHOUSE_EFFECT_AT[step.effect];
+  if (!at) return null;
+  return at === 'SOURCE' ? order.sourceLocationId : order.destinationLocationId;
 }

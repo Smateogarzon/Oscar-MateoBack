@@ -63,16 +63,26 @@ describe.skipIf(!available)('Órdenes internas: flujos completos (Postgres real)
   >;
   const PRICE = 100000;
 
-  // Los permisos de cada quien, como los dejaría el reparto por rol de la semilla.
-  const actor = (key: 'seller' | 'warehouse' | 'runner' | 'cashier') => {
-    const permissions = {
-      seller: ['orders.view', 'orders.request_from_warehouse', 'orders.confirm_receipt'],
-      warehouse: ['orders.view', 'warehouse.fulfill_orders', 'warehouse.receive_returns', 'inventory.transfer'],
-      runner: ['orders.view', 'runner.pickup_orders', 'runner.confirm_delivery'],
-      cashier: ['cash.register_payment', 'cash.charge_orders', 'sales.create', 'sales.view'],
-    }[key];
-    return { userId: ids[key], permissionCodes: permissions, isSuperAdmin: false };
-  };
+  // Los permisos de cada quien, como los dejaría el reparto por rol de la semilla. La misma tabla
+  // alimenta los roles de verdad (ver la semilla), para que los AVISOS encuentren destinatarios:
+  // `findUserIdsWithPermission` los busca por rol en la base, no por el actor que se arma aquí.
+  const PERMISSIONS = {
+    seller: ['orders.view', 'orders.request_from_warehouse', 'orders.confirm_receipt'],
+    warehouse: ['orders.view', 'warehouse.fulfill_orders', 'warehouse.receive_returns', 'inventory.transfer'],
+    runner: ['orders.view', 'runner.pickup_orders', 'runner.confirm_delivery'],
+    cashier: ['cash.register_payment', 'cash.charge_orders', 'sales.create', 'sales.view'],
+  } as const;
+
+  const actor = (key: 'seller' | 'warehouse' | 'runner' | 'cashier') => ({
+    userId: ids[key],
+    permissionCodes: [...PERMISSIONS[key]] as string[],
+    isSuperAdmin: false,
+    isAdmin: false,
+  });
+
+  // El administrador de la empresa: anula una orden pasado el punto del vendedor y maneja el cajón
+  // de devoluciones. No necesita permisos sueltos; manda su rol.
+  const companyAdmin = () => ({ userId: ids.cashier, permissionCodes: [], isSuperAdmin: false, isAdmin: true });
   const cashier = () => ({ userId: ids.cashier, canViewAll: false, canManageShifts: false });
 
   const balance = async (inventoryLocationId: string, variantId: string) => {
@@ -93,13 +103,37 @@ describe.skipIf(!available)('Órdenes internas: flujos completos (Postgres real)
     const { rows } = await db.query(`SELECT id FROM inventory_locations WHERE type = 'RUNNER' AND "custodianUserId" = $1`, [ids.runner]);
     return rows[0]?.id as string;
   };
-  const returnsOf = async (locationId: string) => {
-    const { rows } = await db.query(`SELECT id FROM inventory_locations WHERE type = 'RETURNS' AND "locationId" = $1`, [locationId]);
-    return rows[0]?.id as string;
+  // Una talla nueva con existencia SOLO en la bodega que se diga: con esto se fuerza de qué bodega
+  // va a salir un pedido, que es lo que el servidor decide solo.
+  const variantOnlyAt = async (label: string, stockLocationId: string, quantity: number) => {
+    const { rows: productRows } = await db.query(`SELECT id FROM products WHERE "companyId" = $1 LIMIT 1`, [ids.company]);
+    const { rows: colorRows } = await db.query(`SELECT "colorId" FROM product_variants WHERE id = $1`, [ids.variantA]);
+    const sizeId = (await db.query(`INSERT INTO sizes (name) VALUES ($1) RETURNING id`, [`${label} ${RUN}`])).rows[0].id as string;
+    const variantId = (
+      await db.query(
+        `INSERT INTO product_variants ("companyId", "productId", "colorId", "sizeId", sku, cost, price) VALUES ($1, $2, $3, $4, $5, 50000, $6) RETURNING id`,
+        [ids.company, productRows[0].id, colorRows[0].colorId, sizeId, `AF1-${label}-${RUN}`, PRICE],
+      )
+    ).rows[0].id as string;
+    await db.query(`INSERT INTO inventory_balances ("productVariantId", "inventoryLocationId", quantity) VALUES ($1, $2, $3)`, [variantId, stockLocationId, quantity]);
+    return variantId;
+  };
+
+  // Los tipos de aviso que dejó una orden (la bandeja de Notificaciones).
+  const noticesOf = async (orderId: string) => {
+    const { rows } = await db.query(`SELECT type FROM notifications WHERE "entityId" = $1 ORDER BY "createdAt" ASC`, [orderId]);
+    return (rows as { type: string }[]).map((row) => row.type);
   };
 
   const go = (key: 'seller' | 'warehouse' | 'runner' | 'cashier', id: string, to: string, extra: Record<string, unknown> = {}) =>
     orders.transition(ids.company, actor(key), { id, to: to as never, ...extra });
+
+  // Recoger exige haber tomado la orden antes (claim): son dos pasos distintos, y solo recoge quien
+  // la tomó. Este atajo hace los dos, que es lo que hace el corredor en la app.
+  const pickUp = async (id: string, to: 'IN_TRANSIT' | 'IN_TRANSIT_TO_WAREHOUSE' = 'IN_TRANSIT') => {
+    await orders.claim(ids.company, actor('runner'), id);
+    await go('runner', id, to);
+  };
 
   beforeAll(async () => {
     await admin.query(`CREATE DATABASE "${RUN}"`);
@@ -140,9 +174,36 @@ describe.skipIf(!available)('Órdenes internas: flujos completos (Postgres real)
     ids.whStock = await one(`INSERT INTO inventory_locations ("companyId", "locationId", type) VALUES ($1, $2, 'STOCK') RETURNING id`, [ids.company, ids.wh]);
     ids.wh2Stock = await one(`INSERT INTO inventory_locations ("companyId", "locationId", type) VALUES ($1, $2, 'STOCK') RETURNING id`, [ids.company, ids.wh2]);
     ids.storeStock = await one(`INSERT INTO inventory_locations ("companyId", "locationId", type) VALUES ($1, $2, 'STOCK') RETURNING id`, [ids.company, ids.store]);
-    for (const key of ['seller', 'cashier'] as const) {
-      await db.query(`INSERT INTO user_location_access ("userId", "locationId") VALUES ($1, $2)`, [ids[key], ids.store]);
+    // Personal por ubicación, como lo dejaría Configuración: el vendedor y la caja trabajan en la
+    // tienda; el bodeguero, en las dos bodegas; el corredor va y viene, así que tiene las tres. Sin
+    // esto, las reglas de visibilidad por sede (internal-order-visibility.ts) le esconden al
+    // bodeguero la orden que acaba de llegarle y ningún paso de bodega pasa.
+    for (const [key, locations] of [
+      ['seller', [ids.store]],
+      ['cashier', [ids.store]],
+      ['warehouse', [ids.wh, ids.wh2]],
+      ['runner', [ids.store, ids.wh, ids.wh2]],
+    ] as const) {
+      for (const locationId of locations) {
+        await db.query(`INSERT INTO user_location_access ("userId", "locationId") VALUES ($1, $2)`, [ids[key], locationId]);
+      }
     }
+    // Un rol de empresa por puesto, con sus permisos y su membresía. Sin esto los avisos no
+    // encuentran a nadie (`notify` no deja aviso sin destinatarios) y el flujo se vería bien aunque
+    // bodega o los corredores nunca se enteraran de nada.
+    for (const key of ['seller', 'warehouse', 'runner', 'cashier'] as const) {
+      const roleId = await one(`INSERT INTO roles (code, name, scope) VALUES ($1, $2, 'COMPANY') RETURNING id`, [
+        `${key}-${RUN}`.slice(0, 50),
+        key,
+      ]);
+      for (const code of PERMISSIONS[key]) {
+        const { rows } = await db.query(`SELECT id FROM permissions WHERE code = $1`, [code]);
+        if (rows.length === 0) throw new Error(`La semilla de permisos no trae ${code}`);
+        await db.query(`INSERT INTO role_permissions ("companyId", "roleId", "permissionId") VALUES ($1, $2, $3)`, [ids.company, roleId, rows[0].id]);
+      }
+      await db.query(`INSERT INTO user_company_roles ("userId", "companyId", "roleId") VALUES ($1, $2, $3)`, [ids[key], ids.company, roleId]);
+    }
+
     const category = await one(`INSERT INTO categories ("companyId", name, slug) VALUES ($1, 'Tenis', 'tenis') RETURNING id`, [ids.company]);
     const color = await one(`INSERT INTO colors (name, hex) VALUES ($1, '#FFFFFF') RETURNING id`, [`Blanco ${RUN}`]);
     const size40 = await one(`INSERT INTO sizes (name) VALUES ($1) RETURNING id`, [`40 ${RUN}`]);
@@ -184,22 +245,25 @@ describe.skipIf(!available)('Órdenes internas: flujos completos (Postgres real)
     await admin.end();
   });
 
-  const request = (type: 'SO' | 'TR' | 'RS', variantId: string, quantity: string, source = ids.wh, by: 'seller' | 'warehouse' = 'seller') =>
+  // Una SO no dice de qué bodega sale (lo decide el servidor) y puede nacer repartida en varias
+  // órdenes; estos atajos devuelven la primera, que es lo que miran casi todas las pruebas.
+  const requestAll = (type: 'SO' | 'TR' | 'RS', variantId: string, quantity: string, source = ids.wh, by: 'seller' | 'warehouse' = 'seller') =>
     orders.request(ids.company, actor(by), {
       type: type as never,
       origin: 'SELLER' as never,
-      sourceLocationId: source,
+      ...(type === 'SO' ? {} : { sourceLocationId: source }),
       destinationLocationId: ids.store,
-      deliveryPoint: 'Probador #02',
       items: [{ productVariantId: variantId, quantity }],
     });
 
+  const request = async (type: 'SO' | 'TR' | 'RS', variantId: string, quantity: string, source = ids.wh, by: 'seller' | 'warehouse' = 'seller') =>
+    (await requestAll(type, variantId, quantity, source, by))[0];
+
   // Lleva una SO desde que se pide hasta que el vendedor la tiene en la mano.
   const toSeller = async (id: string) => {
-    await go('warehouse', id, 'ACCEPTED_BY_WAREHOUSE');
     await go('warehouse', id, 'PACKING');
     await go('warehouse', id, 'READY_FOR_RUNNER');
-    await go('runner', id, 'IN_TRANSIT');
+    await pickUp(id);
     await go('runner', id, 'DELIVERED_TO_STORE');
     await go('seller', id, 'RECEIVED_BY_SELLER');
   };
@@ -210,23 +274,28 @@ describe.skipIf(!available)('Órdenes internas: flujos completos (Postgres real)
     expect(order.status).toBe('NEW');
     expect(await reserved(order.id)).toEqual([{ inventoryLocationId: ids.whStock, sourceType: 'TRANSFER_REQUEST', q: 2 }]);
 
-    await go('warehouse', order.id, 'ACCEPTED_BY_WAREHOUSE');
     await go('warehouse', order.id, 'PACKING');
     await go('warehouse', order.id, 'READY_FOR_RUNNER');
     // Solo un corredor recoge; nadie se salta pasos.
     await expect(go('seller', order.id, 'IN_TRANSIT')).rejects.toThrow();
     await expect(go('runner', order.id, 'DELIVERED_TO_STORE')).rejects.toThrow();
 
-    await go('runner', order.id, 'IN_TRANSIT');
+    await pickUp(order.id);
     expect(await reserved(order.id)).toEqual([]);
     expect(await balance(ids.whStock, ids.variantA)).toBe(18);
     expect(await balance(await runnerBag(), ids.variantA)).toBe(2);
 
+    // El corredor marca que entregó, pero su custodia no termina ahí: la mercancía sigue en su bolsa
+    // hasta que el vendedor confirma el recibo (ver `leftRunner` en internal-order-stock.ts).
     await go('runner', order.id, 'DELIVERED_TO_STORE');
-    expect(await balance(ids.storeStock, ids.variantA)).toBe(2);
-    expect(await reserved(order.id)).toEqual([{ inventoryLocationId: ids.storeStock, sourceType: 'TRANSFER_REQUEST', q: 2 }]);
+    expect(await balance(ids.storeStock, ids.variantA)).toBe(0);
+    expect(await balance(await runnerBag(), ids.variantA)).toBe(2);
 
     await go('seller', order.id, 'RECEIVED_BY_SELLER');
+    // Con la confirmación sale de la bolsa, entra al STOCK de la tienda y queda apartada para su cliente.
+    expect(await balance(await runnerBag(), ids.variantA)).toBe(0);
+    expect(await balance(ids.storeStock, ids.variantA)).toBe(2);
+    expect(await reserved(order.id)).toEqual([{ inventoryLocationId: ids.storeStock, sourceType: 'TRANSFER_REQUEST', q: 2 }]);
     await go('seller', order.id, 'PENDING_PAYMENT');
 
     const sale = await sales.createFromInternalOrder(ids.company, cashier(), { internalOrderId: order.id, cashSessionId: ids.session });
@@ -251,7 +320,6 @@ describe.skipIf(!available)('Órdenes internas: flujos completos (Postgres real)
     expect(view.saleNumber).toBe(paid.saleNumber);
     expect(view.events.filter((event) => event.kind === 'STATUS').map((event) => event.toStatus)).toEqual([
       'NEW',
-      'ACCEPTED_BY_WAREHOUSE',
       'PACKING',
       'READY_FOR_RUNNER',
       'IN_TRANSIT',
@@ -276,32 +344,48 @@ describe.skipIf(!available)('Órdenes internas: flujos completos (Postgres real)
     expect((await orders.findView(ids.company, order.id)).status).toBe('PENDING_PAYMENT');
   });
 
-  it('SO → no compra: nace la RE, vuelve a bodega por el cajón de devoluciones y cierra la SO como devuelta', async () => {
+  it('SO → no compra: queda en el cajón y el administrador lo manda a la bodega que lo despachó', async () => {
     const stockBefore = await balance(ids.whStock, ids.variantB);
     const order = await request('SO', ids.variantB, '1');
+    // Nadie eligió bodega: el sistema la buscó (Central tiene las dos tallas; Norte, solo la 41).
+    expect(order.sourceLocationId).toBe(ids.wh);
     await toSeller(order.id);
-    await go('seller', order.id, 'RETURN_REQUESTED');
+    await go('seller', order.id, 'RETURNED');
 
-    const sale = await orders.findView(ids.company, order.id);
-    expect(sale.versionNumber).toBe(2);
-    const ret = await orders.findView(ids.company, sale.relatedOrderId!);
+    // Lo que el cliente no se lleva NO vuelve solo a bodega: queda en la tienda, apartado a nombre
+    // del cajón de devoluciones.
+    expect((await orders.findView(ids.company, order.id)).status).toBe('RETURNED');
+    expect(await reserved(order.id)).toEqual([{ inventoryLocationId: ids.storeStock, sourceType: 'RETURNS_BIN', q: 1 }]);
+    expect(await balance(ids.storeStock, ids.variantB)).toBeGreaterThanOrEqual(1);
+
+    // El cajón ya sabe a qué bodega vuelve cada cosa: la que la despachó.
+    const bin = await orders.returnsBinContents(ids.company, companyAdmin());
+    const line = bin.find((row) => row.productVariantId === ids.variantB && row.storeId === ids.store);
+    expect(line?.originWarehouseId).toBe(ids.wh);
+    expect(line?.originWarehouseName).toBe('Bodega Central');
+
+    // Y se manda sin elegir bodega: sale una RE por bodega de origen.
+    const created = await orders.createReturnFromBin(ids.company, companyAdmin(), { storeId: ids.store, productVariantIds: [ids.variantB] });
+    expect(created).toHaveLength(1);
+    const [ret] = created;
     expect(ret.type).toBe('RE');
-    expect(ret.orderNumber).toMatch(/^RE-0000\d\d$/);
+    expect(ret.sourceLocationId).toBe(ids.store);
+    expect(ret.destinationLocationId).toBe(ids.wh);
     expect(ret.status).toBe('WAITING_FOR_RUNNER');
-    expect(ret.relatedOrderId).toBe(order.id);
+    // Salió del cajón y quedó apartada para la RE.
     expect(await reserved(order.id)).toEqual([]);
     expect(await reserved(ret.id)).toEqual([{ inventoryLocationId: ids.storeStock, sourceType: 'TRANSFER_REQUEST', q: 1 }]);
 
-    await go('runner', ret.id, 'IN_TRANSIT_TO_WAREHOUSE');
+    // El camino de vuelta, con la custodia del corredor terminando cuando bodega recibe.
+    await pickUp(ret.id, 'IN_TRANSIT_TO_WAREHOUSE');
     await go('runner', ret.id, 'DELIVERED_TO_WAREHOUSE');
-    expect(await balance(await returnsOf(ids.wh), ids.variantB)).toBe(1);
-    await go('warehouse', ret.id, 'RECEIVED_BY_WAREHOUSE');
-    await go('warehouse', ret.id, 'RETURNED');
+    const [retLine] = (await orders.findView(ids.company, ret.id)).items;
+    await go('warehouse', ret.id, 'RETURNED', { lines: [{ itemId: retLine.id, quantity: '1' }] });
+    expect((await orders.findView(ids.company, ret.id)).status).toBe('RETURNED');
     expect(await balance(ids.whStock, ids.variantB)).toBe(stockBefore);
-    expect((await orders.findView(ids.company, order.id)).status).toBe('RETURNED');
   });
 
-  it('SO → cambio de pedido: RE de lo que sale + sub-orden de otra bodega que se une a la original', async () => {
+  it('SO → cambio de pedido: lo que sale va al cajón y la sub-orden es la que se cobra', async () => {
     const order = await request('SO', ids.variantA, '1');
     await toSeller(order.id);
     const [item] = (await orders.findView(ids.company, order.id)).items;
@@ -315,26 +399,27 @@ describe.skipIf(!available)('Órdenes internas: flujos completos (Postgres real)
     expect(parent.status).toBe('ITEM_CHANGE_REQUESTED');
     expect(parent.versionNumber).toBe(2);
     expect(parent.items).toHaveLength(0);
+    // Lo que el cliente cambia queda en el cajón de la tienda (no vuelve solo a bodega).
+    expect(await reserved(order.id)).toEqual([{ inventoryLocationId: ids.storeStock, sourceType: 'RETURNS_BIN', q: 1 }]);
+
+    // La sub-orden sale de la bodega elegida para el cambio, con prioridad alta.
     const [sub] = await orders.findSubOrders(ids.company, order.id);
     expect(sub.parentOrderId).toBe(order.id);
     expect(sub.priority).toBe('HIGH');
+    expect(sub.sourceLocationId).toBe(ids.wh2);
     expect(await reserved(sub.id)).toEqual([{ inventoryLocationId: ids.wh2Stock, sourceType: 'TRANSFER_REQUEST', q: 1 }]);
-    const ret = await orders.findView(ids.company, parent.relatedOrderId!);
-    expect(ret.type).toBe('RE');
-    expect(ret.status).toBe('WAITING_FOR_RUNNER');
 
+    // Al llegar, la sub-orden se queda con todo y la original termina sin cobro.
     await toSeller(sub.id);
-    // Una sub-orden recibida no se cobra: se une.
-    await expect(go('seller', sub.id, 'PENDING_PAYMENT')).rejects.toThrow(/se une/);
-    await go('seller', sub.id, 'MERGED_INTO_PARENT');
+    expect((await orders.findView(ids.company, order.id)).status).toBe('CLOSED_BY_CHANGE');
+    const subView = await orders.findView(ids.company, sub.id);
+    expect(subView.status).toBe('RECEIVED_BY_SELLER');
+    expect(subView.items.map((line) => line.productVariantId)).toEqual([ids.variantB]);
+    expect(await reserved(sub.id)).toEqual([{ inventoryLocationId: ids.storeStock, sourceType: 'TRANSFER_REQUEST', q: 1 }]);
 
-    const merged = await orders.findView(ids.company, order.id);
-    expect(merged.status).toBe('RECEIVED_BY_SELLER');
-    expect(merged.versionNumber).toBe(3);
-    expect(merged.items.map((line) => line.productVariantId)).toEqual([ids.variantB]);
-    expect(await reserved(order.id)).toEqual([{ inventoryLocationId: ids.storeStock, sourceType: 'TRANSFER_REQUEST', q: 1 }]);
-    expect((await orders.findView(ids.company, sub.id)).status).toBe('MERGED_INTO_PARENT');
-    expect(await orders.findVersions(ids.company, actor('seller'), order.id)).toHaveLength(3);
+    // Y es ella la que sigue hasta el cobro.
+    await go('seller', sub.id, 'PENDING_PAYMENT');
+    expect((await orders.findView(ids.company, sub.id)).status).toBe('PENDING_PAYMENT');
   });
 
   it('RS: un surtido de bodega a tienda recorre su flujo y mueve la existencia', async () => {
@@ -343,7 +428,7 @@ describe.skipIf(!available)('Órdenes internas: flujos completos (Postgres real)
     expect(order.orderNumber).toBe('RS-000001');
     expect(order.status).toBe('RESTOCK_REQUESTED');
     await go('warehouse', order.id, 'WAITING_FOR_RUNNER');
-    await go('runner', order.id, 'IN_TRANSIT');
+    await pickUp(order.id);
     await go('runner', order.id, 'DELIVERED_TO_STORE');
     await go('warehouse', order.id, 'RECEIVED_BY_STORE');
     await go('warehouse', order.id, 'RESTOCKED');
@@ -352,7 +437,8 @@ describe.skipIf(!available)('Órdenes internas: flujos completos (Postgres real)
   });
 
   it('no se aparta lo que no hay, y anular suelta lo apartado', async () => {
-    await expect(request('SO', ids.variantA, '999')).rejects.toThrow(/No hay suficiente/);
+    // Ninguna bodega tiene 999 y una línea no se parte entre dos: se rechaza nombrando la referencia.
+    await expect(request('SO', ids.variantA, '999')).rejects.toThrow(/en una sola bodega/);
     const order = await request('SO', ids.variantA, '1');
     await go('seller', order.id, 'CANCELLED', { reason: 'El cliente se fue' });
     expect(await reserved(order.id)).toEqual([]);
@@ -363,7 +449,6 @@ describe.skipIf(!available)('Órdenes internas: flujos completos (Postgres real)
 
   it('dejar lista con faltante abre la novedad y aparta solo lo encontrado; el retorno por error recorre sus paradas', async () => {
     const order = await request('SO', ids.variantB, '2');
-    await go('warehouse', order.id, 'ACCEPTED_BY_WAREHOUSE');
     await go('warehouse', order.id, 'PACKING');
     const [line] = (await orders.findView(ids.company, order.id)).items;
     await go('warehouse', order.id, 'READY_FOR_RUNNER', { lines: [{ itemId: line.id, quantity: '1' }] });
@@ -371,10 +456,11 @@ describe.skipIf(!available)('Órdenes internas: flujos completos (Postgres real)
     expect(ready.items[0].incidentId).not.toBeNull();
     expect(await reserved(order.id)).toEqual([{ inventoryLocationId: ids.whStock, sourceType: 'TRANSFER_REQUEST', q: 1 }]);
 
-    await go('runner', order.id, 'IN_TRANSIT');
+    await pickUp(order.id);
     await go('runner', order.id, 'DELIVERED_TO_STORE');
-    await orders.reportCorrection(ids.company, actor('seller'), order.id, 'Llegó la talla equivocada');
-    await expect(orders.reportCorrection(ids.company, actor('seller'), order.id, 'Otra vez')).rejects.toThrow(/en curso/);
+    // El retorno por error señala CUÁLES líneas llegaron mal (desde la rama `inventory`).
+    await orders.reportCorrection(ids.company, actor('seller'), order.id, [line.id], 'Llegó la talla equivocada');
+    await expect(orders.reportCorrection(ids.company, actor('seller'), order.id, [line.id], 'Otra vez')).rejects.toThrow(/en curso/);
     for (let i = 0; i < 3; i += 1) await orders.advanceCorrection(ids.company, actor('runner'), order.id);
     const corrected = await orders.findView(ids.company, order.id);
     expect(corrected.status).toBe('DELIVERED_TO_STORE');
@@ -387,7 +473,225 @@ describe.skipIf(!available)('Órdenes internas: flujos completos (Postgres real)
     const mine = await orders.findAll(ids.company, actor('seller'), { mine: true });
     expect(all.length).toBeGreaterThan(0);
     expect(mine.every((order) => order.requestedBy === ids.seller)).toBe(true);
-    const outsider = { userId: ids.runner, permissionCodes: ['orders.view'], isSuperAdmin: false };
+    // Alguien que entra a Pedidos sin alcance y sin ninguna sede asignada no ve nada: ni las que
+    // pidió (ninguna) ni las de sedes suyas (no tiene). Es un usuario aparte a propósito: el corredor
+    // sí tiene sedes asignadas, así que con él la prueba no diría nada.
+    const { rows } = await db.query(
+      `INSERT INTO users ("firstName", "lastName", email, "passwordHash") VALUES ('Ajeno', 'Prueba', $1, 'x') RETURNING id`,
+      [`ajeno-${RUN}@prueba.test`],
+    );
+    const outsider = { userId: rows[0].id as string, permissionCodes: ['orders.view'], isSuperAdmin: false, isAdmin: false };
     expect(await orders.findAll(ids.company, outsider, {})).toHaveLength(0);
+  });
+
+  // ─── Lo acordado en esta tanda ───────────────────────────────────────────────────────────────
+
+  it('SO repartida: lo que está en dos bodegas nace como una orden por bodega', async () => {
+    // Una talla que SOLO existe en la bodega del norte, para forzar el reparto.
+    const variantC = await variantOnlyAt('42', ids.wh2Stock, 5);
+
+    const created = await orders.request(ids.company, actor('seller'), {
+      type: 'SO' as never,
+      origin: 'SELLER' as never,
+      destinationLocationId: ids.store,
+      items: [
+        { productVariantId: ids.variantA, quantity: '1' },
+        { productVariantId: variantC, quantity: '2' },
+      ],
+    });
+
+    // Una orden por bodega, las dos del mismo envío.
+    expect(created).toHaveLength(2);
+    expect(new Set(created.map((order) => order.requestGroupId)).size).toBe(1);
+    expect(created[0].requestGroupId).not.toBeNull();
+    const bySource = new Map(created.map((order) => [order.sourceLocationId, order]));
+    expect([...bySource.keys()].sort()).toEqual([ids.wh, ids.wh2].sort());
+
+    // Cada una aparta lo suyo en SU bodega, y lleva solo la línea que esa bodega puede surtir.
+    const central = bySource.get(ids.wh)!;
+    const norte = bySource.get(ids.wh2)!;
+    expect(await reserved(central.id)).toEqual([{ inventoryLocationId: ids.whStock, sourceType: 'TRANSFER_REQUEST', q: 1 }]);
+    expect(await reserved(norte.id)).toEqual([{ inventoryLocationId: ids.wh2Stock, sourceType: 'TRANSFER_REQUEST', q: 2 }]);
+    expect((await orders.findView(ids.company, central.id)).items.map((line) => line.productVariantId)).toEqual([ids.variantA]);
+    expect((await orders.findView(ids.company, norte.id)).items.map((line) => line.productVariantId)).toEqual([variantC]);
+    // Y cada bodega recibió su aviso.
+    expect(await noticesOf(central.id)).toContain('ORDER_REQUESTED');
+    expect(await noticesOf(norte.id)).toContain('ORDER_REQUESTED');
+  });
+
+  it('el vendedor anula su pedido mientras ningún corredor lo tomó, y a bodega le llega el aviso', async () => {
+    const order = await request('SO', ids.variantA, '1');
+    // Nadie lo ha tocado: se anula sin avisarle a nadie.
+    await go('seller', order.id, 'CANCELLED', { reason: 'El cliente se fue' });
+    expect((await orders.findView(ids.company, order.id)).status).toBe('CANCELLED');
+    expect(await reserved(order.id)).toEqual([]);
+    expect(await noticesOf(order.id)).not.toContain('ORDER_CANCELLED');
+
+    // Con bodega ya alistando, anular sí le avisa.
+    const packed = await request('SO', ids.variantA, '1');
+    await go('warehouse', packed.id, 'PACKING');
+    await go('seller', packed.id, 'CANCELLED', { reason: 'El cliente se arrepintió' });
+    const cancelled = await orders.findView(ids.company, packed.id);
+    expect(cancelled.status).toBe('CANCELLED');
+    expect(cancelled.cancellationReason).toBe('El cliente se arrepintió');
+    expect(await reserved(packed.id)).toEqual([]);
+    expect(await noticesOf(packed.id)).toContain('ORDER_CANCELLED');
+  });
+
+  it('tomada por un corredor, el vendedor ya no la anula: queda para el administrador', async () => {
+    const order = await request('SO', ids.variantA, '1');
+    await go('warehouse', order.id, 'PACKING');
+    await go('warehouse', order.id, 'READY_FOR_RUNNER');
+    await orders.claim(ids.company, actor('runner'), order.id);
+
+    await expect(go('seller', order.id, 'CANCELLED', { reason: 'El cliente se fue' })).rejects.toThrow(/corredor ya tomó/);
+    // Bodega tampoco: no es suya esa decisión.
+    await expect(go('warehouse', order.id, 'CANCELLED', { reason: 'porque sí' })).rejects.toThrow();
+
+    await orders.transition(ids.company, companyAdmin(), { id: order.id, to: 'CANCELLED' as never, reason: 'Anulada por el administrador' });
+    expect((await orders.findView(ids.company, order.id)).status).toBe('CANCELLED');
+    expect(await reserved(order.id)).toEqual([]);
+  });
+
+  it('la caja que cobra una orden quita líneas y agrega no inventariados, pero no catálogo', async () => {
+    const order = await request('SO', ids.variantA, '2');
+    await toSeller(order.id);
+    await go('seller', order.id, 'PENDING_PAYMENT');
+    const sale = await sales.createFromInternalOrder(ids.company, cashier(), { internalOrderId: order.id, cashSessionId: ids.session });
+
+    // Sin sales.create (la caja), el catálogo no se agrega a la venta de una orden.
+    await expect(
+      sales.addItem(
+        ids.company,
+        cashier(),
+        { saleId: sale.id, productVariantId: ids.variantB, description: 'Otra talla', quantity: '1', unitPrice: String(PRICE) },
+        undefined,
+        { canSellCatalog: false },
+      ),
+    ).rejects.toThrow(/solo se quitan líneas o se agregan productos no inventariados/);
+
+    // Un no inventariado sí: eso es justo lo que la caja puede sumar.
+    const withGeneric = await sales.addItem(
+      ids.company,
+      cashier(),
+      { saleId: sale.id, description: 'Medias', quantity: '1', unitPrice: '5000' },
+      undefined,
+      { canSellCatalog: false },
+    );
+    expect(Number(withGeneric.total)).toBe(2 * PRICE + 5000);
+
+    // Y quitar una línea del catálogo sigue siendo suyo.
+    const reader = { userId: ids.cashier, canViewAll: false, canReadAny: false };
+    const [line] = (await sales.findItems(ids.company, reader, sale.id)).filter((item) => item.productVariantId === ids.variantA);
+    const withoutLine = await sales.removeItem(ids.company, cashier(), sale.id, line.id);
+    expect(Number(withoutLine.total)).toBe(5000);
+
+    // Con sales.create (un vendedor en el mostrador) la misma línea de catálogo sí pasa el permiso:
+    // si falla, falla por existencia, no por el bloqueo de la caja.
+    await sales
+      .addItem(
+        ids.company,
+        cashier(),
+        { saleId: sale.id, productVariantId: ids.variantA, description: 'Air Force 1 40', quantity: '1', unitPrice: String(PRICE) },
+        undefined,
+        { canSellCatalog: true },
+      )
+      .catch((error: Error) => {
+        expect(error.message).not.toMatch(/solo se quitan líneas/);
+      });
+  });
+
+  it('el cajón con cosas de dos bodegas se manda en una RE por bodega, cada una a la que la despachó', async () => {
+    // Una talla solo del norte: su pedido sale de allá sin que nadie lo elija.
+    const fromNorte = await variantOnlyAt('43', ids.wh2Stock, 4);
+    const central = await request('SO', ids.variantA, '1');
+    expect(central.sourceLocationId).toBe(ids.wh);
+    const norte = (
+      await orders.request(ids.company, actor('seller'), {
+        type: 'SO' as never,
+        origin: 'SELLER' as never,
+        destinationLocationId: ids.store,
+        items: [{ productVariantId: fromNorte, quantity: '1' }],
+      })
+    )[0];
+    expect(norte.sourceLocationId).toBe(ids.wh2);
+
+    // Las dos llegan y el cliente no se lleva ninguna: las dos quedan en el cajón de la tienda.
+    for (const order of [central, norte]) {
+      await toSeller(order.id);
+      await go('seller', order.id, 'RETURNED');
+    }
+
+    const bin = await orders.returnsBinContents(ids.company, companyAdmin());
+    const mine = bin.filter((row) => row.storeId === ids.store && [ids.variantA, fromNorte].includes(row.productVariantId));
+    expect(mine.find((row) => row.productVariantId === ids.variantA)?.originWarehouseId).toBe(ids.wh);
+    expect(mine.find((row) => row.productVariantId === fromNorte)?.originWarehouseId).toBe(ids.wh2);
+
+    const created = await orders.createReturnFromBin(ids.company, companyAdmin(), {
+      storeId: ids.store,
+      productVariantIds: [ids.variantA, fromNorte],
+    });
+    expect(created).toHaveLength(2);
+    expect(created.every((order) => order.type === 'RE')).toBe(true);
+
+    const byDestination = new Map(created.map((order) => [order.destinationLocationId, order]));
+    expect([...byDestination.keys()].sort()).toEqual([ids.wh, ids.wh2].sort());
+    // Cada RE lleva solo lo que salió de esa bodega.
+    const centralItems = (await orders.findView(ids.company, byDestination.get(ids.wh)!.id)).items;
+    const norteItems = (await orders.findView(ids.company, byDestination.get(ids.wh2)!.id)).items;
+    expect(centralItems.map((line) => line.productVariantId)).toEqual([ids.variantA]);
+    expect(norteItems.map((line) => line.productVariantId)).toEqual([fromNorte]);
+    // Y las dos esperan corredor, cada una apartada en la tienda con TODO lo que el cajón tiene de
+    // esa referencia para esa bodega (una referencia marcada viaja entera; el cajón puede traer
+    // unidades de pruebas anteriores, y eso es el comportamiento acordado).
+    const binQty = (variantId: string, warehouseId: string) =>
+      mine
+        .filter((row) => row.productVariantId === variantId && row.originWarehouseId === warehouseId)
+        .reduce((total, row) => total + Number(row.quantity), 0);
+    for (const [warehouseId, variantId] of [
+      [ids.wh, ids.variantA],
+      [ids.wh2, fromNorte],
+    ] as const) {
+      const order = byDestination.get(warehouseId)!;
+      expect(order.status).toBe('WAITING_FOR_RUNNER');
+      expect(await reserved(order.id)).toEqual([
+        { inventoryLocationId: ids.storeStock, sourceType: 'TRANSFER_REQUEST', q: binQty(variantId, warehouseId) },
+      ]);
+      expect(await noticesOf(order.id)).toContain('ORDER_READY_FOR_RUNNER');
+    }
+    // Y el cajón ya no tiene esas referencias con bodega de origen.
+    const after = await orders.returnsBinContents(ids.company, companyAdmin());
+    expect(
+      after.filter((row) => row.storeId === ids.store && [ids.variantA, fromNorte].includes(row.productVariantId) && row.originWarehouseId !== null),
+    ).toEqual([]);
+  });
+
+  it('doble clic en "pedir a bodega": la misma clave devuelve el grupo entero y no duplica nada', async () => {
+    const onlyNorte = await variantOnlyAt('44', ids.wh2Stock, 3);
+    const input = {
+      type: 'SO' as never,
+      origin: 'SELLER' as never,
+      destinationLocationId: ids.store,
+      items: [
+        { productVariantId: ids.variantA, quantity: '1' },
+        { productVariantId: onlyNorte, quantity: '1' },
+      ],
+    };
+    const key = `doble-${RUN}`;
+    const first = await orders.request(ids.company, actor('seller'), input, key);
+    const second = await orders.request(ids.company, actor('seller'), input, key);
+
+    // El reintento no crea otras dos órdenes: devuelve LAS MISMAS, el grupo completo (no solo la
+    // primera, que es lo que guarda la clave de idempotencia).
+    expect(first).toHaveLength(2);
+    expect(second).toHaveLength(2);
+    expect(second.map((order) => order.id).sort()).toEqual(first.map((order) => order.id).sort());
+
+    // Y lo apartado sigue siendo una sola vez por bodega.
+    const bySource = new Map(first.map((order) => [order.sourceLocationId, order]));
+    expect(await reserved(bySource.get(ids.wh)!.id)).toEqual([{ inventoryLocationId: ids.whStock, sourceType: 'TRANSFER_REQUEST', q: 1 }]);
+    expect(await reserved(bySource.get(ids.wh2)!.id)).toEqual([{ inventoryLocationId: ids.wh2Stock, sourceType: 'TRANSFER_REQUEST', q: 1 }]);
+    const { rows } = await db.query(`SELECT COUNT(*)::int AS n FROM internal_orders WHERE "requestGroupId" = $1`, [first[0].requestGroupId]);
+    expect(rows[0].n).toBe(2);
   });
 });

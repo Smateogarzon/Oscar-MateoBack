@@ -39,6 +39,7 @@ import { IncidentModule } from './graphql/incident/incident.module.js';
 import { WriteOffModule } from './graphql/write-off/write-off.module.js';
 import { PurchaseOrderModule } from './graphql/purchase-order/purchase-order.module.js';
 import { InternalOrderModule } from './graphql/internal-order/internal-order.module.js';
+import { StoreModelMinimumModule } from './graphql/store-model-minimum/store-model-minimum.module.js';
 import { SaleModule } from './graphql/sale/sale.module.js';
 import { DiscountRequestModule } from './graphql/discount-request/discount-request.module.js';
 import { PaymentMethodModule } from './graphql/payment-method/payment-method.module.js';
@@ -163,6 +164,7 @@ const { validationRules, plugins } = new ApolloArmor().protect();
     WriteOffModule,
     PurchaseOrderModule,
     InternalOrderModule,
+    StoreModelMinimumModule,
     SaleModule,
     DiscountRequestModule,
     PaymentMethodModule,

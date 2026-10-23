@@ -221,12 +221,11 @@ export class SalePaymentService {
     // El consecutivo se pide al final, con todo lo demás ya validado: un cobro que falla no gasta número.
     await this.sales.assignNumber(manager, companyId, sale);
 
-    // Las líneas de catálogo (ver AddSaleItemInput.productVariantId) descuentan de la bodega STOCK
-    // donde esa variante esté registrada — no necesariamente la de la tienda que vendió: en esta
-    // empresa el punto de venta no tiene existencia física propia, todo viaja desde bodegas
-    // satélite (más adelante lo trae un corredor, ver InventoryLocationType.RUNNER; ese flujo todavía
-    // no existe). Se hace en la misma transacción del cobro: si no hay existencia en ninguna
-    // bodega, el cobro entero se revierte. Las líneas GENERIC no tocan inventario.
+    // Las líneas de catálogo (ver AddSaleItemInput.productVariantId) descuentan del cajón de la
+    // tienda que vendió, y de ningún otro: lo que no está en la tienda no se cobra, se pide a
+    // bodega y se cobra cuando llega (ver InventoryBalanceService.findStockLocationForSale). Se
+    // hace en la misma transacción del cobro: si la tienda no tiene la existencia, el cobro entero
+    // se revierte. Las líneas GENERIC no tocan inventario.
     const items = await manager.getRepository(SaleItem).find({ where: { saleId: sale.id } });
     const inventoried = items.filter((item) => item.type === SaleItemType.INVENTORIED && item.productVariantId);
 
@@ -240,9 +239,13 @@ export class SalePaymentService {
     // curso sigue en pie y sí protege sus unidades.
     await releaseReservations(manager, InventorySourceType.SALE, [sale.id]);
 
+    // Lo que sale del mostrador de la tienda, para reponerlo al final (ver más abajo).
+    const soldFromStore = new Map<string, Decimal>();
     for (const item of inventoried) {
-      // Sin reserva solo quedan los borradores de antes de que las ventas apartaran: se elige bodega
-      // como se hacía entonces.
+      // Sin reserva solo quedan los borradores de antes de que las ventas apartaran: se resuelve
+      // ahora, contra el cajón de la tienda. Si esa tienda no lo tiene, el cobro se rechaza y hay
+      // que rearmar la venta — esos borradores son de cuando la venta podía salir de cualquier
+      // bodega.
       const reserved = heldByVariant.get(item.productVariantId!);
       const fromLocationId =
         reserved?.inventoryLocationId ??
@@ -251,6 +254,7 @@ export class SalePaymentService {
           companyId,
           item.productVariantId!,
           item.quantity,
+          sale.storeId,
         ));
       await this.inventoryMovements.recordInTransaction(manager, companyId, actor.userId, {
         productVariantId: item.productVariantId!,
@@ -261,6 +265,8 @@ export class SalePaymentService {
         sourceId: sale.id,
         sourceNumber: sale.saleNumber,
       });
+      const productVariantId = item.productVariantId!;
+      soldFromStore.set(productVariantId, (soldFromStore.get(productVariantId) ?? new Decimal(0)).plus(item.quantity));
     }
 
     sale.status = SaleStatus.COMPLETED;
@@ -274,6 +280,29 @@ export class SalePaymentService {
     if (completed.internalOrderId) {
       await this.internalOrders.markPaid(manager, companyId, completed.internalOrderId, completed, actor.userId);
     }
+
+    // Lo que salió del mostrador se repone solo (ver InternalOrderService.restockStore). Va al
+    // final, cuando ya se movió todo lo de la venta: así los balances de la tienda se tocan siempre
+    // antes que los de la bodega y dos cobros simultáneos no se abrazan.
+    //
+    // De una venta que cobra una orden de venta (SO) se descuenta lo que la orden trajo de fuera:
+    // esa mercancía la pidió un corredor para ese cliente y nunca fue parte del surtido. Lo que la
+    // orden tomó del propio mostrador —un pedido de lo que la tienda ya tenía— sí deja hueco y se
+    // repone igual que una venta de mostrador (ver `broughtFromWarehouse`).
+    const brought = completed.internalOrderId
+      ? await this.internalOrders.broughtFromWarehouse(manager, companyId, completed.internalOrderId)
+      : new Map<string, Decimal>();
+    const fromCounter = new Map<string, Decimal>();
+    for (const [productVariantId, quantity] of soldFromStore) {
+      const rest = quantity.minus(brought.get(productVariantId) ?? new Decimal(0));
+      if (rest.greaterThan(0)) fromCounter.set(productVariantId, rest);
+    }
+    await this.internalOrders.restockStore(manager, companyId, {
+      storeId: completed.storeId,
+      sold: fromCounter,
+      actorId: actor.userId,
+      saleNumber: completed.saleNumber,
+    });
     return completed;
   }
 

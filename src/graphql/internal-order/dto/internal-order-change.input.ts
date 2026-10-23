@@ -1,6 +1,6 @@
 import { Type } from 'class-transformer';
 import { Field, ID, InputType } from '@nestjs/graphql';
-import { ArrayMinSize, IsArray, IsUUID, Matches, ValidateNested } from 'class-validator';
+import { ArrayMinSize, IsArray, IsOptional, IsUUID, Matches, ValidateNested } from 'class-validator';
 import { QUANTITY_PATTERN } from '../../../common/utils/money.js';
 
 // Una línea que el cliente cambia: cuál (de la versión vigente) y por qué variante.
@@ -19,16 +19,20 @@ export class InternalOrderChangeLineInput {
   quantity: string;
 }
 
-// Cambio de pedido: las líneas que se cambian y la bodega que despacha lo nuevo.
+// Cambio de pedido: las líneas que se cambian. La bodega que despacha lo nuevo NO se pide: la elige
+// el servidor con lo que hay disponible, igual que en un pedido normal (ver `InternalOrderService.
+// requestChange`). `sourceLocationId` queda solo por compatibilidad con quien todavía lo mande, y
+// cuando viene se respeta.
 @InputType()
 export class InternalOrderChangeInput {
   @Field(() => ID)
   @IsUUID()
   orderId: string;
 
-  @Field(() => ID)
+  @Field(() => ID, { nullable: true })
+  @IsOptional()
   @IsUUID()
-  sourceLocationId: string;
+  sourceLocationId?: string;
 
   @Field(() => [InternalOrderChangeLineInput])
   @IsArray()

@@ -1,4 +1,5 @@
 import { BadRequestException, ConflictException, ForbiddenException, NotFoundException } from '@nestjs/common';
+import { In } from 'typeorm';
 import { Decimal } from 'decimal.js';
 import { IdempotencyKey } from '../idempotency/entities/idempotency-key.entity.js';
 import { fingerprintOf } from '../idempotency/idempotency.js';
@@ -9,11 +10,25 @@ import { User } from '../user/entities/user.entity.js';
 import { Incident } from '../incident/entities/incident.entity.js';
 import { PurchaseOrderItem } from './entities/purchase-order-item.entity.js';
 import { UserCompanyRole } from '../user-company-role/entities/user-company-role.entity.js';
+import { UserLocationAccess } from '../user-location-access/entities/user-location-access.entity.js';
 import { PurchaseOrderStatus } from './entities/purchase-order-status.enum.js';
 import { PurchaseOrderService } from './purchase-order.service.js';
 
 const claimKey = (sql: string) =>
   sql.includes('INSERT INTO "idempotency_keys"') ? [{ id: 'claim-1' }] : [];
+
+// Quién trabaja en la bodega a la que entran las órdenes de las pruebas, y quién administra la
+// plataforma (entra a todas sin asignación). `usersWithStoreAccess` filtra las audiencias con esto:
+// a un bodeguero de otra bodega no se le avisa.
+const ASSIGNED_TO_DESTINATION = ['warehouse-1'];
+const PLATFORM_MEMBERS = ['super-1'];
+
+// Los ids que pide un `where: { userId: In([...]) }`, para que los mocks respeten el filtro en vez
+// de devolver siempre lo mismo.
+const askedUserIds = (where: { userId?: unknown } | undefined): string[] => {
+  const value = (where?.userId as { value?: unknown } | undefined)?.value ?? where?.userId;
+  return Array.isArray(value) ? (value as string[]) : typeof value === 'string' ? [value] : [];
+};
 
 function createService() {
   const repo = { find: vi.fn().mockResolvedValue([]), findOneBy: vi.fn() };
@@ -28,8 +43,29 @@ function createService() {
     findOneBy: vi.fn().mockResolvedValue({ id: 'warehouse-1', type: LocationType.WAREHOUSE }),
   };
   // `find` son los miembros de plataforma (el super admin) a los que también les llega la señal.
-  const membershipRepo = { existsBy: vi.fn().mockResolvedValue(true), find: vi.fn().mockResolvedValue([]) };
+  const membershipRepo = {
+    existsBy: vi.fn().mockResolvedValue(true),
+    find: vi.fn(async ({ where }: { where?: { userId?: unknown } } = {}) =>
+      askedUserIds(where)
+        .filter((userId) => PLATFORM_MEMBERS.includes(userId))
+        .map((userId) => ({ userId })),
+    ),
+  };
   const userRepo = { existsBy: vi.fn().mockResolvedValue(true) };
+  // Las bodegas asignadas a quien opera (Configuración → Personal por ubicación): deciden en qué
+  // bodega puede recibir. Por defecto `membershipRepo.existsBy` lo da como miembro de plataforma, que
+  // entra a todas sin asignación, así que esto solo pesa cuando un test baja esa a false.
+  // Quién tiene asignada la bodega a la que entra la orden. `existsBy` responde por una sola persona
+  // (recibir); `find`, por una lista (a quién se le avisa). Un test que necesite lo contrario los
+  // cambia.
+  const locationAccessRepo = {
+    existsBy: vi.fn().mockResolvedValue(false),
+    find: vi.fn(async ({ where }: { where?: { userId?: unknown } } = {}) =>
+      askedUserIds(where)
+        .filter((userId) => ASSIGNED_TO_DESTINATION.includes(userId))
+        .map((userId) => ({ userId })),
+    ),
+  };
   const idempotencyRepo = { findOneBy: vi.fn().mockResolvedValue(null) };
   const variantRepo = {
     find: vi.fn().mockResolvedValue([{ id: VARIANT, cost: new Decimal('1000') }]),
@@ -47,23 +83,19 @@ function createService() {
     find: vi.fn().mockResolvedValue([]),
     count: vi.fn(async () => 0),
   };
+  // Cada entidad con su repositorio; lo que no esté aquí cae en el de órdenes de compra.
+  const repos = new Map<unknown, unknown>([
+    [Location, locationRepo],
+    [UserCompanyRole, membershipRepo],
+    [UserLocationAccess, locationAccessRepo],
+    [User, userRepo],
+    [ProductVariant, variantRepo],
+    [IdempotencyKey, idempotencyRepo],
+    [PurchaseOrderItem, itemRepo],
+    [Incident, incidentRepo],
+  ]);
   const manager = {
-    getRepository: (entity: unknown) =>
-      entity === Location
-        ? locationRepo
-        : entity === UserCompanyRole
-          ? membershipRepo
-          : entity === User
-            ? userRepo
-            : entity === ProductVariant
-              ? variantRepo
-              : entity === IdempotencyKey
-                ? idempotencyRepo
-                : entity === PurchaseOrderItem
-                  ? itemRepo
-                  : entity === Incident
-                    ? incidentRepo
-                    : txPurchaseOrderRepo,
+    getRepository: (entity: unknown) => repos.get(entity) ?? txPurchaseOrderRepo,
     query: vi.fn(async (sql: string) => claimKey(sql)),
   };
   const dataSource = {
@@ -93,6 +125,7 @@ function createService() {
     txPurchaseOrderRepo,
     locationRepo,
     membershipRepo,
+    locationAccessRepo,
     userRepo,
     idempotencyRepo,
     variantRepo,
@@ -131,10 +164,13 @@ const line = (quantity: string, shipped?: string) => ({
 });
 
 // Una orden ya guardada, como la devuelve la base de datos al bloquearla.
+const DESTINATION = 'warehouse-1';
+
 const stored = (status: PurchaseOrderStatus) => ({
   id: 'po-1',
   supplierId: SUPPLIER,
   createdBy: USER,
+  destinationLocationId: DESTINATION,
   status,
 });
 
@@ -146,6 +182,45 @@ describe('PurchaseOrderService', () => {
       await service.findAll(COMPANY);
 
       expect(repo.find).toHaveBeenCalledWith({ where: { companyId: COMPANY }, order: { createdAt: 'DESC' } });
+    });
+
+    // El bodeguero solo ve lo que entra a sus bodegas (ver purchase-order-visibility.ts).
+    it('limits the list to the warehouses the viewer is assigned', async () => {
+      const { service, repo } = createService();
+
+      await service.findAll(COMPANY, { destinationLocationIds: ['bodega-1', 'bodega-2'] });
+
+      expect(repo.find).toHaveBeenCalledWith({
+        where: { companyId: COMPANY, destinationLocationId: In(['bodega-1', 'bodega-2']) },
+        order: { createdAt: 'DESC' },
+      });
+    });
+
+    // Sin ninguna bodega asignada no ve ninguna orden: ni se consulta.
+    it('lists nothing for a viewer with no warehouse, instead of listing everything', async () => {
+      const { service, repo } = createService();
+
+      await expect(service.findAll(COMPANY, { destinationLocationIds: [] })).resolves.toEqual([]);
+      expect(repo.find).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('findOne', () => {
+    it('does not find an order that lands in a warehouse the viewer does not have', async () => {
+      const { service, repo } = createService();
+      repo.findOneBy.mockResolvedValue(null);
+
+      await expect(service.findOne(COMPANY, 'po-1', undefined, ['bodega-9'])).rejects.toThrow(NotFoundException);
+      expect(repo.findOneBy).toHaveBeenCalledWith(
+        expect.objectContaining({ destinationLocationId: In(['bodega-9']) }),
+      );
+    });
+
+    it('does not even look when the viewer has no warehouse at all', async () => {
+      const { service, repo } = createService();
+
+      await expect(service.findOne(COMPANY, 'po-1', undefined, [])).rejects.toThrow(NotFoundException);
+      expect(repo.findOneBy).not.toHaveBeenCalled();
     });
   });
 
@@ -339,6 +414,34 @@ describe('PurchaseOrderService', () => {
 
       await expect(service.receive(COMPANY, SUPPLIER, 'po-1', counted)).rejects.toThrow(ForbiddenException);
       expect(receiving.receive).not.toHaveBeenCalled();
+    });
+
+    // Lo de la captura: el bodeguero de otra bodega podía firmar la llegada y meterle existencia a
+    // una bodega que no opera.
+    it('does not let a warehouse keeper receive into a warehouse that is not theirs', async () => {
+      const { service, repo, txPurchaseOrderRepo, receiving, membershipRepo, locationAccessRepo } = createService();
+      repo.findOneBy.mockResolvedValue(stored(PurchaseOrderStatus.SHIPPED));
+      txPurchaseOrderRepo.findOne.mockResolvedValue(stored(PurchaseOrderStatus.SHIPPED));
+      membershipRepo.existsBy.mockResolvedValue(false);
+      locationAccessRepo.existsBy.mockResolvedValue(false);
+
+      await expect(service.receive(COMPANY, WAREHOUSE, 'po-1', counted)).rejects.toThrow(ForbiddenException);
+      expect(receiving.receive).not.toHaveBeenCalled();
+    });
+
+    it('lets the keeper of that very warehouse receive it', async () => {
+      const { service, repo, txPurchaseOrderRepo, receiving, membershipRepo, locationAccessRepo } = createService();
+      repo.findOneBy.mockResolvedValue(stored(PurchaseOrderStatus.SHIPPED));
+      txPurchaseOrderRepo.findOne.mockResolvedValue(stored(PurchaseOrderStatus.SHIPPED));
+      membershipRepo.existsBy.mockResolvedValue(false);
+      locationAccessRepo.existsBy.mockImplementation(
+        async ({ locationId }: { locationId: string }) => locationId === DESTINATION,
+      );
+
+      await expect(service.receive(COMPANY, WAREHOUSE, 'po-1', counted)).resolves.toMatchObject({
+        status: PurchaseOrderStatus.RECEIVED,
+      });
+      expect(receiving.receive).toHaveBeenCalled();
     });
 
     it('does not receive one the supplier has not dispatched yet', async () => {
@@ -537,6 +640,26 @@ describe('PurchaseOrderService', () => {
       expect(noticesSent(notifications)).toEqual([
         expect.objectContaining({ type: 'PURCHASE_ORDER_SENT', recipientIds: ['purchasing-1'] }),
       ]);
+    });
+
+    // El bodeguero de otra bodega no se entera: tampoco ve la orden ni puede recibirla, así que el
+    // aviso solo le habría dado algo que al tocarlo no lleva a ninguna parte.
+    it('only tells the keepers of the warehouse the order lands in', async () => {
+      const { service, repo, txPurchaseOrderRepo, itemRepo, notifications } = createService();
+      repo.findOneBy.mockResolvedValue(stored(PurchaseOrderStatus.SENT));
+      txPurchaseOrderRepo.findOne.mockResolvedValue(stored(PurchaseOrderStatus.SENT));
+      itemRepo.find.mockResolvedValue([line('2')]);
+      // Dos bodegueros con el mismo permiso; solo uno tiene asignada la bodega de esta orden.
+      notifications.findUserIdsWithPermission.mockImplementation(async (_manager: unknown, _companyId: string, code: string) =>
+        code === 'warehouse.fulfill_orders' ? ['warehouse-1', 'keeper-of-another-warehouse'] : ['purchasing-1'],
+      );
+
+      await service.ship(COMPANY, SUPPLIER, 'po-1', [{ itemId: 'item-1', quantity: '2' }]);
+
+      // El aviso de despacho va a compras y a bodega: de bodega, solo quien opera ESTA.
+      const toWarehouse = noticesSent(notifications).find((notice) => notice.type === 'PURCHASE_ORDER_SHIPPED');
+      expect(toWarehouse?.recipientIds).toContain('warehouse-1');
+      expect(toWarehouse?.recipientIds).not.toContain('keeper-of-another-warehouse');
     });
 
     it('tells the company about an overage, and keeps the warehouse out until it is approved', async () => {
