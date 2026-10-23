@@ -285,17 +285,24 @@ export class SalePaymentService {
     // final, cuando ya se movió todo lo de la venta: así los balances de la tienda se tocan siempre
     // antes que los de la bodega y dos cobros simultáneos no se abrazan.
     //
-    // Una venta que cobra una orden de venta (SO) no repone nada: esa mercancía la trajo un
-    // corredor para ese cliente, no salió del surtido del mostrador. Si el modelo igual quedó bajo
-    // su mínimo, aparece en "Qué surtir".
-    if (!completed.internalOrderId) {
-      await this.internalOrders.restockStore(manager, companyId, {
-        storeId: completed.storeId,
-        sold: soldFromStore,
-        actorId: actor.userId,
-        saleNumber: completed.saleNumber,
-      });
+    // De una venta que cobra una orden de venta (SO) se descuenta lo que la orden trajo de fuera:
+    // esa mercancía la pidió un corredor para ese cliente y nunca fue parte del surtido. Lo que la
+    // orden tomó del propio mostrador —un pedido de lo que la tienda ya tenía— sí deja hueco y se
+    // repone igual que una venta de mostrador (ver `broughtFromWarehouse`).
+    const brought = completed.internalOrderId
+      ? await this.internalOrders.broughtFromWarehouse(manager, companyId, completed.internalOrderId)
+      : new Map<string, Decimal>();
+    const fromCounter = new Map<string, Decimal>();
+    for (const [productVariantId, quantity] of soldFromStore) {
+      const rest = quantity.minus(brought.get(productVariantId) ?? new Decimal(0));
+      if (rest.greaterThan(0)) fromCounter.set(productVariantId, rest);
     }
+    await this.internalOrders.restockStore(manager, companyId, {
+      storeId: completed.storeId,
+      sold: fromCounter,
+      actorId: actor.userId,
+      saleNumber: completed.saleNumber,
+    });
     return completed;
   }
 

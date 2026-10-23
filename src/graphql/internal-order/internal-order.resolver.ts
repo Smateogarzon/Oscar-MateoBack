@@ -221,6 +221,35 @@ export class InternalOrderResolver {
     return this.internalOrderService.findView(companyId, order.id);
   }
 
+  // El bodeguero toma el pedido: queda como responsable de su trabajo de bodega y ningún otro
+  // bodeguero lo alista ni lo cuenta. Cuál es el permiso que de verdad hace falta depende del paso
+  // pendiente (alistar o recibir una devolución) y lo comprueba el servicio.
+  @Mutation(() => InternalOrderObjectType)
+  @RequireAnyPermission(PermissionCode.WAREHOUSE_FULFILL_ORDERS, PermissionCode.WAREHOUSE_RECEIVE_RETURNS)
+  async claimInternalOrderForWarehouse(
+    @CurrentCompanyId() companyId: string,
+    @CurrentUser() user: JwtPayload,
+    @CurrentCompanyAccess() access: CompanyAccess,
+    @Args('orderId', { type: () => ID }) orderId: string,
+  ) {
+    const order = await this.internalOrderService.claimForWarehouse(companyId, actorOf(user, access), orderId);
+    return this.internalOrderService.findView(companyId, order.id);
+  }
+
+  // Soltar el pedido tomado. Solo pide pertenecer a la empresa: lo suelta quien lo tomó, y el
+  // administrador libera el de cualquiera para reasignarlo (ver `releaseFromWarehouse`).
+  @Mutation(() => InternalOrderObjectType)
+  @RequireCompanyMembership()
+  async releaseInternalOrderFromWarehouse(
+    @CurrentCompanyId() companyId: string,
+    @CurrentUser() user: JwtPayload,
+    @CurrentCompanyAccess() access: CompanyAccess,
+    @Args('orderId', { type: () => ID }) orderId: string,
+  ) {
+    const order = await this.internalOrderService.releaseFromWarehouse(companyId, actorOf(user, access), orderId);
+    return this.internalOrderService.findView(companyId, order.id);
+  }
+
   // ─── Cajón de devoluciones (solo el administrador) ──────────────────────────────────────────
 
   @Query(() => [ReturnsBinLineObjectType])

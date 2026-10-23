@@ -113,6 +113,13 @@ export async function settleInternalOrderNotices(
   if (internalOrder.runnerId && !settled.includes(NotificationType.ORDER_READY_FOR_RUNNER)) {
     settled.push(NotificationType.ORDER_READY_FOR_RUNNER);
   }
+  // Lo mismo con "llegó un pedido nuevo": va a toda la bodega y deja de pedirle algo al resto en
+  // cuanto un bodeguero lo toma (ver `InternalOrderService.claimForWarehouse`), aunque tomarlo no
+  // cambie el estado. Si lo suelta, el aviso ya no vuelve a pendientes: queda en su bandeja como
+  // leído y el pedido sin tomar se ve igual en la vista de bodega.
+  if (internalOrder.warehouseOperatorId && !settled.includes(NotificationType.ORDER_REQUESTED)) {
+    settled.push(NotificationType.ORDER_REQUESTED);
+  }
   if (settled.length === 0) return;
   await notifications.markEntityRead(manager, NotificationEntityType.INTERNAL_ORDER, internalOrder.id, settled);
 }

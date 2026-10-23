@@ -90,6 +90,10 @@ export const FLOWS: Record<InternalOrderType, readonly FlowStep[]> = {
     { from: S.RECEIVED_BY_SELLER, to: S.RETURNED, effect: 'RETURN_REQUEST', permissions: RECEIPT, detail: 'Cliente no compra · al cajón de devoluciones' },
     { from: S.PENDING_PAYMENT, to: S.RECEIVED_BY_SELLER, effect: 'BACK_TO_SELLER', permissions: CASH_DESK, detail: 'Vuelve al vendedor · el cliente aún no decide' },
     { from: S.PENDING_PAYMENT, to: S.RETURNED, effect: 'RETURN_REQUEST', permissions: CASH_DESK, detail: 'Cliente no compra · al cajón de devoluciones' },
+    // Salvavidas del administrador para las que quedaron esperando una devolución que ya no llega
+    // (ver `RETURN_REQUESTED` en SERVICE_STATUSES). No toca inventario: lo del cliente ya está en el
+    // cajón de la tienda desde que se pidió el cambio.
+    { from: S.RETURN_REQUESTED, to: S.RETURNED, effect: 'CLOSE', permissions: [], actor: 'ADMIN', detail: 'Cerrada como devuelta · lo del cliente ya está en el cajón' },
     { from: S.NEW, to: S.CANCELLED, ...CANCEL_SO, detail: 'Orden anulada' },
     { from: S.ACCEPTED_BY_WAREHOUSE, to: S.CANCELLED, ...CANCEL_SO, detail: 'Orden anulada' },
     { from: S.PACKING, to: S.CANCELLED, ...CANCEL_SO, detail: 'Orden anulada' },
@@ -123,6 +127,25 @@ export const FLOWS: Record<InternalOrderType, readonly FlowStep[]> = {
     { from: S.RESTOCK_REQUESTED, to: S.CANCELLED, ...CANCEL, detail: 'Surtido anulado' },
     { from: S.WAITING_FOR_RUNNER, to: S.CANCELLED, ...CANCEL, detail: 'Surtido anulado' },
   ],
+};
+
+// Los estados a los que una orden llega sin que esta tabla los nombre: los pone el servicio dentro
+// de la operación que los provoca. Cada uno dice QUIÉN lo saca de ahí, y la prueba
+// "ningún estado sin salida" (internal-order-flow.spec.ts) exige que todo estado no final tenga un
+// paso en FLOWS o una explicación aquí. Esa pregunta —"¿quién cierra esto?"— es la que faltaba
+// hacerse cuando SO-000008 quedó congelada en RETURN_REQUESTED esperando una RE que nadie creaba.
+export const SERVICE_STATUSES: Record<InternalOrderType, Partial<Record<S, string>>> = {
+  [InternalOrderType.SO]: {
+    [S.ITEM_CHANGE_REQUESTED]:
+      'La resuelve la sub-orden del cambio: al llegar a la tienda absorbe a la original (CLOSED_BY_CHANGE) y, si se anula, la original vuelve al vendedor con lo que se quedó o se cierra como devuelta si no se quedó con nada.',
+    [S.RETURN_REQUESTED]:
+      'Heredado: las nuevas ya no llegan aquí (releaseParentAfterSubCancelled las cierra en el acto). Las que quedaron atascadas las cierra el administrador con el paso "Cerrar como devuelta", y una RE enlazada también las cierra al llegar a bodega (closeReturnedSale).',
+  },
+  [InternalOrderType.RE]: {
+    [S.RETURN_CREATED]: 'El servicio la pasa a WAITING_FOR_RUNNER en la misma operación que la crea.',
+  },
+  [InternalOrderType.TR]: {},
+  [InternalOrderType.RS]: {},
 };
 
 // Con qué estado nace cada tipo.
@@ -210,4 +233,21 @@ export function stepFor(type: InternalOrderType, from: S, to: S): FlowStep | und
 
 export function stepsFrom(type: InternalOrderType, from: S): FlowStep[] {
   return FLOWS[type].filter((step) => step.from === from);
+}
+
+/**
+ * El paso de bodega pendiente desde este estado, o `undefined` si ahora mismo no hay nada que hacer
+ * en bodega (lo tiene el corredor, la tienda o la caja). Es el paso que un bodeguero "toma": sale de
+ * `WAREHOUSE_EFFECT_AT`, así que alistar y despachar miran la sede de origen, y recibir una
+ * devolución, la de destino. Nunca hay dos a la vez: desde un estado, bodega tiene un solo paso.
+ */
+export function warehouseStepFrom(type: InternalOrderType, from: S): FlowStep | undefined {
+  return stepsFrom(type, from).find((step) => WAREHOUSE_EFFECT_AT[step.effect] !== undefined);
+}
+
+/** En qué sede está la mercancía que mueve un paso de bodega. */
+export function warehouseStepLocation(order: { sourceLocationId: string; destinationLocationId: string }, step: FlowStep): string | null {
+  const at = WAREHOUSE_EFFECT_AT[step.effect];
+  if (!at) return null;
+  return at === 'SOURCE' ? order.sourceLocationId : order.destinationLocationId;
 }
