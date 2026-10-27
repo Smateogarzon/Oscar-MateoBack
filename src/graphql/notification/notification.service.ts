@@ -5,14 +5,17 @@ import {
   EntityManager,
   In,
   IsNull,
-  Not,
   Repository,
 } from 'typeorm';
+import { COMPANY_VISIBLE_ROLE, PLATFORM_ROLE } from '../../common/access/platform-role.js';
 import { PermissionCode } from '../../common/enums/permission-code.enum.js';
+import { RoleCode } from '../../common/enums/role-code.enum.js';
 import { RecordStatus } from '../../common/enums/record-status.enum.js';
+import { fullName } from '../../common/utils/text.js';
 import { RealtimeEventKind } from '../../realtime/realtime-event.js';
 import { RealtimeService } from '../../realtime/realtime.service.js';
-import { RoleScope } from '../role/entities/role-scope.enum.js';
+import { Permission } from '../permission/entities/permission.entity.js';
+import type { RoleScope } from '../role/entities/role-scope.enum.js';
 import { RolePermission } from '../role-permission/entities/role-permission.entity.js';
 import { UserCompanyRole } from '../user-company-role/entities/user-company-role.entity.js';
 import { User } from '../user/entities/user.entity.js';
@@ -25,10 +28,32 @@ import {
 import { Notification } from './entities/notification.entity.js';
 import { UserNotification } from './entities/user-notification.entity.js';
 import { buildNotificationText } from './notification-text.js';
+import { notificationUrl } from './notification-url.js';
 
 const DEFAULT_PAGE_SIZE = 30;
 const MAX_PAGE_SIZE = 100;
 const UNKNOWN_ACTOR_NAME = 'Alguien';
+
+// El administrador (y el super admin) no recibe avisos de todo: solo de las órdenes de compra, los
+// descuentos y las devoluciones (estas dos las aprueba él). Los pedidos internos y el stock bajo son
+// de quien opera (bodega, corredores, tiendas). Las señales en vivo (signalChange) no cambian: sus
+// pantallas se siguen poniendo al día solas.
+const ADMIN_NOTIFICATION_CHANNELS: readonly NotificationChannel[] = [
+  NotificationChannel.PURCHASING,
+  NotificationChannel.DISCOUNTS,
+  NotificationChannel.RETURNS,
+  // Inventario entra porque sus avisos son justamente para quien administra: la existencia que
+  // cruzó su mínimo y el mostrador que se quedó sin con qué reponerse. Sin esto se filtraban todos
+  // sus destinatarios y el aviso no le llegaba a nadie.
+  NotificationChannel.INVENTORY,
+];
+
+// Avisos sueltos que sí son del administrador aunque su canal no lo sea. La regla de arriba es por
+// canal porque casi siempre el canal basta; esta es la excepción, tipo por tipo.
+//   ORDER_INCIDENT  una novedad de un pedido solo la cierra él (resolveIncident pide
+//                   inventory.manage_products), y lo dañado se queda esperando que decida qué hacer
+//                   con ello. Sin esto se enteraba todo el mundo menos quien tiene que actuar.
+const ADMIN_NOTIFICATION_TYPES: readonly NotificationType[] = [NotificationType.ORDER_INCIDENT];
 
 export interface NotifyInput {
   companyId: string;
@@ -38,9 +63,15 @@ export interface NotifyInput {
   entityType: NotificationEntityType;
   entityId: string;
   locationId: string | null;
-  // El número de la venta o de la devolución; null si es una venta en borrador (sin número todavía)
+  // El número de la venta, de la devolución o de la orden de compra; null si es una venta en borrador
+  // (sin número todavía)
   reference: string | null;
   notes?: string | null;
+  // Solo para INVENTORY_LOW_STOCK (ver NotificationTextParams).
+  quantity?: string;
+  minStock?: string;
+  locationName?: string | null;
+  outOfStock?: boolean;
 }
 
 // Los avisos se guardan seis meses: después no le sirven a nadie y la tabla crecería sin fin.
@@ -100,28 +131,38 @@ export class NotificationService {
     manager: EntityManager,
     input: NotifyInput,
   ): Promise<NotifyResult | null> {
-    const recipientIds = [...new Set(input.recipientIds)].filter(
+    const channel = CHANNEL_OF_TYPE[input.type];
+    const candidates = [...new Set(input.recipientIds)].filter(
       (id) => id !== input.actorId,
     );
+    const admins =
+      ADMIN_NOTIFICATION_CHANNELS.includes(channel) || ADMIN_NOTIFICATION_TYPES.includes(input.type)
+        ? new Set<string>()
+        : await this.adminsAmong(manager, input.companyId, candidates);
+    const recipientIds = candidates.filter((id) => !admins.has(id));
     if (recipientIds.length === 0) return null;
 
     const actor = await manager
       .getRepository(User)
       .findOneBy({ id: input.actorId });
     const actorName = actor
-      ? `${actor.firstName} ${actor.lastName}`.trim()
+      ? fullName(actor)
       : UNKNOWN_ACTOR_NAME;
     const { title, message } = buildNotificationText(input.type, {
       actorName,
       reference: input.reference,
       notes: input.notes,
+      quantity: input.quantity,
+      minStock: input.minStock,
+      locationName: input.locationName,
+      outOfStock: input.outOfStock,
     });
 
     const notificationRepo = manager.getRepository(Notification);
     const notification = await notificationRepo.save(
       notificationRepo.create({
         companyId: input.companyId,
-        channel: CHANNEL_OF_TYPE[input.type],
+        channel,
         type: input.type,
         title,
         message,
@@ -144,6 +185,14 @@ export class NotificationService {
 
     // A cada destinatario le llega en vivo una señal de que tiene un aviso nuevo, pero solo cuando la
     // transacción se confirme (ver RealtimeService.publishAfterCommit).
+    // El mismo aviso también sale al sistema del dispositivo (web push), con el mismo texto y agrupado
+    // por la entidad a la que se refiere (una misma orden no apila avisos en el celular).
+    const push = {
+      title,
+      body: message,
+      url: notificationUrl(input.entityType, input.entityId, input.companyId),
+      tag: `${input.entityType}:${input.entityId}`,
+    };
     const at = new Date();
     this.realtime.publishAfterCommit(
       manager,
@@ -156,11 +205,38 @@ export class NotificationService {
         entityType: input.entityType,
         entityId: input.entityId,
         at,
+        push,
       })),
     );
 
     this.purgeOldSometimes(manager);
     return { notification, recipientIds };
+  }
+
+  // Quienes administran la empresa (rol Administrador, activos) y la plataforma (super admin): a quien
+  // le toca lo que es solo del administrador, como el cajón de devoluciones.
+  async findCompanyAdminIds(manager: EntityManager, companyId: string): Promise<string[]> {
+    const activeMember = { companyId, status: RecordStatus.ACTIVE, user: { status: RecordStatus.ACTIVE } };
+    const memberships = await manager.getRepository(UserCompanyRole).find({
+      where: [
+        { ...activeMember, role: { code: RoleCode.ADMIN, status: RecordStatus.ACTIVE } },
+        { ...activeMember, role: { ...PLATFORM_ROLE, status: RecordStatus.ACTIVE } },
+      ],
+    });
+    return [...new Set(memberships.map((membership) => membership.userId))];
+  }
+
+  // Quiénes de `userIds` administran la empresa (rol Administrador) o la plataforma (super admin).
+  private async adminsAmong(manager: EntityManager, companyId: string, userIds: string[]): Promise<Set<string>> {
+    if (userIds.length === 0) return new Set();
+    const activeMember = { companyId, userId: In(userIds), status: RecordStatus.ACTIVE };
+    const memberships = await manager.getRepository(UserCompanyRole).find({
+      where: [
+        { ...activeMember, role: { code: RoleCode.ADMIN } },
+        { ...activeMember, role: PLATFORM_ROLE },
+      ],
+    });
+    return new Set(memberships.map((membership) => membership.userId));
   }
 
   // Borra los avisos de más de seis meses, de vez en cuando y sin esperar: va por otra conexión del
@@ -215,30 +291,38 @@ export class NotificationService {
   }
 
   // Los usuarios de la empresa que tienen un permiso: miembros activos, con la cuenta activa, en un
-  // rol activo que la empresa dejó con ese permiso. Los usuarios de plataforma (rol global) no
-  // cuentan: las empresas no los ven.
+  // rol activo que la empresa dejó con ese permiso; y además los miembros de plataforma (el super
+  // admin), que tienen todo el catálogo sin pasar por role_permissions (ver loadCompanyAccess): si
+  // no, nunca recibían un aviso ni una señal en vivo.
+  // `scope` acota los roles de la empresa a ESE alcance (los de plataforma entran siempre). Lo usan
+  // las compras: el proveedor tiene el mismo permiso que el administrador
+  // (suppliers.manage_purchase_orders) y no le toca enterarse de las órdenes de otro proveedor.
   async findUserIdsWithPermission(
     manager: EntityManager,
     companyId: string,
     permission: PermissionCode,
+    options: { scope?: RoleScope } = {},
   ): Promise<string[]> {
+    const permissionActive = await manager
+      .getRepository(Permission)
+      .existsBy({ code: permission, status: RecordStatus.ACTIVE });
+    if (!permissionActive) return [];
+
     const grants = await manager.getRepository(RolePermission).find({
       where: {
         companyId,
-        permission: { code: permission, status: RecordStatus.ACTIVE },
-        role: { status: RecordStatus.ACTIVE, scope: Not(RoleScope.GLOBAL) },
+        permission: { code: permission },
+        role: { status: RecordStatus.ACTIVE, ...(options.scope ? { scope: options.scope } : COMPANY_VISIBLE_ROLE) },
       },
     });
     const roleIds = [...new Set(grants.map((grant) => grant.roleId))];
-    if (roleIds.length === 0) return [];
 
+    const activeMember = { companyId, status: RecordStatus.ACTIVE, user: { status: RecordStatus.ACTIVE } };
     const memberships = await manager.getRepository(UserCompanyRole).find({
-      where: {
-        companyId,
-        roleId: In(roleIds),
-        status: RecordStatus.ACTIVE,
-        user: { status: RecordStatus.ACTIVE },
-      },
+      where: [
+        { ...activeMember, role: { ...PLATFORM_ROLE, status: RecordStatus.ACTIVE } },
+        ...(roleIds.length > 0 ? [{ ...activeMember, roleId: In(roleIds) }] : []),
+      ],
     });
     return [...new Set(memberships.map((membership) => membership.userId))];
   }

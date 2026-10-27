@@ -9,13 +9,21 @@ import { CashSessionService } from '../cash-session/cash-session.service.js';
 import { withdrawDiscountRequests } from '../discount-request/discount-request-cleanup.js';
 import { DiscountRequestStatus } from '../discount-request/entities/discount-request-status.enum.js';
 import { runIdempotent } from '../idempotency/idempotency.js';
+import { InventoryBalanceService } from '../inventory-balance/inventory-balance.service.js';
+import { InventoryMovementType } from '../inventory-movement/entities/inventory-movement-type.enum.js';
+import { InventorySourceType } from '../inventory-movement/entities/inventory-source-type.enum.js';
+import { InventoryMovementService } from '../inventory-movement/inventory-movement.service.js';
+import { InventoryReservationService } from '../inventory-reservation/inventory-reservation.service.js';
+import { releaseReservations } from '../inventory-reservation/reserved-quantity.js';
 import { NotificationService } from '../notification/notification.service.js';
 import { validatePaymentMethods } from '../payment-method/payment-method-validation.js';
+import { SaleItemType } from '../sale/entities/sale-item-type.enum.js';
 import { SaleItem } from '../sale/entities/sale-item.entity.js';
 import { SaleStatus } from '../sale/entities/sale-status.enum.js';
 import { Sale } from '../sale/entities/sale.entity.js';
 import { SaleActor } from '../sale/sale-actor.js';
 import { SaleService } from '../sale/sale.service.js';
+import { InternalOrderService } from '../internal-order/internal-order.service.js';
 import { StorePaymentMethod } from '../store-payment-method/entities/store-payment-method.entity.js';
 import { SaleReturnService } from '../sale-return/sale-return.service.js';
 import { CompleteSaleInput } from './dto/complete-sale.input.js';
@@ -37,9 +45,13 @@ export class SalePaymentService {
     private readonly salePaymentRepository: Repository<SalePayment>,
     private readonly dataSource: DataSource,
     private readonly sales: SaleService,
+    private readonly internalOrders: InternalOrderService,
     private readonly cashSessions: CashSessionService,
     private readonly returns: SaleReturnService,
     private readonly notifications: NotificationService,
+    private readonly inventoryBalances: InventoryBalanceService,
+    private readonly inventoryMovements: InventoryMovementService,
+    private readonly reservations: InventoryReservationService,
   ) {}
 
   // En el orden en que se registraron. La empresa y quién puede verlos se comprueban a través de la
@@ -119,8 +131,10 @@ export class SalePaymentService {
       throw new ConflictException('Solo se puede modificar una venta en borrador');
     }
 
-    // La venta la cobra su cajero (el del turno asignado): nadie más.
-    if (sale.cashierId !== actor.userId) {
+    // La venta la cobra normalmente su cajero (el del turno asignado), pero quien abre y cierra
+    // turnos (actor.canManageShifts, permiso cash.open_close_shift) también puede cobrarla: interviene
+    // cualquier caja sin tener que asignársela primero.
+    if (!actor.canManageShifts && sale.cashierId !== actor.userId) {
       throw new ForbiddenException('Solo el cajero de la venta puede cobrarla');
     }
     // Cobrar es operar en la tienda: hace falta seguir teniendo acceso a ella, no basta con
@@ -207,6 +221,54 @@ export class SalePaymentService {
     // El consecutivo se pide al final, con todo lo demás ya validado: un cobro que falla no gasta número.
     await this.sales.assignNumber(manager, companyId, sale);
 
+    // Las líneas de catálogo (ver AddSaleItemInput.productVariantId) descuentan del cajón de la
+    // tienda que vendió, y de ningún otro: lo que no está en la tienda no se cobra, se pide a
+    // bodega y se cobra cuando llega (ver InventoryBalanceService.findStockLocationForSale). Se
+    // hace en la misma transacción del cobro: si la tienda no tiene la existencia, el cobro entero
+    // se revierte. Las líneas GENERIC no tocan inventario.
+    const items = await manager.getRepository(SaleItem).find({ where: { saleId: sale.id } });
+    const inventoried = items.filter((item) => item.type === SaleItemType.INVENTORIED && item.productVariantId);
+
+    // La venta viene apartando lo suyo desde que se armó (SaleService.syncReservations): se descuenta
+    // de la MISMA bodega donde quedó apartado, no de la que más tenga hoy, que podría ser otra.
+    const held = await this.reservations.findForSource(manager, InventorySourceType.SALE, sale.id);
+    const heldByVariant = new Map(held.map((reservation) => [reservation.productVariantId, reservation]));
+
+    // Y se suelta lo propio antes de mover: si no, la venta se bloquearía a sí misma al descontar
+    // (lo apartado no se puede sacar; ver InventoryMovementService). Lo que apartan OTRAS ventas en
+    // curso sigue en pie y sí protege sus unidades.
+    await releaseReservations(manager, InventorySourceType.SALE, [sale.id]);
+
+    // Lo que sale del mostrador de la tienda, para reponerlo al final (ver más abajo).
+    const soldFromStore = new Map<string, Decimal>();
+    for (const item of inventoried) {
+      // Sin reserva solo quedan los borradores de antes de que las ventas apartaran: se resuelve
+      // ahora, contra el cajón de la tienda. Si esa tienda no lo tiene, el cobro se rechaza y hay
+      // que rearmar la venta — esos borradores son de cuando la venta podía salir de cualquier
+      // bodega.
+      const reserved = heldByVariant.get(item.productVariantId!);
+      const fromLocationId =
+        reserved?.inventoryLocationId ??
+        (await this.inventoryBalances.findStockLocationForSale(
+          manager,
+          companyId,
+          item.productVariantId!,
+          item.quantity,
+          sale.storeId,
+        ));
+      await this.inventoryMovements.recordInTransaction(manager, companyId, actor.userId, {
+        productVariantId: item.productVariantId!,
+        fromLocationId,
+        quantity: item.quantity,
+        type: InventoryMovementType.SALE,
+        sourceType: InventorySourceType.SALE,
+        sourceId: sale.id,
+        sourceNumber: sale.saleNumber,
+      });
+      const productVariantId = item.productVariantId!;
+      soldFromStore.set(productVariantId, (soldFromStore.get(productVariantId) ?? new Decimal(0)).plus(item.quantity));
+    }
+
     sale.status = SaleStatus.COMPLETED;
     sale.completedAt = new Date();
     sale.cashSessionId = session.id;
@@ -214,6 +276,33 @@ export class SalePaymentService {
     const completed = await manager.getRepository(Sale).save(sale);
 
     if (exchange) await this.returns.applyExchange(manager, exchange, completed, credit);
+    // La venta cobraba una orden de venta (SO): la orden queda pagada y ligada a esta venta.
+    if (completed.internalOrderId) {
+      await this.internalOrders.markPaid(manager, companyId, completed.internalOrderId, completed, actor.userId);
+    }
+
+    // Lo que salió del mostrador se repone solo (ver InternalOrderService.restockStore). Va al
+    // final, cuando ya se movió todo lo de la venta: así los balances de la tienda se tocan siempre
+    // antes que los de la bodega y dos cobros simultáneos no se abrazan.
+    //
+    // De una venta que cobra una orden de venta (SO) se descuenta lo que la orden trajo de fuera:
+    // esa mercancía la pidió un corredor para ese cliente y nunca fue parte del surtido. Lo que la
+    // orden tomó del propio mostrador —un pedido de lo que la tienda ya tenía— sí deja hueco y se
+    // repone igual que una venta de mostrador (ver `broughtFromWarehouse`).
+    const brought = completed.internalOrderId
+      ? await this.internalOrders.broughtFromWarehouse(manager, companyId, completed.internalOrderId)
+      : new Map<string, Decimal>();
+    const fromCounter = new Map<string, Decimal>();
+    for (const [productVariantId, quantity] of soldFromStore) {
+      const rest = quantity.minus(brought.get(productVariantId) ?? new Decimal(0));
+      if (rest.greaterThan(0)) fromCounter.set(productVariantId, rest);
+    }
+    await this.internalOrders.restockStore(manager, companyId, {
+      storeId: completed.storeId,
+      sold: fromCounter,
+      actorId: actor.userId,
+      saleNumber: completed.saleNumber,
+    });
     return completed;
   }
 
@@ -226,7 +315,7 @@ export class SalePaymentService {
     actor: CashActor,
     payments: ParsedPayment[],
   ): Promise<boolean> {
-    if (sale.cashierId !== actor.userId) return false;
+    if (!actor.canManageShifts && sale.cashierId !== actor.userId) return false;
 
     const stored = await manager.getRepository(SalePayment).find({ where: { saleId: sale.id } });
     if (stored.length !== payments.length) return false;

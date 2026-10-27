@@ -6,6 +6,8 @@ import { assertActiveCompany } from '../../common/access/assert-active-company.j
 import {
   assertHoldsPermissions,
   assertStillHasAdmin,
+  GRANT_MESSAGE,
+  TOUCH_MESSAGE,
   countCompanyAdmins,
   lockCompany,
   permissionCodesOfRole,
@@ -22,9 +24,6 @@ import { runIdempotent } from '../idempotency/idempotency.js';
 import { Role } from '../role/entities/role.entity.js';
 import { CreateUserCompanyRoleInput } from './dto/create-user-company-role.input.js';
 import { UserCompanyRole } from './entities/user-company-role.entity.js';
-
-const GRANT_MESSAGE = 'No puedes dar un rol con permisos que tú no tienes';
-const TOUCH_MESSAGE = 'No puedes modificar a alguien con más permisos que tú';
 
 // Todo se hace dentro de la empresa activa: una empresa nunca ve ni toca las membresías de
 // otra, aunque conozca el id. Las membresías con un rol de plataforma (el super admin) no se

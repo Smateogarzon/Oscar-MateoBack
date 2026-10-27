@@ -1,5 +1,6 @@
 // Módulo del sistema al que pertenece el permiso (para agrupar/filtrar en la UI)
 export enum PermissionModule {
+  DASHBOARD = 'DASHBOARD',
   SALES = 'SALES',
   CASH = 'CASH',
   INVENTORY = 'INVENTORY',

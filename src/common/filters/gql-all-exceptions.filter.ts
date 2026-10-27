@@ -52,16 +52,20 @@ export class GqlAllExceptionsFilter implements GqlExceptionFilter {
 
     if (exception instanceof HttpException) {
       const response = exception.getResponse();
-      const responseMessage =
-        typeof response === 'string' ? response : (response as { message?: string | string[] }).message;
+      const { message: responseMessage, ...extra } =
+        typeof response === 'string' ? { message: response } : (response as Record<string, unknown>);
       const message = Array.isArray(responseMessage)
         ? responseMessage.join(', ')
-        : (responseMessage ?? exception.message);
+        : ((responseMessage as string | undefined) ?? exception.message);
 
       return new GraphQLError(message, {
         extensions: {
           code: exception.constructor.name,
           status: exception.getStatus(),
+          // Campos extra de un `new ConflictException({ message, ...datos })` (p. ej. las
+          // sugerencias de "¿quisiste decir...?"): el front los necesita para renderizar el
+          // aviso, no solo el texto del mensaje.
+          ...extra,
         },
       });
     }

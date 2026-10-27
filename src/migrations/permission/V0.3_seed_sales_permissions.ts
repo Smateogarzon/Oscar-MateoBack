@@ -1,4 +1,5 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
+import { assertDestructiveDownAllowed } from '../../config/destructive-down.js';
 
 // Permisos del módulo de ventas y su reparto inicial por rol, en cada empresa que exista.
 // Es una migración nueva y no una edición de V0.2_seed_permission: esa ya corrió en
@@ -26,6 +27,7 @@ export class SeedSalesPermissions1789770000000 implements MigrationInterface {
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
+    assertDestructiveDownAllowed(this.name);
     await queryRunner.query(`
       DELETE FROM "role_permissions" WHERE "permissionId" IN (
         SELECT "id" FROM "permissions" WHERE "code" IN ('sales.view', 'sales.cancel')

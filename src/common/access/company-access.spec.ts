@@ -1,20 +1,26 @@
 import { Company } from '../../graphql/company/entities/company.entity.js';
+import { Permission } from '../../graphql/permission/entities/permission.entity.js';
 import { RolePermission } from '../../graphql/role-permission/entities/role-permission.entity.js';
 import { RoleScope } from '../../graphql/role/entities/role-scope.enum.js';
 import { UserCompanyRole } from '../../graphql/user-company-role/entities/user-company-role.entity.js';
 import { RecordStatus } from '../enums/record-status.enum.js';
-import { loadCompanyAccess } from './company-access.js';
+import { isCompanyAdmin, loadCompanyAccess } from './company-access.js';
 
 const COMPANY = '10000000-0000-4000-8000-000000000001';
+
+// El catálogo entero de permisos de la plataforma, que es lo que recibe el super admin.
+const CATALOG = ['sales.create', 'cash.charge_orders', 'settings.manage', 'suppliers.create_references'];
 
 function createDataSource(
   memberships: unknown[],
   rolePermissions: unknown[] = [],
   companyActive = true,
+  catalog: string[] = CATALOG,
 ) {
   const membershipRepo = { find: vi.fn(async () => memberships) };
   const rolePermissionRepo = { find: vi.fn(async () => rolePermissions) };
   const companyRepo = { existsBy: vi.fn(async () => companyActive) };
+  const permissionRepo = { find: vi.fn(async () => catalog.map((code) => ({ code }))) };
   const dataSource = {
     getRepository: vi.fn((entity: unknown) =>
       entity === UserCompanyRole
@@ -23,10 +29,18 @@ function createDataSource(
           ? rolePermissionRepo
           : entity === Company
             ? companyRepo
-            : undefined,
+            : entity === Permission
+              ? permissionRepo
+              : undefined,
     ),
   };
-  return { dataSource: dataSource as never, membershipRepo, rolePermissionRepo, companyRepo };
+  return {
+    dataSource: dataSource as never,
+    membershipRepo,
+    rolePermissionRepo,
+    companyRepo,
+    permissionRepo,
+  };
 }
 
 const role = (id: string, code: string, status = RecordStatus.ACTIVE, scope = RoleScope.COMPANY) => ({
@@ -112,6 +126,47 @@ describe('loadCompanyAccess', () => {
     expect(companyRepo.existsBy).not.toHaveBeenCalled();
   });
 
+  it('gives a platform role the whole catalogue, whatever the company assigned it', async () => {
+    const { dataSource, rolePermissionRepo, permissionRepo } = createDataSource(
+      [membership(role('role-9', 'SUPER_ADMIN', RecordStatus.ACTIVE, RoleScope.GLOBAL))],
+      [grant('settings.manage')],
+    );
+
+    const access = await loadCompanyAccess(dataSource, 'user-1', COMPANY);
+
+    expect(access?.permissionCodes).toEqual(CATALOG);
+    // No se le leen las asignaciones de la empresa: lo puede todo, le hayan asignado lo que le hayan asignado.
+    expect(rolePermissionRepo.find).not.toHaveBeenCalled();
+    expect(permissionRepo.find).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { status: RecordStatus.ACTIVE } }),
+    );
+  });
+
+  it('gives a platform role the catalogue even next to a company role', async () => {
+    const { dataSource } = createDataSource(
+      [
+        membership(role('role-1', 'CASHIER')),
+        membership(role('role-9', 'SUPER_ADMIN', RecordStatus.ACTIVE, RoleScope.GLOBAL)),
+      ],
+      [grant('cash.charge_orders')],
+    );
+
+    const access = await loadCompanyAccess(dataSource, 'user-1', COMPANY);
+
+    expect(access?.permissionCodes).toEqual(CATALOG);
+  });
+
+  it('does not give the catalogue to a platform role that is inactive', async () => {
+    const { dataSource } = createDataSource(
+      [membership(role('role-9', 'SUPER_ADMIN', RecordStatus.INACTIVE, RoleScope.GLOBAL))],
+      [grant('settings.manage')],
+    );
+
+    const access = await loadCompanyAccess(dataSource, 'user-1', COMPANY);
+
+    expect(access?.permissionCodes).toEqual([]);
+  });
+
   it('ignores inactive roles and does not look up permissions when none is left', async () => {
     const { dataSource, rolePermissionRepo } = createDataSource([
       membership(role('role-1', 'SELLER', RecordStatus.INACTIVE)),
@@ -123,5 +178,21 @@ describe('loadCompanyAccess', () => {
       permissionCodes: [],
     });
     expect(rolePermissionRepo.find).not.toHaveBeenCalled();
+  });
+});
+
+describe('isCompanyAdmin', () => {
+  const access = (roleCodes: string[]) => ({ companyId: COMPANY, roleCodes, permissionCodes: [] });
+
+  it('counts the company administrator and the platform super admin, as the front does', () => {
+    expect(isCompanyAdmin(access(['ADMIN']))).toBe(true);
+    expect(isCompanyAdmin(access(['SUPER_ADMIN']))).toBe(true);
+    expect(isCompanyAdmin(access(['CASHIER', 'ADMIN']))).toBe(true);
+  });
+
+  it('no other role is an administrator, whatever permissions it was given', () => {
+    expect(isCompanyAdmin(access(['CASHIER']))).toBe(false);
+    expect(isCompanyAdmin({ companyId: COMPANY, roleCodes: ['SELLER'], permissionCodes: ['users.manage'] })).toBe(false);
+    expect(isCompanyAdmin(access([]))).toBe(false);
   });
 });

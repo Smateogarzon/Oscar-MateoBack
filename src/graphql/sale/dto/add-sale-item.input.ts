@@ -2,8 +2,8 @@ import { Field, ID, InputType } from '@nestjs/graphql';
 import { IsNotEmpty, IsOptional, IsString, IsUUID, Matches, MaxLength } from 'class-validator';
 import { MONEY_PATTERN, QUANTITY_PATTERN } from '../../../common/utils/money.js';
 
-// Por ahora solo se agregan líneas genéricas (el tipo no se pide): su precio lo pone el front
-// porque puede cambiar. Las líneas de inventario llegarán con el catálogo de productos.
+// Con `productVariantId` la línea es del catálogo (ver SaleService.addItem); sin él, sigue siendo
+// genérica y su precio lo pone el front porque puede cambiar.
 // Los montos viajan como texto y se convierten a Decimal en el servicio: el ValidationPipe
 // global recorre los inputs con class-transformer, que no sabe copiar instancias de Decimal.
 // El total de la línea no se pide: lo calcula el servidor. Tampoco hay descuento aquí: todo
@@ -14,6 +14,13 @@ export class AddSaleItemInput {
   @Field(() => ID)
   @IsUUID()
   saleId: string;
+
+  // Variante del catálogo que se vende, si viene del buscador (ver ProductVariantService.search).
+  // Sin ella, la línea es genérica (SaleItemType.GENERIC).
+  @Field(() => ID, { nullable: true })
+  @IsOptional()
+  @IsUUID()
+  productVariantId?: string;
 
   @Field()
   @IsString()

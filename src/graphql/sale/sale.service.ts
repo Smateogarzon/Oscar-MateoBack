@@ -10,6 +10,7 @@ import { Decimal } from 'decimal.js';
 import { DataSource, EntityManager, In, Repository } from 'typeorm';
 import { assertStoreAccess } from '../../common/access/store-access.js';
 import { RecordStatus } from '../../common/enums/record-status.enum.js';
+import { MAX_AMOUNT } from '../../common/utils/money.js';
 import { runIdempotent } from '../idempotency/idempotency.js';
 import { CashActor } from '../cash-session/cash-actor.js';
 import { CashSessionService } from '../cash-session/cash-session.service.js';
@@ -17,9 +18,16 @@ import { withdrawDiscountRequests } from '../discount-request/discount-request-c
 import { ACTIVE_DISCOUNT_REQUEST_STATUSES } from '../discount-request/entities/discount-request-status.enum.js';
 import { DiscountRequest } from '../discount-request/entities/discount-request.entity.js';
 import { DocumentSequenceService } from '../document-sequence/document-sequence.service.js';
+import { InventoryLocationService } from '../inventory-location/inventory-location.service.js';
+import { InventorySourceType } from '../inventory-movement/entities/inventory-source-type.enum.js';
+import { InternalOrderService } from '../internal-order/internal-order.service.js';
+import { InventoryReservationService } from '../inventory-reservation/inventory-reservation.service.js';
+import { releaseReservations } from '../inventory-reservation/reserved-quantity.js';
 import { LocationType } from '../location/entities/location-type.enum.js';
 import { Location } from '../location/entities/location.entity.js';
 import { NotificationService } from '../notification/notification.service.js';
+import { ReturnsBinService } from '../returns-bin/returns-bin.service.js';
+import { ProductVariant } from '../product-variant/entities/product-variant.entity.js';
 import { User } from '../user/entities/user.entity.js';
 import { UserCompanyRole } from '../user-company-role/entities/user-company-role.entity.js';
 import { AddSaleItemInput } from './dto/add-sale-item.input.js';
@@ -31,8 +39,11 @@ import { SaleItemType } from './entities/sale-item-type.enum.js';
 import { SaleItem } from './entities/sale-item.entity.js';
 import { SaleStatus } from './entities/sale-status.enum.js';
 import { Sale } from './entities/sale.entity.js';
+import { SaleReturnResolution } from '../sale-return/entities/sale-return-resolution.enum.js';
+import { SaleReturnStatus } from '../sale-return/entities/sale-return-status.enum.js';
+import { SaleReturn } from '../sale-return/entities/sale-return.entity.js';
 import { formatSaleNumber, SALE_SERIES } from './sale-number.js';
-import { calculateLine, calculateSaleTotals, MAX_AMOUNT } from './sale-totals.js';
+import { calculateLine, calculateSaleTotals } from './sale-totals.js';
 
 // Cuántas ventas devuelve el histórico de una vez: por defecto y como máximo.
 export const DEFAULT_SALES_LIMIT = 200;
@@ -66,6 +77,10 @@ export class SaleService {
     private readonly sequences: DocumentSequenceService,
     private readonly cashSessions: CashSessionService,
     private readonly notifications: NotificationService,
+    private readonly reservations: InventoryReservationService,
+    private readonly internalOrders: InternalOrderService,
+    private readonly inventoryLocations: InventoryLocationService,
+    private readonly returnsBin: ReturnsBinService,
   ) {}
 
   // Las más recientes primero, por la fecha de la venta (cuando se cobró; si es un borrador, cuando se
@@ -157,6 +172,10 @@ export class SaleService {
     return this.saleItemRepository.find({ where: { saleId }, order: { createdAt: 'ASC' } });
   }
 
+  internalOrderNumberOf(internalOrderId: string): Promise<string | null> {
+    return this.internalOrders.numberOf(internalOrderId);
+  }
+
   // Cuántas líneas tiene, para listas de ventas (la cola de "Ventas en curso") que no necesitan
   // traerlas todas.
   countItems(saleId: string): Promise<number> {
@@ -174,6 +193,10 @@ export class SaleService {
     actor: CashActor,
     input: CreateSaleInput,
     idempotencyKey?: string,
+    // Sin sales.create (la caja) la venta que se abre solo acepta líneas no inventariadas, salvo la
+    // del cambio de una devolución aprobada, que es para cobrar una referencia del catálogo (ver
+    // `genericOnly` en la entidad y el resolver).
+    options: { canSellCatalog: boolean } = { canSellCatalog: true },
   ): Promise<Sale> {
     const cashierId = actor.userId;
     return this.dataSource.transaction((manager) =>
@@ -192,6 +215,17 @@ export class SaleService {
           if (!store) throw new NotFoundException(`Tienda ${input.storeId} no encontrada`);
           if (store.status !== RecordStatus.ACTIVE) {
             throw new ConflictException(`La tienda ${store.name} está desactivada: no se puede vender en ella`);
+          }
+
+          // Sin sales.create (la caja) se abren dos cosas: la venta del cambio de una devolución
+          // aprobada —que todavía no tiene su venta de reemplazo y se cobra con catálogo— y una venta
+          // de puros no inventariados. Pedir un cambio que no está en pie sigue siendo un no: así el
+          // error dice qué pasó con ESE cambio en vez de abrir una venta que no sirve para cobrarlo.
+          // En una tienda sin corredores la caja ES quien vende: ahí su venta en blanco sí toma
+          // catálogo, porque no hay un vendedor que mande una orden ni un corredor que la traiga.
+          const canSellCatalog = options.canSellCatalog || input.saleReturnId !== undefined || store.directSale;
+          if (!options.canSellCatalog && input.saleReturnId !== undefined) {
+            await this.assertExchangeToCharge(manager, companyId, input.saleReturnId);
           }
 
           // Solo se vende desde las tiendas a las que el usuario tiene acceso (Configuración →
@@ -228,6 +262,7 @@ export class SaleService {
               cashierId,
               cashSessionId: session.id,
               saleNumber: null,
+              genericOnly: !canSellCatalog,
               subtotal: new Decimal(0),
               discountTotal: new Decimal(0),
               generalDiscount: new Decimal(0),
@@ -254,11 +289,14 @@ export class SaleService {
   // los descuentos solo llegan por una solicitud aprobada. Agregar líneas se puede aunque haya
   // una solicitud activa. Devuelve la venta con sus totales al día. Con `idempotencyKey`, repetir la
   // misma petición (doble clic, reintento tras perder la respuesta) no duplica la línea.
+  // `canSellCatalog` es de quien opera (lo trae el resolver desde `sales.create`): sin ese permiso
+  // —la caja— solo se quitan líneas y se agregan no inventariados. Ver el bloqueo más abajo.
   async addItem(
     companyId: string,
     actor: CashActor,
     input: AddSaleItemInput,
     idempotencyKey?: string,
+    options: { canSellCatalog: boolean } = { canSellCatalog: true },
   ): Promise<Sale> {
     const description = input.description.trim();
     if (!description) throw new BadRequestException('La descripción de la línea no puede estar vacía');
@@ -284,12 +322,34 @@ export class SaleService {
           this.assertOwnDraft(sale, actor);
           await assertStoreAccess(manager, actor.userId, sale.storeId);
 
+          if (input.productVariantId) {
+            // La venta de puros no inventariados que abre la caja (ver `Sale.genericOnly`): el
+            // catálogo se vende con una orden del vendedor, no desde aquí.
+            if (sale.genericOnly) {
+              throw new ForbiddenException('Esta venta solo acepta productos no inventariados: el catálogo se cobra desde una orden del vendedor');
+            }
+            // Cobrando una orden del vendedor, la caja solo quita líneas y agrega no inventariados
+            // (acordado con el usuario, 2026-10-15): agregar catálogo aquí sería vender algo que
+            // nadie trajo de bodega ni apartó para este cliente. El cambio de una devolución sí lo
+            // acepta —no viene de una orden— y una tienda sin corredores también, porque ahí la
+            // caja ES quien vende.
+            if (!options.canSellCatalog && sale.internalOrderId) {
+              throw new ForbiddenException(
+                'Esta venta cobra una orden del vendedor: desde la caja solo se quitan líneas o se agregan productos no inventariados',
+              );
+            }
+            const exists = await manager
+              .getRepository(ProductVariant)
+              .existsBy({ id: input.productVariantId, companyId, status: RecordStatus.ACTIVE });
+            if (!exists) throw new NotFoundException(`Variante ${input.productVariantId} no encontrada`);
+          }
+
           const repo = manager.getRepository(SaleItem);
           await repo.save(
             repo.create({
               saleId: sale.id,
-              type: SaleItemType.GENERIC,
-              productVariantId: null,
+              type: input.productVariantId ? SaleItemType.INVENTORIED : SaleItemType.GENERIC,
+              productVariantId: input.productVariantId ?? null,
               description,
               sku: input.sku?.trim() || null,
               quantity,
@@ -298,6 +358,10 @@ export class SaleService {
               total,
             }),
           );
+
+          // Apartar va DESPUÉS de guardar la línea y dentro de su misma transacción: si lo que se
+          // acaba de agregar ya lo tiene apartado otro vendedor, esto lanza y la línea tampoco queda.
+          await this.syncHoldings(manager, companyId, sale, actor.userId);
 
           return this.recalculate(manager, sale);
         },
@@ -347,6 +411,9 @@ export class SaleService {
       item.total = total;
       await repo.save(item);
 
+      // Subir la cantidad aparta más (y falla si no queda disponible); bajarla suelta lo que sobra.
+      await this.syncHoldings(manager, companyId, sale, actor.userId);
+
       return this.recalculate(manager, sale);
     });
   }
@@ -366,8 +433,173 @@ export class SaleService {
       if (!item) throw new NotFoundException(`Línea ${itemId} no encontrada`);
 
       await repo.delete(item.id);
+
+      // Quitar la línea suelta lo que apartaba: el producto vuelve a estar disponible para los demás
+      // al instante, sin esperar a que el vendedor cierre o abandone la venta.
+      await this.syncHoldings(manager, companyId, sale, actor.userId);
+
       return this.recalculate(manager, sale);
     });
+  }
+
+  // Lo apartado por la venta y, si cobra una orden de venta, el cajón de devoluciones: lo que la orden
+  // trajo y caja quitó del cobro (o le bajó la cantidad) queda en el cajón de la tienda, apartado para
+  // nadie; si caja lo vuelve a poner, sale del cajón. Lo que caja agregó desde el stock de la tienda no
+  // cuenta: al quitarlo vuelve a estar disponible, como siempre. Avisa al administrador solo cuando el
+  // cajón crece.
+  private async syncHoldings(manager: EntityManager, companyId: string, sale: Sale, actorId: string): Promise<void> {
+    if (!sale.internalOrderId) {
+      await this.syncReservations(manager, companyId, sale, actorId);
+      return;
+    }
+    const before = await this.returnsBin.heldFor(manager, sale.id);
+    await this.returnsBin.release(manager, sale.id);
+    await this.syncReservations(manager, companyId, sale, actorId);
+
+    const ordered = await this.internalOrders.orderedQuantities(manager, companyId, sale.internalOrderId);
+    const sold = new Map<string, Decimal>();
+    for (const item of await manager.getRepository(SaleItem).find({ where: { saleId: sale.id } })) {
+      if (item.type !== SaleItemType.INVENTORIED || !item.productVariantId) continue;
+      sold.set(item.productVariantId, (sold.get(item.productVariantId) ?? new Decimal(0)).plus(item.quantity));
+    }
+    const removed = new Map<string, Decimal>();
+    for (const [productVariantId, quantity] of ordered) {
+      const left = quantity.minus(sold.get(productVariantId) ?? 0);
+      if (left.greaterThan(0)) removed.set(productVariantId, left);
+    }
+    const total = [...removed.values()].reduce((sum, quantity) => sum.plus(quantity), new Decimal(0));
+    await this.returnsBin.hold(manager, companyId, {
+      storeId: sale.storeId,
+      origin: { id: sale.id, number: await this.internalOrders.numberOf(sale.internalOrderId) },
+      quantities: removed,
+      actorId,
+      notify: total.greaterThan(before),
+    });
+  }
+
+  // Deja apartado exactamente lo que piden hoy las líneas de catálogo de la venta: ni más (una línea
+  // que se quitó deja de bloquear) ni menos (una que se agregó queda tomada para este vendedor). Las
+  // líneas GENERIC no son de inventario y no apartan nada.
+  //
+  // Esto es lo que resuelve la carrera por el último par: el primero que lo mete en su venta lo
+  // aparta, y al segundo se le rechaza aquí mismo, mientras arma la venta, en vez de dejarlo llegar
+  // hasta el cobro con el cliente enfrente.
+  private async syncReservations(
+    manager: EntityManager,
+    companyId: string,
+    sale: Sale,
+    reservedBy: string,
+  ): Promise<void> {
+    const items = await manager.getRepository(SaleItem).find({ where: { saleId: sale.id } });
+
+    const desired = new Map<string, Decimal>();
+    for (const item of items) {
+      if (item.type !== SaleItemType.INVENTORIED || !item.productVariantId) continue;
+      const held = desired.get(item.productVariantId) ?? new Decimal(0);
+      desired.set(item.productVariantId, held.plus(item.quantity));
+    }
+
+    await this.reservations.syncForSource(
+      manager,
+      companyId,
+      {
+        sourceType: InventorySourceType.SALE,
+        sourceId: sale.id,
+        sourceNumber: sale.saleNumber,
+        reservedBy,
+      },
+      desired,
+      // Todo sale del cajón de la tienda que vende: lo que no esté ahí no se cobra, se pide a
+      // bodega (ver InventoryBalanceService.findStockLocationForSale). Antes había que decirle
+      // línea por línea cuál era "de la tienda"; ahora lo son todas.
+      sale.storeId,
+    );
+  }
+
+  // La caja abre el cobro de una orden de venta (SO) que el vendedor dejó pendiente de pago: un
+  // borrador ligado a la orden (internalOrderId), con el vendedor que la pidió y las mismas líneas de
+  // catálogo, precio y descuento de su versión vigente. Lo que la orden tenía apartado en la tienda
+  // pasa a la venta, en el mismo STOCK. Si la orden ya tiene un borrador abierto (el mismo cajero
+  // volvió a abrirla), se devuelve ese en vez de crear otro.
+  async createFromInternalOrder(
+    companyId: string,
+    actor: CashActor,
+    input: { internalOrderId: string; cashSessionId: string },
+    idempotencyKey?: string,
+  ): Promise<Sale> {
+    return this.dataSource.transaction((manager) =>
+      runIdempotent(
+        manager,
+        { companyId, userId: actor.userId, operation: 'createSaleFromInternalOrder', key: idempotencyKey, input, resourceType: 'sale' },
+        async () => {
+          const { order, items } = await this.internalOrders.lockForCheckout(manager, companyId, input.internalOrderId);
+
+          const open = await manager.getRepository(Sale).findOne({
+            where: { companyId, internalOrderId: order.id, status: SaleStatus.DRAFT },
+            lock: { mode: 'pessimistic_write' },
+          });
+          if (open) {
+            if (open.cashierId !== actor.userId) {
+              throw new ConflictException(`Otra caja ya está cobrando la orden #${order.orderNumber}`);
+            }
+            return open;
+          }
+
+          await assertStoreAccess(manager, actor.userId, order.destinationLocationId);
+          const session = await this.cashSessions.lockOpen(manager, companyId, input.cashSessionId, actor);
+          if (session.cashRegister.storeId !== order.destinationLocationId) {
+            throw new ConflictException(`La orden #${order.orderNumber} es de otra tienda: se cobra en una caja de esa tienda`);
+          }
+
+          const repo = manager.getRepository(Sale);
+          const sale = await repo.save(
+            repo.create({
+              companyId,
+              storeId: order.destinationLocationId,
+              internalOrderId: order.id,
+              sellerId: order.requestedBy,
+              cashierId: actor.userId,
+              cashSessionId: session.id,
+              saleNumber: null,
+              subtotal: new Decimal(0),
+              discountTotal: new Decimal(0),
+              generalDiscount: new Decimal(0),
+              total: new Decimal(0),
+              status: SaleStatus.DRAFT,
+            }),
+          );
+
+          const itemRepo = manager.getRepository(SaleItem);
+          for (const item of items) {
+            const quantity = item.foundQuantity ?? item.quantity;
+            if (quantity.lessThanOrEqualTo(0)) continue;
+            const unitPrice = item.unitPrice ?? item.productVariant.price;
+            const discountAmount = item.discountAmount;
+            const variant = item.productVariant;
+            await itemRepo.save(
+              itemRepo.create({
+                saleId: sale.id,
+                type: SaleItemType.INVENTORIED,
+                productVariantId: item.productVariantId,
+                description: `${variant.product.name} · ${variant.color.name} / ${variant.size.name}`.slice(0, 180),
+                sku: variant.sku,
+                quantity,
+                unitPrice,
+                discountAmount,
+                total: calculateLine(quantity, unitPrice, discountAmount).total,
+              }),
+            );
+          }
+
+          // Lo apartado para el cliente pasa de la orden a la venta, sin soltarlo en el medio a nadie
+          // más: las dos cosas van en esta misma transacción.
+          await this.internalOrders.releaseForSale(manager, order, actor.userId);
+          await this.syncReservations(manager, companyId, sale, actor.userId);
+          return this.recalculate(manager, sale);
+        },
+        (id) => manager.getRepository(Sale).findOneByOrFail({ id }),
+      ),
+    );
   }
 
   // Solo se cancela una venta en borrador: una completada ya se cobró (sus pagos están en la caja) y
@@ -413,6 +645,14 @@ export class SaleService {
         actorId: actor.userId,
         note: 'Venta cancelada',
       });
+
+      // Lo que apartaba vuelve al disponible: una venta anulada no puede seguir bloqueando el último
+      // par para los demás vendedores.
+      await releaseReservations(manager, InventorySourceType.SALE, [sale.id]);
+      // Si cobraba una orden de venta, la orden sigue por cobrar y vuelve a apartar lo suyo.
+      if (sale.internalOrderId) {
+        await this.internalOrders.restoreAfterSaleDiscarded(manager, companyId, sale.internalOrderId, actor.userId, sale.id);
+      }
 
       sale.status = SaleStatus.CANCELLED;
       sale.cancelledBy = actor.userId;
@@ -501,5 +741,15 @@ export class SaleService {
     sale.discountTotal = totals.discountTotal;
     sale.total = totals.total;
     return manager.getRepository(Sale).save(sale);
+  }
+
+  // Quien no tiene sales.create solo cobra con catálogo el cambio de una devolución aprobada que
+  // todavía no tiene su venta de reemplazo. Si ese cambio no está en pie, no se abre la venta: para
+  // cobrar algo que no está en el inventario se abre una venta de no inventariados, sin pedir cambio.
+  private async assertExchangeToCharge(manager: EntityManager, companyId: string, saleReturnId: string | undefined): Promise<void> {
+    const exchange = saleReturnId ? await manager.getRepository(SaleReturn).findOneBy({ id: saleReturnId, companyId }) : null;
+    const open =
+      exchange?.status === SaleReturnStatus.APPROVED && exchange.resolution === SaleReturnResolution.EXCHANGE && exchange.replacementSaleId === null;
+    if (!open) throw new ForbiddenException('Ese cambio no está aprobado o ya se cobró: no hay nada que cobrar con él');
   }
 }

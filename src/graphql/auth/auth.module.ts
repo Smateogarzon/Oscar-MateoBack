@@ -5,12 +5,14 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { Role } from '../role/entities/role.entity.js';
 import { UserCompanyRole } from '../user-company-role/entities/user-company-role.entity.js';
 import { UserModule } from '../user/user.module.js';
+import { AuditModule } from '../../audit/audit.module.js';
 import { AuthResolver } from './auth.resolver.js';
 import { AuthService } from './auth.service.js';
 
 @Module({
   imports: [
     UserModule,
+    AuditModule,
     TypeOrmModule.forFeature([Role, UserCompanyRole]),
     JwtModule.registerAsync({
       global: true,

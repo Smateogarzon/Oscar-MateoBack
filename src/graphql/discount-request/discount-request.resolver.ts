@@ -94,9 +94,9 @@ export class DiscountRequestResolver {
   }
 
   // El cajero pide el descuento mientras arma la venta: no hace falta poder aprobarlo. Solo el cajero
-  // de esa venta puede pedirlo.
+  // de esa venta puede pedirlo (también la caja, que no crea ventas pero completa las que abre).
   @Mutation(() => DiscountRequestObjectType)
-  @RequirePermissions(PermissionCode.SALES_CREATE)
+  @RequireAnyPermission(PermissionCode.SALES_CREATE, PermissionCode.CASH_CHARGE_ORDERS, PermissionCode.CASH_REGISTER_PAYMENT)
   requestDiscount(
     @CurrentCompanyId() companyId: string,
     @CurrentUser() currentUser: JwtPayload,
@@ -150,9 +150,15 @@ export class DiscountRequestResolver {
     return this.discountRequestService.reject(companyId, currentUser.sub, id, input, idempotencyKey);
   }
 
-  // Quien la pidió (con sales.create) o quien aprueba descuentos: el servicio comprueba cuál.
+  // Quien la pidió (con sales.create o desde la caja) o quien aprueba descuentos: el servicio
+  // comprueba cuál.
   @Mutation(() => DiscountRequestObjectType)
-  @RequireAnyPermission(PermissionCode.SALES_CREATE, PermissionCode.SALES_APPROVE_DISCOUNT)
+  @RequireAnyPermission(
+    PermissionCode.SALES_CREATE,
+    PermissionCode.CASH_CHARGE_ORDERS,
+    PermissionCode.CASH_REGISTER_PAYMENT,
+    PermissionCode.SALES_APPROVE_DISCOUNT,
+  )
   cancelDiscountRequest(
     @CurrentCompanyId() companyId: string,
     @CurrentCompanyAccess() access: CompanyAccess,
