@@ -1,5 +1,6 @@
 import { ForbiddenException, UseGuards } from '@nestjs/common';
 import { Args, ID, Mutation, Query, Resolver } from '@nestjs/graphql';
+import { DataSource } from 'typeorm';
 import type { CompanyAccess } from '../../common/access/company-access.js';
 import { CurrentCompanyAccess, CurrentCompanyId } from '../../common/decorators/current-company.decorator.js';
 import { CurrentUser } from '../../common/decorators/current-user.decorator.js';
@@ -21,6 +22,7 @@ import { PurchaseOrderItemObjectType } from './dto/purchase-order-item.object-ty
 import { PurchaseOrderOverageDecisionInput } from './dto/purchase-order-overage-decision.input.js';
 import { PurchaseOrderObjectType } from './dto/purchase-order.object-type.js';
 import { PurchaseOrderStatus } from './entities/purchase-order-status.enum.js';
+import { purchaseOrderLocationScope } from './purchase-order-visibility.js';
 import { PurchaseOrderService } from './purchase-order.service.js';
 
 // El proveedor ve y toca SOLO sus órdenes, tenga el permiso que tenga: devuelve a qué proveedor se
@@ -44,11 +46,20 @@ const CAN_READ_PURCHASE_ORDERS = [
 @Resolver(() => PurchaseOrderObjectType)
 @UseGuards(JwtAuthGuard, PermissionsGuard, CsrfGuard)
 export class PurchaseOrderResolver {
-  constructor(private readonly purchaseOrderService: PurchaseOrderService) {}
+  constructor(
+    private readonly purchaseOrderService: PurchaseOrderService,
+    private readonly dataSource: DataSource,
+  ) {}
+
+  // A qué bodegas llega lo que puede ver quien pregunta (null = todas): el bodeguero solo ve lo que
+  // entra a las suyas. Ver purchase-order-visibility.ts.
+  private destinationScope(userId: string, access: CompanyAccess): Promise<string[] | null> {
+    return purchaseOrderLocationScope(this.dataSource.manager, access.companyId, userId, access);
+  }
 
   @Query(() => [PurchaseOrderObjectType])
   @RequireAnyPermission(...CAN_READ_PURCHASE_ORDERS)
-  purchaseOrders(
+  async purchaseOrders(
     @CurrentCompanyId() companyId: string,
     @CurrentUser() currentUser: JwtPayload,
     @CurrentCompanyAccess() access: CompanyAccess,
@@ -56,23 +67,32 @@ export class PurchaseOrderResolver {
     @Args('supplierId', { type: () => ID, nullable: true }) supplierId?: string,
   ) {
     const scope = supplierScopeOf(access, currentUser.sub);
-    return this.purchaseOrderService.findAll(companyId, { status, supplierId: scope ?? supplierId });
+    return this.purchaseOrderService.findAll(companyId, {
+      status,
+      supplierId: scope ?? supplierId,
+      destinationLocationIds: await this.destinationScope(currentUser.sub, access),
+    });
   }
 
   @Query(() => PurchaseOrderObjectType)
   @RequireAnyPermission(...CAN_READ_PURCHASE_ORDERS)
-  purchaseOrder(
+  async purchaseOrder(
     @CurrentCompanyId() companyId: string,
     @CurrentUser() currentUser: JwtPayload,
     @CurrentCompanyAccess() access: CompanyAccess,
     @Args('id', { type: () => ID }) id: string,
   ) {
-    return this.purchaseOrderService.findOne(companyId, id, supplierScopeOf(access, currentUser.sub));
+    return this.purchaseOrderService.findOne(
+      companyId,
+      id,
+      supplierScopeOf(access, currentUser.sub),
+      await this.destinationScope(currentUser.sub, access),
+    );
   }
 
   @Query(() => [PurchaseOrderItemObjectType])
   @RequireAnyPermission(...CAN_READ_PURCHASE_ORDERS)
-  purchaseOrderItems(
+  async purchaseOrderItems(
     @CurrentCompanyId() companyId: string,
     @CurrentUser() currentUser: JwtPayload,
     @CurrentCompanyAccess() access: CompanyAccess,
@@ -82,6 +102,7 @@ export class PurchaseOrderResolver {
       companyId,
       purchaseOrderId,
       supplierScopeOf(access, currentUser.sub),
+      await this.destinationScope(currentUser.sub, access),
     );
   }
 

@@ -65,6 +65,8 @@ function createService() {
     findUserIdsWithPermission: vi.fn().mockResolvedValue([]),
     signalChange: vi.fn(),
   };
+  const storeModelMinimums = { applyFromVariants: vi.fn() };
+  const balances = { availableInStore: vi.fn().mockResolvedValue(new Map()) };
   const service = new InternalOrderService(
     repo as never,
     dataSource as never,
@@ -72,6 +74,8 @@ function createService() {
     inventoryMovements as never,
     inventoryLocations as never,
     notifications as never,
+    storeModelMinimums as never,
+    balances as never,
   );
   return {
     service,

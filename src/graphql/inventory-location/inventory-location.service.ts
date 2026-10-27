@@ -1,6 +1,6 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, EntityManager, Repository } from 'typeorm';
+import { DataSource, EntityManager, In, Repository } from 'typeorm';
 import { RecordStatus } from '../../common/enums/record-status.enum.js';
 import { Location } from '../location/entities/location.entity.js';
 import { User } from '../user/entities/user.entity.js';
@@ -14,6 +14,8 @@ export interface InventoryLocationFilter {
   type?: InventoryLocationType;
   locationId?: string;
   status?: RecordStatus;
+  /** Las sedes de quien consulta, o `null` si las ve todas (ver `visibleLocationIds`). */
+  locationIds?: string[] | null;
 }
 
 // Todo se hace dentro de la empresa activa. A diferencia de la caja de una tienda, esto no nace
@@ -26,20 +28,29 @@ export class InventoryLocationService {
     private readonly dataSource: DataSource,
   ) {}
 
+  // Acotado a las sedes de quien consulta: los cajones de una bodega que no tiene asignada no son
+  // asunto suyo. Los que no cuelgan de ninguna sede (la bolsa de un corredor) solo los ve quien las
+  // ve todas.
   findAll(companyId: string, filter: InventoryLocationFilter = {}): Promise<InventoryLocation[]> {
+    const { locationIds } = filter;
+    // Pedir una sede que no es suya no devuelve las suyas: no devuelve nada.
+    const scoped = locationIds && filter.locationId && !locationIds.includes(filter.locationId);
+    if (scoped || locationIds?.length === 0) return Promise.resolve([]);
     return this.inventoryLocationRepository.find({
       where: {
         companyId,
         ...(filter.type && { type: filter.type }),
-        ...(filter.locationId && { locationId: filter.locationId }),
         ...(filter.status && { status: filter.status }),
+        ...(filter.locationId ? { locationId: filter.locationId } : locationIds && { locationId: In(locationIds) }),
       },
       order: { createdAt: 'ASC' },
+      // Para poner nombre a la bolsa de un corredor sin una consulta por ubicación.
+      relations: { custodianUser: true },
     });
   }
 
   async findOne(companyId: string, id: string): Promise<InventoryLocation> {
-    const inventoryLocation = await this.inventoryLocationRepository.findOneBy({ id, companyId });
+    const inventoryLocation = await this.inventoryLocationRepository.findOne({ where: { id, companyId }, relations: { custodianUser: true } });
     if (!inventoryLocation) throw new NotFoundException(`Ubicación de inventario ${id} no encontrada`);
     return inventoryLocation;
   }

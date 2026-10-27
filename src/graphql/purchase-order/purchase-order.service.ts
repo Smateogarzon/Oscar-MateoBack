@@ -19,6 +19,7 @@ import { PurchaseOrderItem } from './entities/purchase-order-item.entity.js';
 import { PurchaseOrderStatus } from './entities/purchase-order-status.enum.js';
 import { PurchaseOrder } from './entities/purchase-order.entity.js';
 import { closeShipmentIncidents } from './purchase-order-incidents.js';
+import { assertCanReceiveAt } from './purchase-order-visibility.js';
 import { loadPurchaseOrderItems } from './purchase-order-lines.js';
 import { formatPurchaseOrderNumber, PURCHASE_ORDER_SERIES } from './purchase-order-number.js';
 import { PurchaseOrderReceivingService } from './purchase-order-receiving.service.js';
@@ -36,6 +37,10 @@ import { purchaseOrderTotals, type PricedLine } from './purchase-order-totals.js
 export interface PurchaseOrderFilter {
   status?: PurchaseOrderStatus;
   supplierId?: string;
+  // Las bodegas a las que llega lo que puede ver quien pregunta; `null` o ausente = sin filtro
+  // (ver purchase-order-visibility.ts). Un arreglo vacío no devuelve ninguna, que es lo correcto
+  // para quien no tiene ninguna bodega asignada.
+  destinationLocationIds?: string[] | null;
 }
 
 type PricedItemLine = PricedLine & { productVariantId: string };
@@ -56,24 +61,36 @@ export class PurchaseOrderService {
   ) {}
 
   findAll(companyId: string, filter: PurchaseOrderFilter = {}): Promise<PurchaseOrder[]> {
+    const destinations = filter.destinationLocationIds;
+    if (destinations?.length === 0) return Promise.resolve([]);
     return this.purchaseOrderRepository.find({
       where: {
         companyId,
         ...(filter.status && { status: filter.status }),
         ...(filter.supplierId && { supplierId: filter.supplierId }),
+        ...(destinations && { destinationLocationId: In(destinations) }),
       },
       order: { createdAt: 'DESC' },
     });
   }
 
-  // `supplierScope` acota la búsqueda a las órdenes de ese proveedor: la de otro no es que esté
-  // prohibida, es que para él no existe (404, no 403: así no se entera de cuáles hay).
-  async findOne(companyId: string, id: string, supplierScope?: string): Promise<PurchaseOrder> {
-    const purchaseOrder = await this.purchaseOrderRepository.findOneBy({
-      id,
-      companyId,
-      ...(supplierScope && { supplierId: supplierScope }),
-    });
+  // `supplierScope` acota la búsqueda a las órdenes de ese proveedor y `destinationScope` a las que
+  // entran a sus bodegas: la de otro no es que esté prohibida, es que para él no existe (404, no
+  // 403: así no se entera de cuáles hay).
+  async findOne(
+    companyId: string,
+    id: string,
+    supplierScope?: string,
+    destinationScope?: string[] | null,
+  ): Promise<PurchaseOrder> {
+    const purchaseOrder = destinationScope?.length === 0
+      ? null
+      : await this.purchaseOrderRepository.findOneBy({
+          id,
+          companyId,
+          ...(supplierScope && { supplierId: supplierScope }),
+          ...(destinationScope && { destinationLocationId: In(destinationScope) }),
+        });
     if (!purchaseOrder) throw new NotFoundException(`Orden de compra ${id} no encontrada`);
     return purchaseOrder;
   }
@@ -82,8 +99,9 @@ export class PurchaseOrderService {
     companyId: string,
     purchaseOrderId: string,
     supplierScope?: string,
+    destinationScope?: string[] | null,
   ): Promise<PurchaseOrderItem[]> {
-    const purchaseOrder = await this.findOne(companyId, purchaseOrderId, supplierScope);
+    const purchaseOrder = await this.findOne(companyId, purchaseOrderId, supplierScope, destinationScope);
     return loadPurchaseOrderItems(this.dataSource.manager, purchaseOrder.id);
   }
 
@@ -289,6 +307,9 @@ export class PurchaseOrderService {
       if (purchaseOrder.supplierId === actorUserId) {
         throw new ForbiddenException('El proveedor de la orden no puede recibirla en bodega');
       }
+      // Recibir mete la existencia a la bodega destino: solo la firma quien opera ESA bodega. El
+      // permiso solo dice que sabe recibir, no en dónde.
+      await assertCanReceiveAt(manager, actorUserId, purchaseOrder.destinationLocationId);
       if (purchaseOrder.status === PurchaseOrderStatus.PENDING_APPROVAL) {
         throw new ConflictException('El administrador todavía no autoriza el sobrante de esta orden');
       }

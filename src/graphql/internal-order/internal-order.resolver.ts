@@ -1,5 +1,5 @@
 import { UseGuards } from '@nestjs/common';
-import { Args, ID, Mutation, Parent, Query, ResolveField, Resolver } from '@nestjs/graphql';
+import { Args, ID, Int, Mutation, Parent, Query, ResolveField, Resolver } from '@nestjs/graphql';
 import { isCompanyAdmin, type CompanyAccess } from '../../common/access/company-access.js';
 import { CurrentCompanyAccess, CurrentCompanyId } from '../../common/decorators/current-company.decorator.js';
 import { CurrentUser } from '../../common/decorators/current-user.decorator.js';
@@ -15,6 +15,7 @@ import type { JwtPayload } from '../auth/interface/jwt-payload.interface.js';
 import { IncidentObjectType } from '../incident/dto/incident.object-type.js';
 import { LocationObjectType } from '../location/dto/location.object-type.js';
 import { InternalOrderChangeInput } from './dto/internal-order-change.input.js';
+import { EditInternalOrderInput } from './dto/edit-internal-order.input.js';
 import { InternalOrderItemObjectType } from './dto/internal-order-item.object-type.js';
 import {
   InternalOrderCorrectionObjectType,
@@ -26,7 +27,7 @@ import {
 import { InternalOrdersFilterInput } from './dto/internal-orders-filter.input.js';
 import { ReportInternalOrderIncidentInput } from './dto/report-internal-order-incident.input.js';
 import { RequestInternalOrderInput } from './dto/request-internal-order.input.js';
-import { CreateReturnFromBinInput, ReturnsBinLineObjectType } from './dto/returns-bin.dto.js';
+import { CreateReturnFromBinInput, KeepBinInStoreInput, ReturnsBinLineObjectType } from './dto/returns-bin.dto.js';
 import { TransitionInternalOrderInput } from './dto/transition-internal-order.input.js';
 import { InternalOrderNudge } from './entities/internal-order-nudge.enum.js';
 import { InternalOrderService, type InternalOrderView, type OrderActor } from './internal-order.service.js';
@@ -113,7 +114,10 @@ export class InternalOrderResolver {
 
   // ─── Mutaciones ────────────────────────────────────────────────────────────────────────────
 
-  @Mutation(() => InternalOrderObjectType)
+  // Devuelve una lista: lo que un vendedor pide puede estar repartido en varias bodegas, y entonces
+  // nace una orden por bodega (ver `InternalOrderService.request`). Un pedido de una sola bodega, y
+  // cualquier transferencia, devuelve una sola.
+  @Mutation(() => [InternalOrderObjectType])
   @RequireAnyPermission(PermissionCode.ORDERS_REQUEST_FROM_WAREHOUSE, PermissionCode.INVENTORY_TRANSFER, PermissionCode.WAREHOUSE_FULFILL_ORDERS)
   async requestInternalOrder(
     @CurrentCompanyId() companyId: string,
@@ -122,8 +126,8 @@ export class InternalOrderResolver {
     @Args('input') input: RequestInternalOrderInput,
     @IdempotencyKeyHeader() idempotencyKey?: string,
   ) {
-    const order = await this.internalOrderService.request(companyId, actorOf(user, access), input, idempotencyKey);
-    return this.internalOrderService.findView(companyId, order.id);
+    const orders = await this.internalOrderService.request(companyId, actorOf(user, access), input, idempotencyKey);
+    return Promise.all(orders.map((order) => this.internalOrderService.findView(companyId, order.id)));
   }
 
   @Mutation(() => InternalOrderObjectType)
@@ -147,6 +151,20 @@ export class InternalOrderResolver {
     @Args('input') input: InternalOrderChangeInput,
   ) {
     const order = await this.internalOrderService.requestChange(companyId, actorOf(user, access), input);
+    return this.internalOrderService.findView(companyId, order.id);
+  }
+
+  // El vendedor cambia lo que pidió mientras el pedido sigue vivo: quita referencias, agrega otras o
+  // las dos cosas. Lo que pasa con cada una depende de dónde esté la mercancía (ver `editOrder`).
+  @Mutation(() => InternalOrderObjectType)
+  @RequireAnyPermission(PermissionCode.ORDERS_CONFIRM_RECEIPT, PermissionCode.ORDERS_REQUEST_FROM_WAREHOUSE)
+  async editInternalOrder(
+    @CurrentCompanyId() companyId: string,
+    @CurrentUser() user: JwtPayload,
+    @CurrentCompanyAccess() access: CompanyAccess,
+    @Args('input') input: EditInternalOrderInput,
+  ) {
+    const order = await this.internalOrderService.editOrder(companyId, actorOf(user, access), input);
     return this.internalOrderService.findView(companyId, order.id);
   }
 
@@ -203,6 +221,35 @@ export class InternalOrderResolver {
     return this.internalOrderService.findView(companyId, order.id);
   }
 
+  // El bodeguero toma el pedido: queda como responsable de su trabajo de bodega y ningún otro
+  // bodeguero lo alista ni lo cuenta. Cuál es el permiso que de verdad hace falta depende del paso
+  // pendiente (alistar o recibir una devolución) y lo comprueba el servicio.
+  @Mutation(() => InternalOrderObjectType)
+  @RequireAnyPermission(PermissionCode.WAREHOUSE_FULFILL_ORDERS, PermissionCode.WAREHOUSE_RECEIVE_RETURNS)
+  async claimInternalOrderForWarehouse(
+    @CurrentCompanyId() companyId: string,
+    @CurrentUser() user: JwtPayload,
+    @CurrentCompanyAccess() access: CompanyAccess,
+    @Args('orderId', { type: () => ID }) orderId: string,
+  ) {
+    const order = await this.internalOrderService.claimForWarehouse(companyId, actorOf(user, access), orderId);
+    return this.internalOrderService.findView(companyId, order.id);
+  }
+
+  // Soltar el pedido tomado. Solo pide pertenecer a la empresa: lo suelta quien lo tomó, y el
+  // administrador libera el de cualquiera para reasignarlo (ver `releaseFromWarehouse`).
+  @Mutation(() => InternalOrderObjectType)
+  @RequireCompanyMembership()
+  async releaseInternalOrderFromWarehouse(
+    @CurrentCompanyId() companyId: string,
+    @CurrentUser() user: JwtPayload,
+    @CurrentCompanyAccess() access: CompanyAccess,
+    @Args('orderId', { type: () => ID }) orderId: string,
+  ) {
+    const order = await this.internalOrderService.releaseFromWarehouse(companyId, actorOf(user, access), orderId);
+    return this.internalOrderService.findView(companyId, order.id);
+  }
+
   // ─── Cajón de devoluciones (solo el administrador) ──────────────────────────────────────────
 
   @Query(() => [ReturnsBinLineObjectType])
@@ -211,7 +258,9 @@ export class InternalOrderResolver {
     return this.internalOrderService.returnsBinContents(companyId, actorOf(user, access));
   }
 
-  @Mutation(() => InternalOrderObjectType)
+  // Devuelve una lista: lo marcado puede haber salido de varias bodegas y entonces nace una RE por
+  // bodega (ver `InternalOrderService.createReturnFromBin`).
+  @Mutation(() => [InternalOrderObjectType])
   @RequireCompanyMembership()
   async createReturnFromBin(
     @CurrentCompanyId() companyId: string,
@@ -219,8 +268,21 @@ export class InternalOrderResolver {
     @CurrentCompanyAccess() access: CompanyAccess,
     @Args('input') input: CreateReturnFromBinInput,
   ) {
-    const order = await this.internalOrderService.createReturnFromBin(companyId, actorOf(user, access), input);
-    return this.internalOrderService.findView(companyId, order.id);
+    const orders = await this.internalOrderService.createReturnFromBin(companyId, actorOf(user, access), input);
+    return Promise.all(orders.map((order) => this.internalOrderService.findView(companyId, order.id)));
+  }
+
+  // La otra salida del cajón: lo revisado se queda en el mostrador de esa tienda y vuelve a estar a
+  // la venta. Devuelve cuántas entradas del cajón salieron.
+  @Mutation(() => Int)
+  @RequireCompanyMembership()
+  keepBinInStore(
+    @CurrentCompanyId() companyId: string,
+    @CurrentUser() user: JwtPayload,
+    @CurrentCompanyAccess() access: CompanyAccess,
+    @Args('input') input: KeepBinInStoreInput,
+  ) {
+    return this.internalOrderService.keepBinInStore(companyId, actorOf(user, access), input);
   }
 
   // El corredor responde dónde va (a "Contactar al corredor").
@@ -315,6 +377,15 @@ export class InternalOrderResolver {
   @ResolveField(() => String, { nullable: true })
   relatedOrderStatus(@Parent() order: InternalOrderView) {
     return order.relatedOrder?.status ?? null;
+  }
+
+  // De dónde viene lo que lleva una devolución. Se guarda al crearla (`originNumbers`); las que
+  // nacieron de un cambio de pedido tienen además su orden en `relatedOrder`, y se responde con esa
+  // aunque la columna venga vacía (devoluciones anteriores a que se guardara).
+  @ResolveField(() => [String])
+  originNumbers(@Parent() order: InternalOrderView): string[] {
+    if (order.originNumbers && order.originNumbers.length > 0) return order.originNumbers;
+    return order.relatedOrder ? [order.relatedOrder.orderNumber] : [];
   }
 
   @ResolveField(() => String, { nullable: true })

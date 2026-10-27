@@ -7,6 +7,8 @@ import { NotificationService } from '../notification/notification.service.js';
 import { ProductVariant } from '../product-variant/entities/product-variant.entity.js';
 import { PurchaseOrderItem } from '../purchase-order/entities/purchase-order-item.entity.js';
 import { settlePurchaseOrderIncidentNotices } from '../purchase-order/purchase-order-watchers.js';
+import { InternalOrderItem } from '../internal-order/entities/internal-order-item.entity.js';
+import { settleOrderIncidentNotices } from '../internal-order/internal-order-watchers.js';
 import { CreateIncidentInput } from './dto/create-incident.input.js';
 import { Incident } from './entities/incident.entity.js';
 import { IncidentStatus } from './entities/incident-status.enum.js';
@@ -152,7 +154,7 @@ export class IncidentService {
       incident.resolvedBy = userId;
       incident.resolvedAt = new Date();
       const saved = await manager.getRepository(Incident).save(incident);
-      await this.settlePurchaseOrderNotice(manager, saved);
+      await this.settleOrderNotices(manager, saved);
       return saved;
     });
   }
@@ -166,9 +168,17 @@ export class IncidentService {
       incident.resolvedBy = userId;
       incident.resolvedAt = new Date();
       const saved = await manager.getRepository(Incident).save(incident);
-      await this.settlePurchaseOrderNotice(manager, saved);
+      await this.settleOrderNotices(manager, saved);
       return saved;
     });
+  }
+
+  // Cerrar una novedad puede ser cerrar la última que le quedaba a su documento: entonces el aviso
+  // que la anunciaba deja de estar pendiente para todos los que no lo abrieron. Cada clase de
+  // documento tiene su propia cuenta de "novedades abiertas", así que se reparte por entityType.
+  private async settleOrderNotices(manager: EntityManager, incident: Incident): Promise<void> {
+    await this.settlePurchaseOrderNotice(manager, incident);
+    await this.settleInternalOrderNotice(manager, incident);
   }
 
   // Una novedad de una línea de orden de compra cerrada puede ser la última que le quedaba a la orden:
@@ -177,6 +187,21 @@ export class IncidentService {
     if (incident.entityType !== 'PURCHASE_ORDER_ITEM') return;
     const item = await manager.getRepository(PurchaseOrderItem).findOne({ where: { id: incident.entityId! }, select: { purchaseOrderId: true } });
     if (item) await settlePurchaseOrderIncidentNotices(manager, this.notifications, item.purchaseOrderId);
+  }
+
+  // Lo mismo para un pedido interno. La novedad puede colgar de la orden entera o de una de sus
+  // líneas; en los dos casos hay que mirar TODAS las de esa orden (de cualquier versión) antes de
+  // dar su aviso por atendido.
+  private async settleInternalOrderNotice(manager: EntityManager, incident: Incident): Promise<void> {
+    if (!INTERNAL_ORDER_ENTITIES.includes(incident.entityType ?? '')) return;
+    const repo = manager.getRepository(InternalOrderItem);
+    const orderId =
+      incident.entityType === 'INTERNAL_ORDER'
+        ? incident.entityId
+        : (await repo.findOne({ where: { id: incident.entityId! }, select: { internalOrderId: true } }))?.internalOrderId;
+    if (!orderId) return;
+    const items = await repo.find({ select: { id: true }, where: { internalOrderId: orderId } });
+    await settleOrderIncidentNotices(manager, this.notifications, orderId, items.map((item) => item.id));
   }
 
   private assertOpen(incident: Incident): void {

@@ -123,6 +123,26 @@ const TEXTS: Record<
     title: 'Retorno a bodega por error',
     message: (p) => `${p.actorName} reportó que llegó una referencia equivocada en la orden #${ref(p)}.`,
   },
+  [NotificationType.ORDER_CANCELLED]: {
+    title: 'Pedido anulado',
+    message: (p) =>
+      `${p.actorName} anuló la orden #${ref(p)}${p.locationName ? `, que estaba alistando ${p.locationName}` : ''}${p.notes ? `: ${p.notes}` : ''}.`,
+  },
+  [NotificationType.ORDER_INCIDENT]: {
+    title: 'Novedad en un pedido',
+    message: (p) => `${p.actorName} reportó una novedad en la orden #${ref(p)}.`,
+  },
+  [NotificationType.ORDER_EDITED]: {
+    title: 'Pedido modificado',
+    message: (p) => `${p.actorName} cambió lo que pidió en la orden #${ref(p)}: hay que alistarla otra vez antes de que se la lleven.`,
+  },
+  [NotificationType.DISPLAY_RESTOCK_NEEDED]: {
+    title: 'Sin con qué surtir el mostrador',
+    message: (p) => {
+      const where = p.locationName ? ` en ${p.locationName}` : '';
+      return `${p.actorName} vendió ${p.reference ?? 'una referencia'}${where} y ninguna bodega tiene esa talla ni otra del mismo modelo: escoge qué surtir.`;
+    },
+  },
   [NotificationType.INVENTORY_LOW_STOCK]: {
     title: 'Existencia baja',
     message: (p) => {
@@ -172,6 +192,8 @@ const TYPES_WITH_NOTES = new Set<NotificationType>([
   NotificationType.PURCHASE_ORDER_OVERAGE_REJECTED,
   NotificationType.ORDER_STOCK_QUESTION,
   NotificationType.ORDER_CORRECTION,
+  NotificationType.ORDER_INCIDENT,
+  NotificationType.ORDER_EDITED,
 ]);
 
 export function buildNotificationText(

@@ -6,6 +6,10 @@ import { QUANTITY_PATTERN } from '../../../common/utils/money.js';
 import { InternalOrderOrigin } from '../entities/internal-order-origin.enum.js';
 import { InternalOrderType } from '../entities/internal-order-type.enum.js';
 
+// Una cantidad con hasta 2 decimales, o vacío para quitar el mínimo del modelo (mismo patrón que
+// `minStock` en CreateInventoryMovementInput).
+const MODEL_MIN_STOCK_PATTERN = /^$|^\d{1,10}(\.\d{1,2})?$/;
+
 @InputType()
 export class InternalOrderLineInput {
   @Field(() => ID)
@@ -22,6 +26,17 @@ export class InternalOrderLineInput {
   @IsString()
   @MaxLength(255)
   notes?: string;
+
+  // Cuántas unidades del MODELO de esta línea (su referencia en su color, sumando tallas) deben
+  // quedar en el mostrador de la tienda destino: el nivel se fija al surtir y después se corrige en
+  // Inventario (ver StoreModelMinimum). Solo en un traslado (TR / RS) hacia una tienda; ausente no
+  // toca el mínimo que hubiera y "" lo quita.
+  @Field({ nullable: true })
+  @IsOptional()
+  @Matches(MODEL_MIN_STOCK_PATTERN, {
+    message: 'modelMinStock debe ser una cantidad con hasta 2 decimales, por ejemplo 6, o vacío para quitarlo',
+  })
+  modelMinStock?: string;
 }
 
 // Pedir una orden: una SO (el vendedor pide a bodega), o un TR / RS (Inventario → Transferencia). La
@@ -38,21 +53,17 @@ export class RequestInternalOrderInput {
   @IsEnum(InternalOrderOrigin)
   origin: InternalOrderOrigin;
 
-  @Field(() => ID)
+  // De dónde sale la mercancía. En una SO no se manda: lo decide el servidor, que busca la bodega
+  // con lo pedido y, si está repartido, crea una orden por bodega (ver `InternalOrderService.request`).
+  // Una transferencia (TR / RS) sí dice de dónde sale: elegirlo ES la transferencia.
+  @Field(() => ID, { nullable: true })
+  @IsOptional()
   @IsUUID()
-  sourceLocationId: string;
+  sourceLocationId?: string;
 
   @Field(() => ID)
   @IsUUID()
   destinationLocationId: string;
-
-  // Dónde, dentro del destino, lo entrega el corredor ("Probador #02").
-  @Field({ nullable: true })
-  @IsOptional()
-  @Trim()
-  @IsString()
-  @MaxLength(80)
-  deliveryPoint?: string;
 
   @Field({ nullable: true })
   @IsOptional()

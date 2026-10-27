@@ -77,9 +77,13 @@ export class InternalOrder extends BaseEntity {
   @JoinColumn({ name: 'destinationLocationId' })
   destinationLocation: Location;
 
-  // Dónde, dentro del destino, lo entrega el corredor ("Probador #02", "Mostrador POS").
-  @Column({ type: 'varchar', length: 80, nullable: true })
-  deliveryPoint: string | null;
+  // Las órdenes nacidas de un mismo envío comparten este id. Lo que un vendedor pide puede estar
+  // repartido en varias bodegas, y entonces se crea una orden por bodega (ver
+  // `InternalOrderService.request`): el grupo es lo que permite volver a encontrarlas juntas. Una
+  // orden que nació sola también lo lleva; las anteriores a esto lo tienen en null.
+  @Index('IDX_internal_orders_requestGroupId')
+  @Column({ type: 'uuid', nullable: true })
+  requestGroupId: string | null;
 
   @Column({ type: 'uuid', nullable: true })
   requestedBy: string | null;
@@ -133,6 +137,12 @@ export class InternalOrder extends BaseEntity {
 
   @Column({ type: 'varchar', length: 500, nullable: true })
   notes: string | null;
+
+  // De qué documentos viene lo que lleva una devolución (RE): los consecutivos del pedido, la venta
+  // o la devolución de los que salió cada cosa. Una RE armada desde el cajón junta lo de varios, por
+  // eso es una lista. Vacía en todo lo que no es una RE.
+  @Column({ type: 'simple-array', nullable: true })
+  originNumbers: string[] | null;
 
   @Column({ type: 'timestamptz', nullable: true })
   cancelledAt: Date | null;

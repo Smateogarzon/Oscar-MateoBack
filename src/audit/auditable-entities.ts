@@ -26,6 +26,7 @@ import { RefundPayment } from '../graphql/sale-return/entities/refund-payment.en
 import { SaleReturn } from '../graphql/sale-return/entities/sale-return.entity.js';
 import { Sale } from '../graphql/sale/entities/sale.entity.js';
 import { Size } from '../graphql/size/entities/size.entity.js';
+import { StoreModelMinimum } from '../graphql/store-model-minimum/entities/store-model-minimum.entity.js';
 import { StorePaymentMethod } from '../graphql/store-payment-method/entities/store-payment-method.entity.js';
 import { UserCompanyRole } from '../graphql/user-company-role/entities/user-company-role.entity.js';
 import { UserLocationAccess } from '../graphql/user-location-access/entities/user-location-access.entity.js';
@@ -76,6 +77,7 @@ export const AUDITABLE_ENTITIES: ReadonlySet<Function> = new Set<Function>([
   Incident,
   InventoryReservation,
   InventoryLocation,
+  StoreModelMinimum,
 ]);
 
 // Nunca se guarda su valor real, así haya cambiado: ni en old_values ni en new_values.

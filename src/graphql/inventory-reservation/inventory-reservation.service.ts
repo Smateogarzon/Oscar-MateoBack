@@ -1,7 +1,7 @@
 import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Decimal } from 'decimal.js';
-import { EntityManager, Repository } from 'typeorm';
+import { EntityManager, In, Repository } from 'typeorm';
 import { InventoryBalanceService } from '../inventory-balance/inventory-balance.service.js';
 import { lockOrCreateInventoryBalance } from '../inventory-balance/lock-inventory-balance.js';
 import { InventoryLocation } from '../inventory-location/entities/inventory-location.entity.js';
@@ -13,6 +13,8 @@ import { reservedQuantity } from './reserved-quantity.js';
 export interface InventoryReservationFilter {
   productVariantId?: string;
   inventoryLocationId?: string;
+  /** Las sedes de quien consulta, o `null` si las ve todas (ver `visibleLocationIds`). */
+  locationIds?: string[] | null;
 }
 
 // Lo que hace falta para apartar algo, con `quantity` ya como Decimal: lo usa quien ya la tiene así
@@ -46,12 +48,16 @@ export class InventoryReservationService {
     private readonly balances: InventoryBalanceService,
   ) {}
 
+  // Acotado a las sedes de quien consulta: lo apartado en una bodega ajena no se le resta de nada.
   findAll(companyId: string, filter: InventoryReservationFilter = {}): Promise<InventoryReservation[]> {
+    const { locationIds } = filter;
+    if (locationIds?.length === 0) return Promise.resolve([]);
     return this.inventoryReservationRepository.find({
       where: {
         productVariant: { companyId },
         ...(filter.productVariantId && { productVariantId: filter.productVariantId }),
         ...(filter.inventoryLocationId && { inventoryLocationId: filter.inventoryLocationId }),
+        ...(locationIds && { inventoryLocation: { locationId: In(locationIds) } }),
       },
       // Con quién la tiene apartada: es lo que el otro vendedor necesita saber para ir a hablar con él.
       relations: { reservedByUser: true },
@@ -115,15 +121,19 @@ export class InventoryReservationService {
   // Deja lo apartado por un documento igual a `desired` (variante → cantidad), y nada más: lo que ya
   // no está en el documento se suelta y lo que cambió de cantidad se vuelve a apartar. Se llama cada
   // vez que cambian las líneas de una venta en curso, así lo reservado y lo que se va a cobrar nunca
-  // se separan. La bodega la elige `findStockLocationForSale` (la que más disponible tenga), salvo que
-  // venga `preferredLocationId`: una venta que cobra una orden de venta (SO) aparta en el STOCK de la
-  // tienda a la que el corredor ya trajo la mercancía, no en "la que más tenga".
+  // se separan.
+  //
+  // Todo se aparta en el cajón de la tienda que vende, y lo resuelve `findStockLocationForSale`, que
+  // es también quien rechaza lo que esa tienda no tiene. Antes se llamaba sin saber dónde se estaba
+  // vendiendo y entonces apartaba "donde más hubiera" —incluso en otra tienda—; hoy lo que no está
+  // en la tienda no se cobra, se pide a bodega (ver InventoryBalanceService.findStockLocationForSale).
   async syncForSource(
     manager: EntityManager,
     companyId: string,
     source: ReservationSourceInfo,
     desired: Map<string, Decimal>,
-    preferredLocationId?: string,
+    /** La tienda que vende: de su cajón sale todo lo de este documento. */
+    storeId: string,
   ): Promise<void> {
     const repo = manager.getRepository(InventoryReservation);
     const existing = await repo.findBy({ sourceType: source.sourceType, sourceId: source.sourceId });
@@ -147,9 +157,13 @@ export class InventoryReservationService {
     }
 
     for (const [productVariantId, quantity] of pending) {
-      const inventoryLocationId =
-        preferredLocationId ??
-        (await this.balances.findStockLocationForSale(manager, companyId, productVariantId, quantity));
+      const inventoryLocationId = await this.balances.findStockLocationForSale(
+        manager,
+        companyId,
+        productVariantId,
+        quantity,
+        storeId,
+      );
       await this.reserveInTransaction(manager, companyId, {
         productVariantId,
         inventoryLocationId,

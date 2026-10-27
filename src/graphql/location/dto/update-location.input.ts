@@ -1,5 +1,5 @@
 import { Field, InputType } from '@nestjs/graphql';
-import { IsEnum, IsOptional, IsString, MaxLength } from 'class-validator';
+import { IsBoolean, IsEnum, IsOptional, IsString, MaxLength } from 'class-validator';
 import { LocationType } from '../entities/location-type.enum.js';
 
 @InputType()
@@ -38,4 +38,11 @@ export class UpdateLocationInput {
   @IsString()
   @MaxLength(150)
   email?: string;
+
+  // La tienda no tiene corredores: vende directo en caja desde su propio stock (ver
+  // `Location.directSale`). Solo se acepta en una tienda; una bodega no vende.
+  @Field({ nullable: true })
+  @IsOptional()
+  @IsBoolean()
+  directSale?: boolean;
 }

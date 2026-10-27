@@ -207,10 +207,16 @@ function createService() {
   // Al cobrar, la venta suelta lo que ella misma tenía apartado y descuenta de esa bodega.
   const reservations = { findForSource: vi.fn().mockResolvedValue([]) };
 
+  // Cobrar una orden de venta la marca pagada, y lo que sale del mostrador se repone solo: las dos
+  // cosas son de InternalOrderService y se prueban allá. Faltaba en la lista y corría todas las
+  // dependencias siguientes un lugar.
+  const internalOrders = { markPaid: vi.fn(), restockStore: vi.fn(), broughtFromWarehouse: vi.fn().mockResolvedValue(new Map()) };
+
   const service = new SalePaymentService(
     paymentRepo as never,
     dataSource as never,
     sales as never,
+    internalOrders as never,
     cashSessions as never,
     returns as never,
     notifications as never,
@@ -220,6 +226,7 @@ function createService() {
   );
   return {
     service,
+    internalOrders,
     reservations,
     paymentRepo,
     txPaymentRepo,

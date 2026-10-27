@@ -1,4 +1,4 @@
-import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, EntityManager, In, Repository } from 'typeorm';
 import { assertActiveCompany } from '../../common/access/assert-active-company.js';
@@ -21,6 +21,16 @@ import { Location } from './entities/location.entity.js';
 
 // Todo se hace dentro de la empresa activa: una sede de otra empresa se responde igual que
 // una que no existe.
+
+// La venta directa es de una tienda: una bodega no atiende clientes ni tiene caja, así que
+// prendérsela no querría decir nada. Se dice en voz alta en vez de guardarlo en silencio y dejar un
+// dato que después nadie puede explicar.
+function assertDirectSaleShape(type: LocationType | undefined, directSale: boolean | undefined): void {
+  if (directSale && type === LocationType.WAREHOUSE) {
+    throw new BadRequestException('La venta directa en caja es de una tienda: una bodega no vende');
+  }
+}
+
 @Injectable()
 export class LocationService {
   constructor(
@@ -67,6 +77,7 @@ export class LocationService {
           resourceType: 'location',
         },
         async () => {
+          assertDirectSaleShape(input.type, input.directSale);
           const repo = manager.getRepository(Location);
           const location = await repo.save(repo.create({ ...input, companyId }));
 
@@ -104,6 +115,9 @@ export class LocationService {
       const location = await this.lockLocation(manager, companyId, id);
       const previousName = location.name;
       Object.assign(location, definedFields(input));
+      // Se comprueba sobre lo que queda, no sobre lo que llegó: prender la venta directa y cambiar
+      // el tipo a bodega en la misma operación tampoco pasa.
+      assertDirectSaleShape(location.type, location.directSale);
 
       const saved = await manager.getRepository(Location).save(location);
       if (saved.type !== LocationType.STORE || saved.name === previousName) return saved;
