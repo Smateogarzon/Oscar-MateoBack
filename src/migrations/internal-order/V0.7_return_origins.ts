@@ -8,11 +8,14 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
 // Es una columna de texto con los números separados por comas (`simple-array` de TypeORM): lo que se
 // guarda son los consecutivos que ya veía el usuario, no ids, porque lo que llega al cajón puede
 // venir de un pedido, de una venta o de la devolución de una venta.
-export class ReturnOrigins1791900000009 implements MigrationInterface {
-  name = 'ReturnOrigins1791900000009';
+export class ReturnOrigins1791900000024 implements MigrationInterface {
+  name = 'ReturnOrigins1791900000024';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    await queryRunner.query(`ALTER TABLE "internal_orders" ADD "originNumbers" text`);
+    // `IF NOT EXISTS` porque esta migración ya corrió con su número anterior (1791900000009, que la
+    // dejaba antes de la migración que reemplaza la tabla): donde ya corrió, la columna está puesta y
+    // volver a agregarla sin esto aborta el `migration:run`.
+    await queryRunner.query(`ALTER TABLE "internal_orders" ADD COLUMN IF NOT EXISTS "originNumbers" text`);
 
     // Las devoluciones que ya existen: la de un cambio sabe su origen por `relatedOrderId`.
     await queryRunner.query(`

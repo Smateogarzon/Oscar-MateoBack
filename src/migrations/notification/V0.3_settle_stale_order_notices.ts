@@ -52,8 +52,8 @@ const RUNNER_ENGAGED = list(
 // Solo toca los que nadie abrió (`readAt IS NULL`): los que sí se abrieron conservan su fecha.
 // No toca ORDER_CANCELLED (nace con la orden ya anulada y pide lo único que queda por hacer:
 // devolver a su sitio lo que bodega había separado).
-export class SettleStaleOrderNotices1791900000008 implements MigrationInterface {
-  name = 'SettleStaleOrderNotices1791900000008';
+export class SettleStaleOrderNotices1791900000060 implements MigrationInterface {
+  name = 'SettleStaleOrderNotices1791900000060';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
     // Los avisos de una orden que todavía existe: cada tipo, hasta el estado en que deja de pedir algo.
