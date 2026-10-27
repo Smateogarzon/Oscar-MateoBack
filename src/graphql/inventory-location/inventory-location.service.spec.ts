@@ -12,7 +12,7 @@ const claimKey = (sql: string) =>
   sql.includes('INSERT INTO "idempotency_keys"') ? [{ id: 'claim-1' }] : [];
 
 function createService() {
-  const repo = { find: vi.fn().mockResolvedValue([]), findOneBy: vi.fn() };
+  const repo = { find: vi.fn().mockResolvedValue([]), findOne: vi.fn() };
   const txInventoryLocationRepo = {
     create: vi.fn((value: unknown) => value),
     save: vi.fn(async (value: object) => ({ id: 'inv-loc-1', ...value })),
@@ -66,6 +66,7 @@ describe('InventoryLocationService', () => {
       expect(repo.find).toHaveBeenCalledWith({
         where: { companyId: COMPANY },
         order: { createdAt: 'ASC' },
+        relations: { custodianUser: true },
       });
     });
   });
@@ -73,7 +74,7 @@ describe('InventoryLocationService', () => {
   describe('findOne', () => {
     it('looks it up inside the company', async () => {
       const { service, repo } = createService();
-      repo.findOneBy.mockResolvedValue(null);
+      repo.findOne.mockResolvedValue(null);
 
       await expect(service.findOne(COMPANY, 'missing')).rejects.toThrow(NotFoundException);
     });
@@ -217,7 +218,7 @@ describe('InventoryLocationService', () => {
   describe('deactivate', () => {
     it('deactivates inside a transaction', async () => {
       const { service, repo, txInventoryLocationRepo, dataSource } = createService();
-      repo.findOneBy.mockResolvedValue({ id: 'inv-loc-1', status: RecordStatus.ACTIVE });
+      repo.findOne.mockResolvedValue({ id: 'inv-loc-1', status: RecordStatus.ACTIVE });
       txInventoryLocationRepo.findOne.mockResolvedValue({ id: 'inv-loc-1', status: RecordStatus.ACTIVE });
 
       const result = await service.deactivate(COMPANY, 'inv-loc-1');
@@ -228,7 +229,7 @@ describe('InventoryLocationService', () => {
 
     it('cannot reach one of another company', async () => {
       const { service, repo, dataSource } = createService();
-      repo.findOneBy.mockResolvedValue(null);
+      repo.findOne.mockResolvedValue(null);
 
       await expect(service.deactivate(COMPANY, 'missing')).rejects.toThrow(NotFoundException);
       expect(dataSource.transaction).not.toHaveBeenCalled();
@@ -238,7 +239,7 @@ describe('InventoryLocationService', () => {
   describe('activate', () => {
     it('puts it back in service inside a transaction', async () => {
       const { service, repo, txInventoryLocationRepo, dataSource } = createService();
-      repo.findOneBy.mockResolvedValue({ id: 'inv-loc-1', status: RecordStatus.INACTIVE });
+      repo.findOne.mockResolvedValue({ id: 'inv-loc-1', status: RecordStatus.INACTIVE });
       txInventoryLocationRepo.findOne.mockResolvedValue({ id: 'inv-loc-1', status: RecordStatus.INACTIVE });
 
       const result = await service.activate(COMPANY, 'inv-loc-1');

@@ -670,8 +670,11 @@ describe('PurchaseOrderService', () => {
 
       await service.ship(COMPANY, SUPPLIER, 'po-1', [{ itemId: 'item-1', quantity: '3' }]);
 
+      // Mandar de más deja además la novedad de esa línea (ver registerShipment), y la novedad tiene
+      // su propio aviso. Los dos van a compras y ninguno a bodega, que es lo que se está probando.
       expect(noticesSent(notifications)).toEqual([
         expect.objectContaining({ type: 'PURCHASE_ORDER_OVERAGE_PENDING', recipientIds: ['purchasing-1'] }),
+        expect.objectContaining({ type: 'PURCHASE_ORDER_INCIDENT', recipientIds: ['purchasing-1'] }),
       ]);
     });
 

@@ -4,24 +4,33 @@ import { buildNotificationText } from './notification-text.js';
 
 const params = { actorName: 'Camila Rojas', reference: 'VTA-000125' };
 
+// El prefijo del nombre dice de qué es el aviso, y de ahí sale su canal. PURCHASE_ORDER_ va antes
+// que ORDER_ para que una orden de compra no termine en Pedidos.
+const CHANNEL_OF_PREFIX: readonly (readonly [string, NotificationChannel])[] = [
+  ['DISCOUNT_', NotificationChannel.DISCOUNTS],
+  ['RETURN', NotificationChannel.RETURNS],
+  ['INVENTORY_', NotificationChannel.INVENTORY],
+  ['DISPLAY_', NotificationChannel.INVENTORY],
+  ['PURCHASE_ORDER_', NotificationChannel.PURCHASING],
+  ['ORDER_', NotificationChannel.ORDERS],
+];
+
 describe('CHANNEL_OF_TYPE', () => {
+  // Un tipo nuevo con un prefijo que no esté aquí sale `undefined` y rompe esto a propósito: o se
+  // llama como su familia, o hay que decir a qué canal pertenece.
   it('gives every type a channel, and the channel is the one its name says', () => {
     for (const type of Object.values(NotificationType)) {
-      const expected = type.startsWith('DISCOUNT_')
-        ? NotificationChannel.DISCOUNTS
-        : type.startsWith('INVENTORY_')
-          ? NotificationChannel.INVENTORY
-          : type.startsWith('PURCHASE_ORDER_')
-            ? NotificationChannel.PURCHASING
-            : NotificationChannel.RETURNS;
+      const expected = CHANNEL_OF_PREFIX.find(([prefix]) => type.startsWith(prefix))?.[1];
       expect(CHANNEL_OF_TYPE[type]).toBe(expected);
     }
   });
 });
 
 describe('buildNotificationText', () => {
-  // La existencia baja es un aviso del sistema, no de una persona: no lleva quién lo hizo (ver abajo).
-  const typesWithActor = Object.values(NotificationType).filter((type) => type !== NotificationType.INVENTORY_LOW_STOCK);
+  // Dos avisos no llevan quién lo hizo (cada uno tiene su prueba abajo): la existencia baja la ve el
+  // sistema, no una persona, y la orden lista le dice al corredor qué recoger y dónde, no quién la alistó.
+  const WITHOUT_ACTOR: readonly NotificationType[] = [NotificationType.INVENTORY_LOW_STOCK, NotificationType.ORDER_READY_FOR_RUNNER];
+  const typesWithActor = Object.values(NotificationType).filter((type) => !WITHOUT_ACTOR.includes(type));
 
   it.each(typesWithActor)('writes a title and a message for %s', (type) => {
     const { title, message } = buildNotificationText(type, params);
@@ -48,6 +57,15 @@ describe('buildNotificationText', () => {
 
     const out = buildNotificationText(NotificationType.INVENTORY_LOW_STOCK, { ...params, quantity: '0', outOfStock: true });
     expect(out.message).toContain('se agotó');
+  });
+
+  it('tells the runner which order to pick up and where, without naming who prepared it', () => {
+    const ready = buildNotificationText(NotificationType.ORDER_READY_FOR_RUNNER, { ...params, locationName: 'Bodega central' });
+
+    expect(ready.title.length).toBeGreaterThan(0);
+    expect(ready.message).toContain('VTA-000125');
+    expect(ready.message).toContain('Bodega central');
+    expect(ready.message).not.toContain('Camila Rojas');
   });
 
   it('says who asked and for which sale', () => {

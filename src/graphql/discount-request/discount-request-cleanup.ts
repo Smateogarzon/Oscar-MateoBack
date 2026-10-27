@@ -33,6 +33,9 @@ export async function clearDiscountRequestNotices(
   companyId: string,
   requests: DiscountRequest[],
   actorId: string,
+  /** Cuáles traían el aviso de "solicitud nueva", para quien ya les cambió el estado antes de llamar
+   * (ver `withdrawDiscountRequests`). Sin esto se mira el estado que cada una tenga ahora. */
+  pendingIds?: ReadonlySet<string>,
 ): Promise<void> {
   if (requests.length === 0) return;
 
@@ -42,7 +45,7 @@ export async function clearDiscountRequestNotices(
     PermissionCode.SALES_APPROVE_DISCOUNT,
   );
   for (const request of requests) {
-    if (request.status === DiscountRequestStatus.PENDING) {
+    if (pendingIds ? pendingIds.has(request.id) : request.status === DiscountRequestStatus.PENDING) {
       await notifications.markEntityRead(
         manager,
         NotificationEntityType.DISCOUNT_REQUEST,
@@ -81,6 +84,12 @@ export async function withdrawDiscountRequests(
   });
   if (requests.length === 0) return;
 
+  // Cuál aviso hay que apagar se decide ANTES de tocar el estado: el bucle deja todas en CANCELLED y
+  // después ya no se sabría cuáles tenían el aviso de "solicitud nueva" (solo lo tienen las PENDING).
+  const pendingIds = new Set(
+    requests.filter((request) => request.status === DiscountRequestStatus.PENDING).map((request) => request.id),
+  );
+
   const resolvedAt = new Date();
   for (const request of requests) {
     request.status = DiscountRequestStatus.CANCELLED;
@@ -89,5 +98,5 @@ export async function withdrawDiscountRequests(
     request.resolutionNotes = params.note;
   }
   await repo.save(requests);
-  await clearDiscountRequestNotices(manager, notifications, params.companyId, requests, params.actorId);
+  await clearDiscountRequestNotices(manager, notifications, params.companyId, requests, params.actorId, pendingIds);
 }
